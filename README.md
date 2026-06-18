@@ -106,6 +106,14 @@ python gradcam.py
 python patient_level_prediction.py
 ```
 
+## Labeling Threshold Ablation
+
+The blob count threshold for the automated labeling was selected via an ablation study over eight candidate values. A threshold of **5** yields the most balanced class distribution (~50% steatosis), minimizing reliance on class weighting alone.
+
+<p align="center">
+  <img src="results/label_analysis/threshold_ablation.png" width="85%" alt="Threshold Ablation Study"/>
+</p>
+
 ## Results
 
 The best fold model (Fold 1) exceeded the interim report targets (F1 >= 0.80, AUC >= 0.85).
@@ -122,6 +130,11 @@ The best fold model (Fold 1) exceeded the interim report targets (F1 >= 0.80, AU
 | F1-Score | 0.8546 |
 | AUC (ROC) | 0.9476 |
 
+<p align="center">
+  <img src="results/evaluation/confusion_matrix.png" width="58%" alt="Confusion Matrix"/>
+  <img src="results/evaluation/roc_curve.png" width="40%" alt="ROC Curve"/>
+</p>
+
 ### Cross-Validation (3 folds)
 
 | Fold | Accuracy | Precision | Recall | F1 |
@@ -133,7 +146,23 @@ The best fold model (Fold 1) exceeded the interim report targets (F1 >= 0.80, AU
 
 > The low recall in Fold 2 stems from its validation patients having a disproportionately low steatosis density. Folds 1 and 3 individually satisfy the F1 >= 0.80 target.
 
-Grad-CAM visualizations confirm that the model focuses on lipid vacuole-like morphological structures rather than background artifacts. All plots and metrics are in the `results/` folder.
+### Grad-CAM Interpretability
+
+Grad-CAM visualizations confirm that the model focuses on lipid vacuole-like morphological structures rather than background artifacts.
+
+<p align="center">
+  <img src="results/gradcam/gradcam_summary.png" width="85%" alt="Grad-CAM Summary"/>
+</p>
+
+### Patient-Level Aggregation
+
+Patch-level predictions are aggregated to the patient level via majority voting and mean probability.
+
+<p align="center">
+  <img src="results/patient_level/patient_level_results.png" width="85%" alt="Patient-Level Results"/>
+</p>
+
+All plots and metrics are available in the `results/` folder.
 
 ## Method Details
 
