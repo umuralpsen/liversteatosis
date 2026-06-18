@@ -1,0 +1,15 @@
+# Liver Steatosis Detection - Python dependencies
+# Python 3.9+ recommended
+
+torch>=2.0
+torchvision>=0.15
+numpy>=1.24
+scikit-learn>=1.2
+Pillow>=9.0
+opencv-python>=4.7
+matplotlib>=3.7
+
+# Whole-slide image (SVS) reading - required only for patch.py.
+# Note: openslide-python requires the OpenSlide binary library installed on the system.
+# On Windows, the binary can also be installed via "pip install openslide-bin".
+openslide-python>=1.3

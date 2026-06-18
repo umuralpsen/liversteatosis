@@ -1,0 +1,8 @@
+              precision    recall  f1-score   support
+
+      Normal     0.8345    0.9098    0.8705     20993
+   Steatosis     0.8981    0.8151    0.8546     20483
+
+    accuracy                         0.8630     41476
+   macro avg     0.8663    0.8624    0.8626     41476
+weighted avg     0.8659    0.8630    0.8627     41476

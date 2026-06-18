@@ -1,0 +1,80 @@
+{
+  "5": {
+    "total_patches": 7218,
+    "n_pred_normal": 4292,
+    "n_pred_steatosis": 2926,
+    "steatosis_ratio": 0.4054,
+    "mean_steatosis_prob": 0.4217,
+    "majority_vote": "Normal",
+    "prob_decision": "Normal",
+    "actual_steatosis_ratio": 0.4874,
+    "prob_std": 0.3308,
+    "prob_min": 0.0001,
+    "prob_max": 0.9996
+  },
+  "6": {
+    "total_patches": 8108,
+    "n_pred_normal": 7034,
+    "n_pred_steatosis": 1074,
+    "steatosis_ratio": 0.1325,
+    "mean_steatosis_prob": 0.1705,
+    "majority_vote": "Normal",
+    "prob_decision": "Normal",
+    "actual_steatosis_ratio": 0.2468,
+    "prob_std": 0.2535,
+    "prob_min": 0.0,
+    "prob_max": 0.9992
+  },
+  "4": {
+    "total_patches": 5735,
+    "n_pred_normal": 3338,
+    "n_pred_steatosis": 2397,
+    "steatosis_ratio": 0.418,
+    "mean_steatosis_prob": 0.4153,
+    "majority_vote": "Normal",
+    "prob_decision": "Normal",
+    "actual_steatosis_ratio": 0.4685,
+    "prob_std": 0.3902,
+    "prob_min": 0.0001,
+    "prob_max": 1.0
+  },
+  "2": {
+    "total_patches": 10434,
+    "n_pred_normal": 6031,
+    "n_pred_steatosis": 4403,
+    "steatosis_ratio": 0.422,
+    "mean_steatosis_prob": 0.4295,
+    "majority_vote": "Normal",
+    "prob_decision": "Normal",
+    "actual_steatosis_ratio": 0.4218,
+    "prob_std": 0.3989,
+    "prob_min": 0.0,
+    "prob_max": 1.0
+  },
+  "3": {
+    "total_patches": 7568,
+    "n_pred_normal": 1897,
+    "n_pred_steatosis": 5671,
+    "steatosis_ratio": 0.7493,
+    "mean_steatosis_prob": 0.7243,
+    "majority_vote": "Steatosis",
+    "prob_decision": "Steatosis",
+    "actual_steatosis_ratio": 0.7508,
+    "prob_std": 0.3337,
+    "prob_min": 0.0001,
+    "prob_max": 1.0
+  },
+  "1": {
+    "total_patches": 2413,
+    "n_pred_normal": 294,
+    "n_pred_steatosis": 2119,
+    "steatosis_ratio": 0.8782,
+    "mean_steatosis_prob": 0.8582,
+    "majority_vote": "Steatosis",
+    "prob_decision": "Steatosis",
+    "actual_steatosis_ratio": 0.9092,
+    "prob_std": 0.2785,
+    "prob_min": 0.0001,
+    "prob_max": 1.0
+  }
+}
