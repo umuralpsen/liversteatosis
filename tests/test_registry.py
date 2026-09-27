@@ -1,0 +1,232 @@
+import pytest
+from blobcount.config import default_config
+from blobcount.registry import RegistryError, load_registry, usable_for_training, excluded
+
+
+def test_loads_six_entries():
+    reg = load_registry()
+    assert len(reg) == 6
+    assert {s.id for s in reg} == {"1", "2", "3", "4", "5", "6"}
+
+
+def test_tcga_entries_carry_recovered_case_ids():
+    reg = {s.id: s for s in load_registry()}
+    assert reg["4"].source == "TCGA-LIHC"
+    assert reg["4"].source_case_id == "TCGA-2V-A95S"
+    assert reg["5"].source_case_id == "TCGA-DD-AAEH"
+    assert reg["6"].source_case_id == "TCGA-GJ-A6C0"
+
+
+def test_unknown_source_is_excluded_from_training():
+    reg = load_registry()
+    excluded_ids = {s.id for s in excluded(reg)}
+    assert excluded_ids == {"1", "2", "3"}
+
+
+def test_usable_set_is_non_empty():
+    assert len(usable_for_training(load_registry())) == 3
+
+
+def test_entry_without_licence_is_rejected(tmp_path):
+    bad = tmp_path / "manifest.yaml"
+    bad.write_text(
+        "specimens:\n"
+        "- id: X\n  source: local\n  source_case_id: X1\n  slide_path: x.svs\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(RegistryError, match="licence"):
+        load_registry(bad)
+
+
+def test_duplicate_ids_rejected(tmp_path):
+    bad = tmp_path / "manifest.yaml"
+    body = (
+        "specimens:\n"
+        "- id: X\n  source: local\n  source_case_id: A\n  licence: L\n  slide_path: a.svs\n"
+        "- id: X\n  source: local\n  source_case_id: B\n  licence: L\n  slide_path: b.svs\n"
+    )
+    bad.write_text(body, encoding="utf-8")
+    with pytest.raises(RegistryError, match="duplicate"):
+        load_registry(bad)
+
+
+def test_non_ascii_id_round_trips(tmp_path):
+    p = tmp_path / "manifest.yaml"
+    p.write_text(
+        "specimens:\n"
+        "- id: \"hasta-ğü-01\"\n  source: local\n  source_case_id: C\n"
+        "  licence: L\n  slide_path: c.svs\n",
+        encoding="utf-8",
+    )
+    assert load_registry(p)[0].id == "hasta-ğü-01"
+
+
+# The seven tests above are the brief's. What follows guards the rules they state
+# only indirectly: that the manifest ships with the package, that it describes
+# the slides actually on disk, and that exclusion follows the record rather than
+# a list of slide numbers.
+
+
+def _write_manifest(tmp_path, body):
+    manifest = tmp_path / "manifest.yaml"
+    manifest.write_text(body, encoding="utf-8")
+    return manifest
+
+
+def test_missing_required_field_is_rejected(tmp_path):
+    manifest = _write_manifest(
+        tmp_path,
+        "specimens:\n- id: X\n  source: local\n  licence: L\n",
+    )
+    with pytest.raises(RegistryError, match="missing required field 'slide_path'"):
+        load_registry(manifest)
+
+
+def test_manifest_that_is_not_a_mapping_is_rejected(tmp_path):
+    manifest = _write_manifest(tmp_path, "- just\n- a\n- list\n")
+    with pytest.raises(RegistryError, match="mapping at the top level"):
+        load_registry(manifest)
+
+
+def test_specimens_key_that_is_not_a_list_is_rejected(tmp_path):
+    manifest = _write_manifest(tmp_path, "specimens:\n  id: X\n")
+    with pytest.raises(RegistryError, match="must hold a list"):
+        load_registry(manifest)
+
+
+def test_missing_manifest_file_is_rejected(tmp_path):
+    with pytest.raises(RegistryError, match="manifest not found"):
+        load_registry(tmp_path / "absent.yaml")
+
+
+def test_unreadable_manifest_is_reported_as_a_registry_error(tmp_path):
+    manifest = _write_manifest(tmp_path, "specimens: [unclosed\n")
+    with pytest.raises(RegistryError, match="unreadable"):
+        load_registry(manifest)
+
+
+def test_unquoted_numeric_id_is_rejected(tmp_path):
+    manifest = _write_manifest(
+        tmp_path,
+        "specimens:\n- id: 7\n  source: local\n  source_case_id: A\n"
+        "  licence: L\n  slide_path: a.svs\n",
+    )
+    with pytest.raises(RegistryError, match="'id' must be a string"):
+        load_registry(manifest)
+
+
+def test_wrong_typed_measurement_is_rejected(tmp_path):
+    manifest = _write_manifest(
+        tmp_path,
+        "specimens:\n- id: X\n  source: local\n  source_case_id: A\n"
+        "  licence: L\n  mpp: quarter\n  slide_path: a.svs\n",
+    )
+    with pytest.raises(RegistryError, match="'mpp' must be a number"):
+        load_registry(manifest)
+
+
+def test_slide_path_resolves_against_the_manifest_directory(tmp_path):
+    manifest = _write_manifest(
+        tmp_path,
+        "specimens:\n- id: X\n  source: local\n  source_case_id: A\n"
+        "  licence: L\n  slide_path: slides/a.svs\n",
+    )
+    slide_path = load_registry(manifest)[0].slide_path
+    assert slide_path == tmp_path / "slides" / "a.svs"
+    assert slide_path.is_absolute()
+
+
+def test_manifest_location_comes_from_the_configuration_key(tmp_path):
+    manifest = _write_manifest(
+        tmp_path,
+        "specimens:\n- id: X\n  source: local\n  source_case_id: A\n"
+        "  licence: L\n  slide_path: a.svs\n",
+    )
+    default_config().set("paths.manifest", str(manifest))
+    assert [s.id for s in load_registry()] == ["X"]
+
+
+def test_exclusion_follows_the_record_and_not_the_slide_number(tmp_path):
+    manifest = _write_manifest(
+        tmp_path,
+        "specimens:\n"
+        "- id: '1'\n  source: TCGA-LIHC\n  source_case_id: C1\n"
+        "  licence: L\n  slide_path: a.svs\n"
+        "- id: '7'\n  source: unknown\n  slide_path: b.svs\n"
+        "- id: '9'\n  source: unknown\n  source_case_id: C9\n  slide_path: c.svs\n",
+    )
+    specimens = load_registry(manifest)
+    assert {s.id for s in usable_for_training(specimens)} == {"1"}
+    assert {s.id for s in excluded(specimens)} == {"7", "9"}
+
+
+def test_excluded_and_usable_partition_the_input(tmp_path):
+    specimens = load_registry()
+    assert len(usable_for_training(specimens)) + len(excluded(specimens)) == len(specimens)
+    assert not {s.id for s in usable_for_training(specimens)} & {s.id for s in excluded(specimens)}
+
+
+def test_a_case_id_without_a_licence_is_still_excluded(tmp_path):
+    manifest = _write_manifest(
+        tmp_path,
+        "specimens:\n- id: X\n  source: unknown\n  source_case_id: C\n  slide_path: a.svs\n",
+    )
+    assert excluded(load_registry(manifest))[0].id == "X"
+
+
+def test_entry_keys_outside_the_dataclass_are_ignored(tmp_path):
+    manifest = _write_manifest(
+        tmp_path,
+        "specimens:\n- id: X\n  source: unknown\n  slide_path: a.svs\n"
+        "  provenance_note: free text for a human reader\n",
+    )
+    assert load_registry(manifest)[0].id == "X"
+
+
+def test_shipped_manifest_measurements_keep_their_declared_types():
+    reg = {s.id: s for s in load_registry()}
+    assert reg["1"].mpp == 0.4990
+    assert reg["1"].objective == 20
+    assert reg["4"].mpp == 0.2527
+    assert reg["6"].mpp == 0.2485
+    for specimen in reg.values():
+        assert isinstance(specimen.mpp, float)
+        assert isinstance(specimen.objective, int)
+        assert isinstance(specimen.acquisition_date, str)
+        assert isinstance(specimen.label_source, str) or specimen.label_source is None
+
+
+def test_shipped_manifest_points_at_the_slides_on_disk():
+    for specimen in load_registry():
+        assert specimen.slide_path.is_file(), specimen.slide_path
+
+
+def test_shipped_manifest_records_the_measured_scanner_and_stain():
+    reg = {s.id: s for s in load_registry()}
+    assert reg["1"].scanner == "Aperio SS1352"
+    assert reg["2"].scanner == "Aperio SS1302"
+    assert reg["3"].scanner == "Aperio SS1302"
+    assert reg["4"].scanner == "Aperio SS1764CNTLR"
+    assert reg["5"].scanner == "Aperio SS1763CNTLR"
+    assert reg["6"].scanner == "Aperio SS1436CNTLR"
+    assert {s.stain for s in reg.values()} == {"H&E"}
+
+
+def test_shipped_manifest_records_the_acquisition_dates():
+    reg = {s.id: s for s in load_registry()}
+    assert reg["1"].acquisition_date == "2013-05-23"
+    assert reg["2"].acquisition_date == "2013-02-28"
+    assert reg["3"].acquisition_date == "2012-01-27"
+    assert reg["4"].acquisition_date == "2015-07-01"
+    assert reg["5"].acquisition_date == "2014-08-15"
+    assert reg["6"].acquisition_date == "2013-05-08"
+
+
+def test_shipped_manifest_gives_the_tcga_licence_and_ethics():
+    reg = {s.id: s for s in load_registry()}
+    for identifier in ("4", "5", "6"):
+        assert "dbGaP phs000178" in reg[identifier].licence
+        assert reg[identifier].ethics == "public, de-identified"
+    for identifier in ("1", "2", "3"):
+        assert reg[identifier].licence is None
+        assert reg[identifier].source_case_id is None

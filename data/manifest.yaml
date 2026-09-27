@@ -1,0 +1,145 @@
+# Dataset manifest for the liver steatosis pipeline.
+#
+# Provenance source: `aperio.Filename` and the rest of the Aperio metadata
+# embedded in each .svs, read with OpenSlide 1.4.3 on 2026-09-27. For slides 4 to
+# 6 that metadata still carried the TCGA aliquot name, which is where the case
+# ids below come from. For slides 1 to 3 the file name is a bare number matching
+# no cohort and no case, so their origin is unknown and is recorded as such.
+#
+# `aperio.Stain` is absent from all six files. The stain below is recorded as
+# H&E on the strength of the RGB brightfield acquisition, not read from metadata.
+#
+# `openslide.quickhash-1` for each slide, recorded so that a future match against
+# a public archive can be made without re-reading the files:
+#
+#   1.svs  39310f1127cf860cc85053d7a5182b3756d99d8ed88727bfa8cbc137bb076fdb
+#   2.svs  64c63b902c9e0a3e1efe2d68102ba401056e647cf1184b9a670f2704e53d5ce6
+#   3.svs  439e67585f39220e0e92f658eebcd43e07a9de4838a13f45116ef8e2b6529304
+#   4.svs  cc7e697a88f0e662f100476f223cb88fa024be990ead4bc6af8f6167d82e4da8
+#   5.svs  3a3e5d8b6a88d9c862de9115f2ae3eb940ced1ffca9b86a349a2e17298b39424
+#   6.svs  e612f3da3ddc300eed44cf1217bb845e8d4850fcccd7d68a59bf486d5becd319
+#
+# A specimen without `source_case_id` or without `licence` may not be used for
+# training. `blobcount.registry.usable_for_training` applies that rule to the
+# record, so slides 1 to 3 are cleared for pipeline smoke tests only. No
+# specimen here carries a human steatosis grade: the labels this pipeline trains
+# on are counted blobs, not an annotation from a pathologist.
+#
+# Entry keys outside the `Specimen` fields, `provenance_note` among them, are
+# carried for a human reader and are not modelled in code.
+
+specimens:
+  - id: "1"
+    source: unknown
+    source_case_id: null
+    scanner: "Aperio SS1352"
+    mpp: 0.4990
+    objective: 20
+    stain: "H&E"
+    acquisition_date: "2013-05-23"
+    label_source: null
+    label_detail: null
+    licence: null
+    ethics: null
+    slide_path: "1.svs"
+    provenance_note: >-
+      Renamed to an integer during the graduation project. The original identifier
+      is not recoverable from the file: aperio.Filename is 54008, a bare number
+      that matches no cohort and no case id, and aperio.DSR ID is gleason, a
+      scanner configuration string that resolves to no case. No licence, no ethics
+      approval, and no source are recoverable either, so this slide is unprovenanced
+      and is cleared for pipeline smoke tests only.
+
+  - id: "2"
+    source: unknown
+    source_case_id: null
+    scanner: "Aperio SS1302"
+    mpp: 0.2520
+    objective: 40
+    stain: "H&E"
+    acquisition_date: "2013-02-28"
+    label_source: null
+    label_detail: null
+    licence: null
+    ethics: null
+    slide_path: "2.svs"
+    provenance_note: >-
+      Renamed to an integer during the graduation project. The original identifier
+      is not recoverable from the file: aperio.Filename is 36394, a bare number
+      that matches no cohort and no case id, and aperio.DSR ID is ap1546-dsr, which
+      is unresolved and shared with slide 3, so it identifies no single case. This
+      slide is unprovenanced and is cleared for pipeline smoke tests only.
+
+  - id: "3"
+    source: unknown
+    source_case_id: null
+    scanner: "Aperio SS1302"
+    mpp: 0.2520
+    objective: 40
+    stain: "H&E"
+    acquisition_date: "2012-01-27"
+    label_source: null
+    label_detail: null
+    licence: null
+    ethics: null
+    slide_path: "3.svs"
+    provenance_note: >-
+      Renamed to an integer during the graduation project. The original identifier
+      is not recoverable from the file: aperio.Filename is 32235, a bare number
+      that matches no cohort and no case id, and aperio.DSR ID is ap1546-dsr, which
+      is unresolved and shared with slide 2, so it identifies no single case. This
+      slide is unprovenanced and is cleared for pipeline smoke tests only.
+
+  - id: "4"
+    source: TCGA-LIHC
+    source_case_id: TCGA-2V-A95S
+    scanner: "Aperio SS1764CNTLR"
+    mpp: 0.2527
+    objective: 40
+    stain: "H&E"
+    acquisition_date: "2015-07-01"
+    label_source: null
+    label_detail: "TCGA-LIHC carries no steatosis grade; no pathologist annotation is available"
+    licence: "TCGA data use certification (dbGaP phs000178)"
+    ethics: "public, de-identified"
+    slide_path: "4.svs"
+    provenance_note: >-
+      aperio.Filename is TCGA-2V-A95S-01Z-00-DX1, which names the aliquot and its
+      parent case. Access to the underlying clinical and biospecimen data is
+      controlled and requires the dbGaP data use certification.
+
+  - id: "5"
+    source: TCGA-LIHC
+    source_case_id: TCGA-DD-AAEH
+    scanner: "Aperio SS1763CNTLR"
+    mpp: 0.2525
+    objective: 40
+    stain: "H&E"
+    acquisition_date: "2014-08-15"
+    label_source: null
+    label_detail: "TCGA-LIHC carries no steatosis grade; no pathologist annotation is available"
+    licence: "TCGA data use certification (dbGaP phs000178)"
+    ethics: "public, de-identified"
+    slide_path: "5.svs"
+    provenance_note: >-
+      aperio.Filename is TCGA-DD-AAEH-01Z-00-DX1, which names the aliquot and its
+      parent case. Access to the underlying clinical and biospecimen data is
+      controlled and requires the dbGaP data use certification.
+
+  - id: "6"
+    source: TCGA-LIHC
+    source_case_id: TCGA-GJ-A6C0
+    scanner: "Aperio SS1436CNTLR"
+    mpp: 0.2485
+    objective: 40
+    stain: "H&E"
+    acquisition_date: "2013-05-08"
+    label_source: null
+    label_detail: "TCGA-LIHC carries no steatosis grade; no pathologist annotation is available"
+    licence: "TCGA data use certification (dbGaP phs000178)"
+    ethics: "public, de-identified"
+    slide_path: "6.svs"
+    provenance_note: >-
+      aperio.Filename is TCGA-GJ-A6C0-01Z-00-DX1, which names the aliquot and its
+      parent case. Access to the underlying clinical and biospecimen data is
+      controlled and requires the dbGaP data use certification.
