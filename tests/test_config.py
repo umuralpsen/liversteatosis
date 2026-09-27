@@ -10,6 +10,7 @@ from blobcount.config import (
     ConfigError,
     _find_project_root,
     _iter_keys,
+    _reset_default_config,
     default_config,
     get_device,
     load,
@@ -21,10 +22,10 @@ from blobcount.config import (
 _KEY_READ = re.compile(r"""\.(?:get|path)\(\s*["']([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+)["']""")
 
 # Every declared key that no module under blobcount/ reads yet. This task ships
-# the loader only, so the 44 consumer keys arrive with later tasks. A key that
-# gains a reader fails the scan and must be deleted from this set. A key listed
-# here that loses its reader while it stays listed is not caught, so this set has
-# to shrink to empty before the branch merges; the plan's final gate checks that.
+# the loader only, so the 44 consumer keys arrive with later tasks. The equality
+# below pins both directions, so this set cannot mask a regression in either
+# one: a key that gains a reader is named as a stale entry to delete, and a key
+# that loses one is named as an unread declared key.
 _KEYS_WITHOUT_READER: frozenset[str] = frozenset(
     {
         "ablation.thresholds",
@@ -299,3 +300,19 @@ def test_default_config_is_mutated_by_this_test():
 def test_default_config_mutation_does_not_leak_into_the_next_test():
     assert default_config().get("project.name") == load().get("project.name")
     assert default_config().get("project.seed") == load().get("project.seed")
+
+
+# The pair above only fails when pytest runs it in definition order; under a
+# random-order plugin the leak check would pass vacuously. This test drives the
+# reset hook itself, so the guard holds in any order and in isolation.
+
+
+def test_reset_hook_rebuilds_the_default_config_after_a_mutation():
+    mutated = "mutated-by-an-earlier-test"
+    default_config().set("project.name", mutated)
+    assert default_config().get("project.name") == mutated
+
+    _reset_default_config()
+
+    assert default_config().get("project.name") == load().get("project.name")
+    assert default_config().get("project.name") != mutated
