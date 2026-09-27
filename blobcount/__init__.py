@@ -15,17 +15,35 @@ from blobcount.registry import (
     load_registry,
     usable_for_training,
 )
+from blobcount.slides import (
+    SlideError,
+    SlideInfo,
+    iter_coords,
+    iter_coords_from_config,
+    open_info,
+    open_info_from_config,
+    plan_resolution,
+    read_mpp,
+)
 
 __all__ = [
     "Config",
     "ConfigError",
     "RegistryError",
+    "SlideError",
+    "SlideInfo",
     "Specimen",
     "default_config",
     "excluded",
     "get_device",
+    "iter_coords",
+    "iter_coords_from_config",
     "load",
     "load_registry",
+    "open_info",
+    "open_info_from_config",
+    "plan_resolution",
+    "read_mpp",
     "set_seed",
     "usable_for_training",
 ]
