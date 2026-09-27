@@ -1,3 +1,6 @@
+import re
+
+import openslide
 import pytest
 from blobcount.config import default_config
 from blobcount.registry import RegistryError, load_registry, usable_for_training, excluded
@@ -63,14 +66,44 @@ def test_non_ascii_id_round_trips(tmp_path):
 
 # The seven tests above are the brief's. What follows guards the rules they state
 # only indirectly: that the manifest ships with the package, that it describes
-# the slides actually on disk, and that exclusion follows the record rather than
-# a list of slide numbers.
+# the slides actually on disk, that the header's own claims still match the
+# files, that exclusion follows the record rather than a list of slide numbers,
+# and that a malformed record is refused loudly instead of quietly dropped.
 
 
 def _write_manifest(tmp_path, body):
     manifest = tmp_path / "manifest.yaml"
     manifest.write_text(body, encoding="utf-8")
     return manifest
+
+
+def _skip_without_slides():
+    """Skip rather than fail where the slide images are absent.
+
+    `.gitignore` holds `data/` and `*.svs`, so the images are out of the repository
+    on purpose and a fresh clone has the manifest but no slides. A test that opens
+    a slide is meaningful only where the slides are staged, and failing on a clone
+    that was never given 30 GB of WSI would be a false alarm about the manifest.
+    """
+    manifest = default_config().path("paths.manifest")
+    if not any(manifest.parent.glob("*.svs")):
+        pytest.skip(
+            f"no .svs beside {manifest}: the slides are git-ignored by design, "
+            f"so a fresh clone carries the manifest and no image files"
+        )
+
+
+_QUICKHASH_LINE = re.compile(r"^#\s+(\S+\.svs)\s+([0-9a-f]{64})$")
+
+
+def _recorded_quickhashes():
+    manifest = default_config().path("paths.manifest")
+    recorded = {}
+    for line in manifest.read_text(encoding="utf-8").splitlines():
+        match = _QUICKHASH_LINE.match(line)
+        if match is not None:
+            recorded[match.group(1)] = match.group(2)
+    return recorded
 
 
 def test_missing_required_field_is_rejected(tmp_path):
@@ -164,6 +197,9 @@ def test_excluded_and_usable_partition_the_input(tmp_path):
     specimens = load_registry()
     assert len(usable_for_training(specimens)) + len(excluded(specimens)) == len(specimens)
     assert not {s.id for s in usable_for_training(specimens)} & {s.id for s in excluded(specimens)}
+    assert {s.id for s in usable_for_training(specimens)} | {s.id for s in excluded(specimens)} == {
+        s.id for s in specimens
+    }
 
 
 def test_a_case_id_without_a_licence_is_still_excluded(tmp_path):
@@ -174,7 +210,7 @@ def test_a_case_id_without_a_licence_is_still_excluded(tmp_path):
     assert excluded(load_registry(manifest))[0].id == "X"
 
 
-def test_entry_keys_outside_the_dataclass_are_ignored(tmp_path):
+def test_the_reader_only_note_key_is_dropped_and_the_entry_still_loads(tmp_path):
     manifest = _write_manifest(
         tmp_path,
         "specimens:\n- id: X\n  source: unknown\n  slide_path: a.svs\n"
@@ -186,9 +222,14 @@ def test_entry_keys_outside_the_dataclass_are_ignored(tmp_path):
 def test_shipped_manifest_measurements_keep_their_declared_types():
     reg = {s.id: s for s in load_registry()}
     assert reg["1"].mpp == 0.4990
-    assert reg["1"].objective == 20
+    assert reg["2"].mpp == 0.2520
+    assert reg["3"].mpp == 0.2520
     assert reg["4"].mpp == 0.2527
+    assert reg["5"].mpp == 0.2525
     assert reg["6"].mpp == 0.2485
+    assert reg["1"].objective == 20
+    for identifier in ("2", "3", "4", "5", "6"):
+        assert reg[identifier].objective == 40
     for specimen in reg.values():
         assert isinstance(specimen.mpp, float)
         assert isinstance(specimen.objective, int)
@@ -197,11 +238,26 @@ def test_shipped_manifest_measurements_keep_their_declared_types():
 
 
 def test_shipped_manifest_points_at_the_slides_on_disk():
+    _skip_without_slides()
     for specimen in load_registry():
         assert specimen.slide_path.is_file(), specimen.slide_path
 
 
-def test_shipped_manifest_records_the_measured_scanner_and_stain():
+def test_manifest_header_quickhashes_match_the_slide_files():
+    _skip_without_slides()
+    slides = {specimen.slide_path.name: specimen.slide_path for specimen in load_registry()}
+    recorded = _recorded_quickhashes()
+    assert sorted(recorded) == sorted(slides), (
+        "the manifest header must record one quickhash line per slide, shaped "
+        f"'#   <file>.svs  <64 hex characters>'; parsed {sorted(recorded)}, "
+        f"the manifest names {sorted(slides)}"
+    )
+    for name, digest in sorted(recorded.items()):
+        with openslide.OpenSlide(str(slides[name])) as opened:
+            assert opened.properties["openslide.quickhash-1"] == digest, name
+
+
+def test_shipped_manifest_records_the_scanner_and_the_inferred_stain():
     reg = {s.id: s for s in load_registry()}
     assert reg["1"].scanner == "Aperio SS1352"
     assert reg["2"].scanner == "Aperio SS1302"
@@ -230,3 +286,57 @@ def test_shipped_manifest_gives_the_tcga_licence_and_ethics():
     for identifier in ("1", "2", "3"):
         assert reg[identifier].licence is None
         assert reg[identifier].source_case_id is None
+
+
+def test_misspelled_entry_key_is_rejected(tmp_path):
+    manifest = _write_manifest(
+        tmp_path,
+        "specimens:\n- id: X\n  source: local\n  source_case_id: C\n"
+        "  licence: L\n  mpp_x: 0.499\n  slide_path: a.svs\n",
+    )
+    with pytest.raises(RegistryError, match="mpp_x"):
+        load_registry(manifest)
+
+
+def test_extra_unknown_entry_key_is_rejected(tmp_path):
+    manifest = _write_manifest(
+        tmp_path,
+        "specimens:\n- id: X\n  source: local\n  source_case_id: C\n"
+        "  licence: L\n  mpp: 0.499\n  magnification: 40\n  slide_path: a.svs\n",
+    )
+    with pytest.raises(RegistryError, match="magnification"):
+        load_registry(manifest)
+
+
+@pytest.mark.parametrize("field", ["licence", "source_case_id"])
+def test_whitespace_only_provenance_field_keeps_the_specimen_excluded(tmp_path, field):
+    manifest = _write_manifest(
+        tmp_path,
+        "specimens:\n- id: X\n  source: unknown\n"
+        f'  source_case_id: "C"\n  licence: "L"\n  {field}: "   "\n  slide_path: a.svs\n',
+    )
+    specimens = load_registry(manifest)
+    assert getattr(specimens[0], field) is None
+    assert [s.id for s in excluded(specimens)] == ["X"]
+    assert usable_for_training(specimens) == []
+
+
+def test_whitespace_only_licence_with_a_named_source_is_rejected(tmp_path):
+    manifest = _write_manifest(
+        tmp_path,
+        'specimens:\n- id: X\n  source: local\n  source_case_id: C\n'
+        '  licence: "   "\n  slide_path: a.svs\n',
+    )
+    with pytest.raises(RegistryError, match="no licence"):
+        load_registry(manifest)
+
+
+def test_one_malformed_row_fails_the_whole_manifest(tmp_path):
+    manifest = _write_manifest(
+        tmp_path,
+        "specimens:\n"
+        "- id: GOOD\n  source: local\n  source_case_id: C\n  licence: L\n  slide_path: a.svs\n"
+        "- id: BAD\n  source: local\n  slide_path: b.svs\n",
+    )
+    with pytest.raises(RegistryError, match="'BAD'"):
+        load_registry(manifest)

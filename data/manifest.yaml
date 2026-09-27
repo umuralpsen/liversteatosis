@@ -1,16 +1,46 @@
 # Dataset manifest for the liver steatosis pipeline.
 #
-# Provenance source: `aperio.Filename` and the rest of the Aperio metadata
-# embedded in each .svs, read with OpenSlide 1.4.3 on 2026-09-27. For slides 4 to
-# 6 that metadata still carried the TCGA aliquot name, which is where the case
-# ids below come from. For slides 1 to 3 the file name is a bare number matching
-# no cohort and no case, so their origin is unknown and is recorded as such.
+# Provenance source: the metadata embedded in each .svs, read with OpenSlide
+# 1.4.3 on 2026-09-27. For slides 4 to 6 that metadata still carried the TCGA
+# aliquot name in `aperio.Filename`, which is where the case ids below come from.
+# For slides 1 to 3 the file name is a bare number matching no cohort and no
+# case, so their origin is unknown and is recorded as such.
 #
-# `aperio.Stain` is absent from all six files. The stain below is recorded as
-# H&E on the strength of the RGB brightfield acquisition, not read from metadata.
+# Field provenance, one line per `Specimen` field. "read" means copied from the
+# file, "derived" means computed from a metadata key, "inferred" is a human
+# reading, "assigned" is a project decision with no metadata behind it:
+#
+#   id               the manifest key itself                      assigned
+#   source           read off aperio.Filename                     inferred
+#   source_case_id   parent case of the aperio.Filename aliquot   derived
+#   scanner          "Aperio " + aperio.ScanScope ID              derived
+#   mpp              aperio.MPP                                  read
+#   objective        openslide.objective-power                   read
+#   stain            none available, see the note below           inferred
+#   acquisition_date aperio.Date, MM/DD/YY rewritten as ISO       read
+#   label_source     no pathologist annotation exists             assigned
+#   label_detail     no pathologist annotation exists             assigned
+#   licence          none for 1 to 3, dbGaP phs000178 for 4 to 6  assigned
+#   ethics           none for 1 to 3, public and de-identified    assigned
+#   slide_path       name inside this directory                   assigned
+#
+# Two fields are not read and must not be cited as read. `scanner` is built by
+# hand: `aperio.Scanner` is absent from all six files, so the vendor prefix is
+# added to `aperio.ScanScope ID` by a person. `stain` has no metadata field at
+# all: `aperio.Stain` is absent from all six files and no other property names
+# a stain, so H&E is recorded on the strength of the RGB brightfield
+# acquisition, which is a human judgement and not a metadata value.
+#
+# `objective` is read from `openslide.objective-power`, which is the objective
+# power field. `aperio.AppMag` carries the same value on all six files (20, 40,
+# 40, 40, 40, 40) and is the fallback if `openslide.objective-power` is ever
+# absent; the two were compared on every file and agree.
 #
 # `openslide.quickhash-1` for each slide, recorded so that a future match against
-# a public archive can be made without re-reading the files:
+# a public archive can be made without re-reading the files. The line format is
+# load-bearing: `tests/test_registry.py` parses these six lines out of this
+# comment and checks each against the file it names, so keep one file name and
+# one 64-character hash per line, at the start of the line.
 #
 #   1.svs  39310f1127cf860cc85053d7a5182b3756d99d8ed88727bfa8cbc137bb076fdb
 #   2.svs  64c63b902c9e0a3e1efe2d68102ba401056e647cf1184b9a670f2704e53d5ce6
@@ -19,14 +49,21 @@
 #   5.svs  3a3e5d8b6a88d9c862de9115f2ae3eb940ced1ffca9b86a349a2e17298b39424
 #   6.svs  e612f3da3ddc300eed44cf1217bb845e8d4850fcccd7d68a59bf486d5becd319
 #
-# A specimen without `source_case_id` or without `licence` may not be used for
-# training. `blobcount.registry.usable_for_training` applies that rule to the
-# record, so slides 1 to 3 are cleared for pipeline smoke tests only. No
-# specimen here carries a human steatosis grade: the labels this pipeline trains
-# on are counted blobs, not an annotation from a pathologist.
+# The load-time escape hatch is the exact string `unknown` in `source`. An entry
+# that names a real source and carries no `licence` is rejected by
+# `blobcount.registry.load_registry`, which is why slides 1 to 3 are written
+# this way. A specimen without `source_case_id` or without `licence` may not be
+# used for training: `blobcount.registry.usable_for_training` applies that rule
+# to the record, so slides 1 to 3 are cleared for pipeline smoke tests only. The
+# whole load is all-or-nothing, so a manifest that names a real source with no
+# licence is not partly loaded; fix the row rather than the loader. No specimen
+# here carries a human steatosis grade: the labels this pipeline trains on are
+# counted blobs, not an annotation from a pathologist.
 #
-# Entry keys outside the `Specimen` fields, `provenance_note` among them, are
-# carried for a human reader and are not modelled in code.
+# `provenance_note` is the one entry key outside the `Specimen` fields. It is
+# carried for a human reader and is not modelled in code. Any other key outside
+# the fields is rejected at load time, so a typo in a provenance field cannot
+# pass as an unknown measurement.
 
 specimens:
   - id: "1"
