@@ -468,8 +468,21 @@ working pipeline and a collaborator exist.
   either recovering the provenance of the other three slides or obtaining
   additional TCGA-LIHC diagnostic slides, which are openly available and would
   need only manifest entries.
-- **O2.** Does the 10 GB `Colab_Proje.zip` contain a larger cohort, and is that
-  cohort the one the project history refers to?
+- **O2.** ~~Does the 10 GB `Colab_Proje.zip` contain a larger cohort?~~
+  **Resolved, 2026-09-27.** The archive central directory was read without
+  extracting. It holds 41,476 PNG files and 6 Python files, 9.45 GB total, laid
+  out as `dataset/train/normal` (20,993) and `dataset/train/steatosis` (20,483)
+  plus the six stage scripts. The per-slide, per-class counts are identical to
+  the labeled dataset already on disk. It is a backup of the graduation
+  project's labeled output, not raw patches and not a larger cohort. The
+  project has never had more than six specimens.
+
+  Consequence: additional data must be acquired. The cheapest source is
+  TCGA-LIHC, of which 365 diagnostic slides are openly available and which
+  already supplies three of the six current specimens; adding more requires
+  only manifest entries and download, not new annotation. GTEx liver (109) and
+  DLiPath (304 donors) remain the priority sources for Phase A because they
+  carry steatosis-relevant labels, which TCGA-LIHC does not.
 - **O3.** Is the target clinical question steatosis detection (binary) or
   steatosis grading (ordinal, Kleiner 0-3)? The literature is largely graded,
   and grading is the more useful and more defensible target, but it requires
