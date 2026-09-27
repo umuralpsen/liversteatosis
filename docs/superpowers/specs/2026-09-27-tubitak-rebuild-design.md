@@ -439,11 +439,35 @@ working pipeline and a collaborator exist.
 
 ## 8. Open questions
 
-- **O1.** Can the provenance of the six existing slides be recovered? They were
-  renamed to `1.svs` through `6.svs` and the original identifiers are not
-  recorded anywhere in the repository. If they are TCGA-LIHC slides, the case
-  IDs may be recoverable from file-level metadata or from the 10 GB archive.
-  This determines whether Phase B has any reportable result at all.
+- **O1.** ~~Can the provenance of the six existing slides be recovered?~~
+  **Partially resolved, 2026-09-27.** The Aperio metadata was read directly from
+  the six files. Three carry TCGA slide barcodes in `aperio.Filename` and were
+  confirmed against the GDC API as TCGA-LIHC (liver hepatocellular carcinoma):
+
+  | Local file | TCGA case | Scanner | Date |
+  |------------|-----------|---------|------|
+  | `4.svs` | TCGA-2V-A95S | Aperio SS1764CNTLR | 2015-07-01 |
+  | `5.svs` | TCGA-DD-AAEH | Aperio SS1763CNTLR | 2014-08-15 |
+  | `6.svs` | TCGA-GJ-A6C0 | Aperio SS1436CNTLR | 2013-05-08 |
+
+  The remaining three (`1.svs`, `2.svs`, `3.svs`) have numeric-only
+  `aperio.Filename` values (54008, 36394, 32235), were scanned on Aperio SS1352
+  and SS1302 between 2012 and 2013, and carry reporting-template identifiers
+  `gleason` and `ap1546-dsr` rather than TCGA barcodes. They are from a
+  different source and their origin is not yet established. Slide 1's
+  `gleason` template is a prostate reporting protocol and is unexplained; the
+  tissue morphology is consistent with liver, so it is most likely a scanner
+  configuration default rather than a statement about the specimen. Each
+  slide's `openslide.quickhash-1` value is recorded in the manifest so that a
+  future match against a public archive does not require re-reading the files.
+
+  Consequence: Phase B has three usable specimens with full provenance and
+  three without. Leave-one-out over the three usable specimens gives three
+  folds, each training on two specimens. That is a pipeline verification, not a
+  result, and the README must say so. A meaningful Phase B number requires
+  either recovering the provenance of the other three slides or obtaining
+  additional TCGA-LIHC diagnostic slides, which are openly available and would
+  need only manifest entries.
 - **O2.** Does the 10 GB `Colab_Proje.zip` contain a larger cohort, and is that
   cohort the one the project history refers to?
 - **O3.** Is the target clinical question steatosis detection (binary) or
