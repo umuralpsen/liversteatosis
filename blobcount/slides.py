@@ -29,9 +29,9 @@ defect being corrected, and it would do so silently.
 resolution a patch was actually extracted at is auditable from the patch record alone.
 
 `read_mpp` reads `openslide.mpp-x`, then `aperio.MPP`, and raises `SlideError` naming
-the slide and both properties when neither is present. It never returns a default: an
-assumed scale is the error being corrected here, and inventing one would reinstate it
-undetectably.
+the slide and both properties when neither yields a number. It never returns a
+default: an assumed scale is the error being corrected here, and inventing one would
+reinstate it undetectably.
 
 `plan_resolution` and `iter_coords` are pure and take no `Config`, so the arithmetic is
 testable without a slide. The two `*_from_config` adapters are the boundary that reads
@@ -39,11 +39,33 @@ testable without a slide. The two `*_from_config` adapters are the boundary that
 that key access in one place per value instead of spreading it across the call sites
 that assemble a run.
 
-`iter_coords` walks the output-pixel grid and stops a row early at the right and bottom
-edges, mirroring the `x + PATCH_SIZE > w or y + PATCH_SIZE > h` guard in `patch.py`, so
-no partial tile is ever produced. A coordinate on that grid is in output pixels while
-`read_px` is in source pixels, so a caller hands `read_region` a location scaled by
-`read_px / patch_size`; that conversion belongs to the reading task, not here.
+`open_info` takes an optional `expected_mpp`, which is the scale the dataset manifest
+records for the slide. The manifest documents that value as transcribed `aperio.MPP`
+and this module reads the slide's own metadata, so the two are one claim read twice,
+and a divergence means the provenance record no longer describes the file feeding the
+patient-level split. It is cross-checked and not trusted: both present and differing by
+more than `MPP_TOLERANCE` relative raises, because everywhere else in this package a
+disagreement is an error rather than a preference.
+
+**Coordinates are in source pixels.** `iter_coords` yields level-0 read origins, which
+is the unit `slide.read_region` takes for its location, so a caller passes the pair
+through untransformed. Its `patch_size` and `step_size` arguments are in source pixels
+*at `info.level`*, and `info.width` and `info.height` are the level-0 dimensions, so
+the fit test compares `patch_size * info.level_downsample` against them. At level 0
+the factor is 1.0 and the two units coincide, which is why the mixing that produced
+the earlier defect was invisible here and not on the slides: `2.svs` at `read_px = 508`
+was walked with a 256 px step over level-0 bounds, giving 22,842 tiles where the output
+grid has 5,734, and an origin 122,936 px across a 62,350 px slide. `1.svs` has
+`read_px = 257`, a ratio of 1.004, so it read as correct throughout. The conversion from
+the config's output-pixel `patch_size` and `step_size` into the source-space tile and
+step happens once, in `iter_coords_from_config`, by the factor `read_px / patch_size`.
+
+Two deliberate deviations from the brief's formula, both recorded because a reader
+comparing code to brief should not have to guess. `read_px` is `max(1, round(...))`
+rather than a bare `round(...)`: a coarse slide and a small patch can otherwise round
+the read to zero pixels, and a read of nothing is not a coarser patch. The step in
+`iter_coords_from_config` carries the same floor, for the same reason. Neither guard is
+reachable from the brief's own test values.
 
 Declared interface, in `__all__` order:
 
@@ -61,8 +83,17 @@ Declared interface, in `__all__` order:
         achieved_mpp: float
     iter_coords(info: SlideInfo, patch_size: int, step_size: int) -> Iterator[tuple[int, int]]
     iter_coords_from_config(info: SlideInfo, cfg: Config | None = None) -> Iterator[tuple[int, int]]
-    open_info(path: Path, slide_id: str, target_mpp: float, patch_size: int) -> SlideInfo
-    open_info_from_config(path: Path, slide_id: str, cfg: Config | None = None) -> SlideInfo
+    open_info(
+        path: Path,
+        slide_id: str,
+        target_mpp: float,
+        patch_size: int,
+        *,
+        expected_mpp: float | None = None,
+    ) -> SlideInfo
+    open_info_from_config(
+        path: Path, slide_id: str, cfg: Config | None = None, *, expected_mpp: float | None = None
+    ) -> SlideInfo
     plan_resolution(
         slide_mpp: float, target_mpp: float, patch_size: int, level_downsamples: Sequence[float]
     ) -> tuple[int, float, int, float]
@@ -92,6 +123,13 @@ __all__ = [
 MPP_PROPERTY = "openslide.mpp-x"
 FALLBACK_MPP_PROPERTY = "aperio.MPP"
 OBJECTIVE_PROPERTIES = ("openslide.objective-power", "aperio.AppMag")
+
+# The relative distance the slide's own scale and the manifest's may differ by before
+# the two are treated as describing different tissue. Aperio writes `aperio.MPP` to
+# four decimals and OpenSlide derives `openslide.mpp-x` from the same value, so the
+# two agree exactly on every slide read so far; 1e-3 is loose enough to survive a
+# transcription of either, and far tighter than the ~2% a resolution budget allows.
+MPP_TOLERANCE = 1e-3
 
 
 class SlideError(Exception):
@@ -131,24 +169,33 @@ def read_mpp(slide: Any) -> float:
     """Return the microns-per-pixel scale declared by an open slide.
 
     `openslide.mpp-x` is read first and `aperio.MPP` second, because the first is
-    the standardised property and the second is the Aperio-specific one. A value
-    that is present but not a number is as unusable as a missing one, so it raises
-    `SlideError` naming the property that failed rather than falling through to a
-    guess. When neither property is present `SlideError` names the slide and both
-    properties looked for. No default scale is ever returned.
+    the standardised property and the second is the Aperio-specific one. A property
+    that is present but not a number is as unusable as a missing one, and the next
+    property is tried rather than the read abandoned: a corrupt value in the
+    standard key says nothing about the vendor key, and the alternative loses a
+    scale that is sitting right there. When no property yields a number
+    `SlideError` names the slide and both properties looked for, and says which of
+    them were present. No default scale is ever returned.
     """
     properties = slide.properties
+    unreadable: list[str] = []
     for name in (MPP_PROPERTY, FALLBACK_MPP_PROPERTY):
         if name not in properties:
             continue
         try:
             return float(properties[name])
-        except (TypeError, ValueError) as error:
-            raise SlideError(
-                f"slide {_slide_name(slide)} declares resolution property {name!r} as "
-                f"{properties[name]!r}, which is not a number, so no scale can be read "
-                f"from it"
-            ) from error
+        except (TypeError, ValueError):
+            unreadable.append(name)
+    if unreadable:
+        raise SlideError(
+            f"slide {_slide_name(slide)} declares resolution propert"
+            f"{'y' if len(unreadable) == 1 else 'ies'} "
+            f"{', '.join(repr(name) for name in unreadable)} as "
+            f"{', '.join(repr(properties[name]) for name in unreadable)}, which "
+            f"{'is' if len(unreadable) == 1 else 'are'} not a number, so no scale can be "
+            f"read from it; {MPP_PROPERTY!r} and {FALLBACK_MPP_PROPERTY!r} are the only "
+            f"resolution properties read, and neither yielded a number"
+        )
     raise SlideError(
         f"slide {_slide_name(slide)} carries no resolution metadata: neither "
         f"{MPP_PROPERTY!r} nor {FALLBACK_MPP_PROPERTY!r} is present, so the "
@@ -193,14 +240,24 @@ def plan_resolution(
     held at 1 or more, because a coarse slide and a small patch can otherwise round
     to a read of nothing.
 
-    `SlideError` is raised for a pyramid with no level 0, a non-positive scale or a
-    non-positive patch size, since each of those makes the plan undefined rather
-    than merely inaccurate.
+    `SlideError` is raised for a pyramid with no level 0, a level 0 whose downsample
+    is not 1.0, a non-positive scale or a non-positive patch size, since each of those
+    makes the plan undefined rather than merely inaccurate. The level-0 check is not
+    pedantry: `read_px` and the tile grid are both expressed against the level-0
+    dimensions, so a slide whose first level is already downsampled would be planned
+    and walked against coordinates that are not its own.
     """
     if not level_downsamples:
         raise SlideError(
             "cannot plan a resolution: the pyramid holds no levels, and level 0 is "
             "the full-resolution image every plan is expressed against"
+        )
+    if level_downsamples[0] != 1.0:
+        raise SlideError(
+            f"cannot plan a resolution: level 0 must be the full-resolution image, so "
+            f"its downsample must be exactly 1.0, got {level_downsamples[0]!r}; every "
+            f"read size and grid coordinate in this module is expressed against the "
+            f"level-0 dimensions, which that pyramid does not have"
         )
     for name, value in (("slide_mpp", slide_mpp), ("target_mpp", target_mpp), ("patch_size", patch_size)):
         if value <= 0:
@@ -216,7 +273,43 @@ def plan_resolution(
     return level, level_downsample, read_px, achieved_mpp
 
 
-def open_info(path: Path, slide_id: str, target_mpp: float, patch_size: int) -> SlideInfo:
+def _check_declared_mpp(slide_id: str, mpp: float, expected_mpp: float | None) -> None:
+    """Fail closed when the manifest and the slide disagree about the scale.
+
+    `data/manifest.yaml` records `mpp` as transcribed `aperio.MPP` and this module
+    reads the slide's own metadata, so the two are the same claim read twice, and a
+    divergence means the provenance record no longer describes the file that feeds
+    the patient-level split. The slide is not silently preferred over the manifest
+    either: the manifest is the record the split is computed from, and a slide that
+    was replaced under a fixed name is exactly the case a silent preference hides.
+    `expected_mpp` of `None` is the manifest carrying no value, which is a fact about
+    the record and not a contradiction, so it is not checked.
+    """
+    if expected_mpp is None:
+        return
+    if abs(expected_mpp) == 0.0:
+        raise SlideError(
+            f"slide {slide_id} declares {mpp!r} um/px but the manifest records 0.0 "
+            f"um/px, which cannot be compared relatively; fix the manifest row"
+        )
+    divergence = abs(mpp - expected_mpp) / abs(expected_mpp)
+    if divergence > MPP_TOLERANCE:
+        raise SlideError(
+            f"slide {slide_id} declares {mpp!r} um/px but the manifest records "
+            f"{expected_mpp!r} um/px, a relative difference of {divergence:.2%} against a "
+            f"{MPP_TOLERANCE:.1e} tolerance, so the manifest no longer describes this "
+            f"file; fix the manifest rather than the reader"
+        )
+
+
+def open_info(
+    path: Path,
+    slide_id: str,
+    target_mpp: float,
+    patch_size: int,
+    *,
+    expected_mpp: float | None = None,
+) -> SlideInfo:
     """Open a slide, read its metadata, and plan the read that hits `target_mpp`.
 
     `path` is opened read-only and closed before this returns: reading metadata is
@@ -224,8 +317,14 @@ def open_info(path: Path, slide_id: str, target_mpp: float, patch_size: int) -> 
     slide itself. The dimensions are the level-0 dimensions, and `level` is
     expressed against them.
 
+    `expected_mpp` is optional and defaults to `None`, which is the manifest
+    recording no scale for the slide; when it is given it is the `Specimen.mpp` the
+    dataset manifest carries, and it is cross-checked against the slide's own
+    metadata rather than preferred to it. See `_check_declared_mpp`.
+
     `SlideError` is raised for a slide that will not open, for one that declares no
-    resolution, and for a pyramid that cannot be planned against.
+    resolution, for one whose declared resolution contradicts `expected_mpp`, and
+    for a pyramid that cannot be planned against.
     """
     import openslide
 
@@ -237,6 +336,7 @@ def open_info(path: Path, slide_id: str, target_mpp: float, patch_size: int) -> 
 
     with slide:
         mpp = read_mpp(slide)
+        _check_declared_mpp(slide_id, mpp, expected_mpp)
         objective = _read_objective(slide)
         width, height = slide.dimensions
         level, level_downsample, read_px, achieved_mpp = plan_resolution(
@@ -257,46 +357,94 @@ def open_info(path: Path, slide_id: str, target_mpp: float, patch_size: int) -> 
     )
 
 
-def iter_coords(info: SlideInfo, patch_size: int, step_size: int) -> Iterator[tuple[int, int]]:
-    """Yield `(x, y)` patch origins in row-major order, dropping partial tiles.
+def _starts(limit: int, extent: float, stride: float) -> Iterator[int]:
+    """Yield the tile starts spaced by `stride` whose `extent` still fits in `limit`.
 
-    A tile is yielded only when the whole `patch_size` window fits, so the trailing
-    strip on the right and bottom edges of the slide is dropped rather than read as
-    a smaller tile, which is the same rule `patch.py` applied and the reason a
-    partial tile never reaches the disk. A `step_size` below `patch_size` overlaps
-    neighbours, which is the point of the setting. Coordinates are in output pixels
-    at the target resolution; the caller scales them by `info.read_px / patch_size`
-    before passing them to a source-pixel read.
+    The starts are level-0 coordinates and `limit` is a level-0 dimension, while
+    `extent` and `stride` arrive in source pixels at some level above 0. Walking by
+    index and rounding the product rather than by a float `range` step keeps every
+    yielded coordinate an `int`, which matters because these become pixel offsets and
+    file names.
+    """
+    if extent > limit:
+        return
+    for index in range(int((limit - extent) // stride) + 1):
+        yield round(index * stride)
+
+
+def iter_coords(info: SlideInfo, patch_size: int, step_size: int) -> Iterator[tuple[int, int]]:
+    """Yield `(x, y)` read origins in row-major order, dropping partial tiles.
+
+    Every number here is a source pixel. `patch_size` and `step_size` are the tile
+    width and the stride **at `info.level`**, so the reading task passes `info.read_px`
+    and the configured step converted by `read_px / patch_size`; the yielded pair is a
+    level-0 coordinate, which is what `slide.read_region` takes for its location, so a
+    caller hands it over untransformed.
+
+    `info.width` and `info.height` are the level-0 dimensions and a tile read at
+    `info.level` covers `patch_size * info.level_downsample` of them, so the fit test
+    carries that factor. At level 0 it is 1.0 and the source and output units coincide;
+    above it they do not, and a tile bounded as if they did runs off the edge of the
+    slide, where `read_region` returns transparent black rather than raising.
+
+    A tile is yielded only when the whole window fits, so the trailing strip on the
+    right and bottom edges is dropped rather than read as a smaller tile, which is the
+    rule `patch.py` applied and the reason a partial tile never reaches the disk. A
+    `step_size` below `patch_size` overlaps neighbours, which is the point of the
+    setting.
     """
     for name, value in (("patch_size", patch_size), ("step_size", step_size)):
         if value <= 0:
             raise SlideError(f"cannot walk a slide grid: {name} must be positive, got {value!r}")
 
-    for y in range(0, info.height, step_size):
-        if y + patch_size > info.height:
-            break
-        for x in range(0, info.width, step_size):
-            if x + patch_size > info.width:
-                break
+    extent = patch_size * info.level_downsample
+    stride = step_size * info.level_downsample
+    for y in _starts(info.height, extent, stride):
+        for x in _starts(info.width, extent, stride):
             yield x, y
 
 
-def open_info_from_config(path: Path, slide_id: str, cfg: Config | None = None) -> SlideInfo:
-    """Plan a read for `path` using the configured target resolution and patch size."""
+def open_info_from_config(
+    path: Path,
+    slide_id: str,
+    cfg: Config | None = None,
+    *,
+    expected_mpp: float | None = None,
+) -> SlideInfo:
+    """Plan a read for `path` using the configured target resolution and patch size.
+
+    `expected_mpp` is passed through to `open_info` unchanged; see that function for
+    what it cross-checks.
+    """
     active = default_config() if cfg is None else cfg
     return open_info(
         Path(path),
         slide_id,
         target_mpp=float(active.get("extraction.target_mpp")),
         patch_size=int(active.get("extraction.patch_size")),
+        expected_mpp=expected_mpp,
     )
 
 
 def iter_coords_from_config(info: SlideInfo, cfg: Config | None = None) -> Iterator[tuple[int, int]]:
-    """Walk `info` using the configured patch size and step."""
+    """Walk `info` using the configured patch size and step, in source coordinates.
+
+    `extraction.patch_size` and `extraction.step_size` are expressed in output pixels
+    at `extraction.target_mpp` and `iter_coords` is expressed in source pixels at
+    `info.level`, so this is the one place the two grids meet: the tile becomes
+    `info.read_px`, which is what the read actually takes, and the step is scaled by
+    `info.read_px / patch_size`. Passing either through unscaled is the defect this
+    module exists to correct, so the conversion is here and nowhere else.
+
+    The scaled step is held at 1 or more, for the same reason `read_px` is: a fine
+    configured step and a fine slide can otherwise round to no movement at all, which
+    would read the same patch repeatedly.
+    """
     active = default_config() if cfg is None else cfg
+    patch_size = int(active.get("extraction.patch_size"))
+    step_size = int(active.get("extraction.step_size"))
     return iter_coords(
         info,
-        patch_size=int(active.get("extraction.patch_size")),
-        step_size=int(active.get("extraction.step_size")),
+        info.read_px,
+        max(1, round(step_size * info.read_px / patch_size)),
     )
