@@ -572,7 +572,7 @@ git commit -m "feat: add resolution planning that normalizes field of view acros
   - `blobcount.extract.tissue_gray_threshold(patch: np.ndarray) -> float` — the 5th percentile of the patch's grayscale, the background level
   - `blobcount.extract.is_tissue(patch: np.ndarray, threshold: float, gray_max: float) -> bool`
   - `blobcount.extract.read_patch(slide, info: SlideInfo, x: int, y: int) -> np.ndarray | None` — `x` and `y` are **level-0 source pixels**, exactly as yielded by `iter_coords`; `None` when the read returns fewer than `read_px` pixels on either axis
-  - `blobcount.extract.extract_slide(specimen: Specimen, out_dir: Path, cfg: Config) -> ExtractionStats`
+  - `blobcount.extract.extract_slide(specimen: Specimen, out_dir: Path, cfg: Config, rows: list[dict]) -> ExtractionStats` — `rows` is a required out-parameter, not optional. The pinned return type carries counts only, so without it the index rows cannot reach the caller and an extraction that writes patches with no index row cannot be written by accident. `rows` is filled with one dict per accepted patch, keyed by `INDEX_COLUMNS`.
   - `blobcount.extract.prepare_output(out_dir: Path) -> None` — deletes and recreates the directory; used by extraction and, later, by labeling
   - `blobcount.extract.ExtractionStats` — frozen dataclass: `slide_id: str`, `patches_written: int`, `tissue_rejected: int`, `read_failures: int`, `skipped_blank: bool`
   - `blobcount.extract.write_index(rows: Sequence[dict], path: Path) -> None` — CSV with header `patch_id,slide_id,x,y,mpp,tissue_gray`
@@ -1555,6 +1555,14 @@ Add `Colab_Proje.zip` explicitly with a comment recording that it is 10.1 GB and
 is a graduation-project archive whose contents were inspected on 2026-09-27 and
 found to contain no larger cohort, so that it cannot be committed by accident
 even if the `*.zip` rule is ever removed.
+
+Carry `.pytest-tmp/` forward from the rule Task 4 added, rather than rewriting
+the file from this task's own template. Task 4's `project_scratch` fixture creates
+a per-test `tempfile.mkdtemp` tree inside the checkout, because the brief's
+`test_extraction_clears_output_directory` hands `prepare_output` a path and
+`prepare_output` refuses any target not strictly below the project root — so the
+scratch tree has to live inside the checkout for that test to exercise the real
+guard. The rule is already committed; this step only has to not drop it.
 
 - [ ] **Step 7: Verify the configuration still loads and the registry still validates**
 
