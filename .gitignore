@@ -38,3 +38,7 @@ desktop.ini
 
 # Superpowers SDD scratch workspace (ledger, briefs, review packages)
 .superpowers/
+
+# Test scratch trees: prepare_output refuses a target outside the project root, so
+# the tests that exercise it place their output inside the checkout
+.pytest-tmp/

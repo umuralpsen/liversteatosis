@@ -1,10 +1,19 @@
+import shutil
+import tempfile
 from collections import namedtuple
 from collections.abc import Iterator
+from pathlib import Path
 
 import numpy as np
 import pytest
 
-from blobcount.config import _reset_default_config
+from blobcount.config import PROJECT_ROOT, _reset_default_config
+
+# The scratch root inside the checkout. `prepare_output` refuses a target that is not
+# strictly below the project root, so a test that exercises the real guard cannot use
+# pytest's basetemp, which lives outside the project. The directory is git-ignored and
+# removed after each test.
+PROJECT_SCRATCH = PROJECT_ROOT / ".pytest-tmp"
 
 SyntheticPatch = namedtuple("SyntheticPatch", "array disc_centres disc_radius")
 
@@ -40,8 +49,27 @@ def synthetic_patch() -> SyntheticPatch:
 
 
 @pytest.fixture
-def tmp_output_tree(tmp_path):
-    """A `tmp_path` with the `patches/` and `labels/` output subdirectories."""
-    (tmp_path / "patches").mkdir()
-    (tmp_path / "labels").mkdir()
-    return tmp_path
+def tmp_output_tree(project_scratch):
+    """A `project_scratch` with the `patches/` and `labels/` output subdirectories."""
+    (project_scratch / "patches").mkdir()
+    (project_scratch / "labels").mkdir()
+    return project_scratch
+
+
+@pytest.fixture
+def project_scratch() -> Iterator[Path]:
+    """A fresh directory inside the project root, removed when the test ends.
+
+    `prepare_output` refuses to delete anything that is not strictly below the project
+    root, because the patch directory it is handed comes from a hand-edited
+    `paths.patches` and `--force` deletes it. A test that calls the real `prepare_output`
+    therefore has to place its output inside the checkout rather than in pytest's
+    basetemp, which is outside it. The name is `tempfile.mkdtemp`'s, not the test's,
+    because a test node name carries characters that are not valid in a path.
+    """
+    PROJECT_SCRATCH.mkdir(exist_ok=True)
+    scratch = Path(tempfile.mkdtemp(dir=PROJECT_SCRATCH))
+    try:
+        yield scratch
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)

@@ -4,31 +4,33 @@ import importlib.util
 import sys
 from pathlib import Path
 
-import cv2
 import numpy as np
 import pytest
 import yaml
-from PIL import Image
 
-from blobcount.config import DEFAULT_CONFIG_PATH, load
+from blobcount.config import DEFAULT_CONFIG_PATH, PROJECT_ROOT, load
 from blobcount.extract import (
+    INDEX_COLUMNS,
+    TISSUE_PERCENTILE,
     ExtractionStats,
+    OutputPathError,
     extract_slide,
     is_tissue,
     patches_dir,
     prepare_output,
     read_patch,
+    summarise_tissue_gray,
     tissue_gray_threshold,
     write_index,
 )
 from blobcount.registry import load_registry
 from blobcount.slides import SlideError, iter_coords_from_config, open_info_from_config
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PATCH_SIZE = 256
 TISSUE_BACKGROUND = 180
 TISSUE_DISC = 255
 DISC_RADIUS = 12
+GRAY_MAX = 235
 
 # The plan the real 40x slides get: 0.252 um/px read for a 0.5 um/px target over a
 # 256 px patch, which is 508 source pixels. Every fixture plans its read from this
@@ -41,8 +43,25 @@ FAKE_GRID = ((0, 0), (508, 0), (1016, 0), (0, 508), (508, 508), (1016, 508),
              (0, 1016), (508, 1016), (1016, 1016))
 
 
+def _pil():
+    """Return the PIL `Image` module, skipping the test when it will not import.
+
+    Neither `PIL` nor `cv2` is imported at module scope here, for the reason
+    `blobcount.extract.read_patch` imports `cv2` inside the read: both are native
+    wheels, and a module-scope import turns one absent wheel into a collection error
+    for every test in this file, including the ones that touch no image at all. A skip
+    from inside a helper costs the tests that need the image, which is the honest
+    price.
+    """
+    return pytest.importorskip(
+        "PIL.Image",
+        reason="Pillow cannot be imported, so no region can be built or no PNG written",
+    )
+
+
 def _tissue_region(size, background=TISSUE_BACKGROUND, disc=TISSUE_DISC):
     """An RGBA region shaped like a patch of tissue: a gray field, one white disc."""
+    Image = _pil()
     rows, columns = np.mgrid[0 : size[1], 0 : size[0]]
     array = np.full((size[1], size[0], 4), background, dtype=np.uint8)
     array[..., 3] = 255
@@ -53,6 +72,7 @@ def _tissue_region(size, background=TISSUE_BACKGROUND, disc=TISSUE_DISC):
 
 def _flat_region(size, value):
     """An RGBA region of one gray value, fully opaque."""
+    Image = _pil()
     array = np.full((size[1], size[0], 4), value, dtype=np.uint8)
     array[..., 3] = 255
     return Image.fromarray(array)
@@ -65,6 +85,7 @@ def _gradient_region(size):
     50th near 127, so a run records a different background level for each and the
     configured percentile becomes observable in the index rather than assumed.
     """
+    Image = _pil()
     width = size[0]
     row = (np.arange(width) * 250 // (width - 1)).astype(np.uint8)
     array = np.repeat(row[np.newaxis, :, np.newaxis], size[1], axis=0).repeat(3, axis=2)
@@ -73,6 +94,7 @@ def _gradient_region(size):
 
 def _transparent_region(size):
     """The region OpenSlide hands back for a read that starts outside the slide."""
+    Image = _pil()
     return Image.fromarray(np.zeros((size[1], size[0], 4), dtype=np.uint8))
 
 
@@ -96,7 +118,7 @@ class FakeSlide:
             "aperio.MPP": str(mpp),
             "openslide.objective-power": "40",
         }
-        self.regions: dict[tuple[int, int], Image.Image] = {}
+        self.regions: dict[tuple[int, int], object] = {}
         self.reads: list[tuple[tuple[int, int], int, tuple[int, int]]] = []
         self._default = default
 
@@ -194,17 +216,68 @@ def test_index_round_trips_non_ascii_slide_id(tmp_path):
 
 
 def test_extraction_clears_output_directory(tmp_output_tree):
+    from blobcount.extract import prepare_output
     stale = tmp_output_tree / "patches" / "stale.png"
     stale.write_bytes(b"x")
     prepare_output(tmp_output_tree / "patches")
     assert not stale.exists()
 
 
-def test_prepare_output_creates_a_directory_that_does_not_exist(tmp_path):
-    target = tmp_path / "patches"
+def test_prepare_output_creates_a_directory_that_does_not_exist(project_scratch):
+    target = project_scratch / "patches"
     prepare_output(target)
     assert target.is_dir()
     assert list(target.iterdir()) == []
+
+
+def test_prepare_output_refuses_the_project_root():
+    # `paths.patches: .` in a hand-edited config, and `--force` on it. The repository,
+    # the manifest and the staged slides are all under here and none of them come back.
+    with pytest.raises(OutputPathError, match="project root"):
+        prepare_output(PROJECT_ROOT)
+    assert (PROJECT_ROOT / "blobcount" / "extract.py").is_file()
+    assert (PROJECT_ROOT / "configs" / "default.yaml").is_file()
+
+
+def test_prepare_output_refuses_a_directory_that_holds_the_slides(project_scratch):
+    slides = project_scratch / "data" / "slides"
+    slides.mkdir(parents=True)
+    (slides / "2.svs").write_bytes(b"x")
+    with pytest.raises(OutputPathError, match="slides") as refused:
+        prepare_output(project_scratch / "data", protected=[slides])
+    assert "destroy the source data" in str(refused.value)
+    assert (slides / "2.svs").read_bytes() == b"x"
+
+
+def test_prepare_output_refuses_a_target_outside_the_project_root(tmp_path):
+    outside = tmp_path / "patches"
+    outside.mkdir()
+    (outside / "stale.png").write_bytes(b"x")
+    with pytest.raises(OutputPathError, match="not strictly below"):
+        prepare_output(outside)
+    assert (outside / "stale.png").read_bytes() == b"x"
+
+
+def test_prepare_output_refuses_a_sibling_that_shares_the_root_prefix():
+    # `...Masaüstü\Proje-backup` starts with `...Masaüstü\Proje` and is a different
+    # directory. A string-prefix containment test would call it inside the project.
+    sibling = Path(f"{PROJECT_ROOT}-backup")
+    assert sibling.name == f"{PROJECT_ROOT.name}-backup"
+    with pytest.raises(OutputPathError, match="not strictly below"):
+        prepare_output(sibling)
+
+
+def test_prepare_output_refuses_a_target_reached_through_a_dot_dot(project_scratch):
+    # `..` is collapsed before the comparison, so climbing from the scratch tree out
+    # to the project's own parent is not inside the project. `protected` is empty so
+    # that this is the containment rule refusing and not the ancestor rule, which
+    # would otherwise fire first for a target at the project's parent.
+    (project_scratch / "dataset").mkdir()
+    escaped = project_scratch / "dataset" / ".." / ".." / ".." / ".."
+    assert escaped.resolve() == PROJECT_ROOT.parent
+    with pytest.raises(OutputPathError, match="not strictly below"):
+        prepare_output(escaped, protected=[])
+    assert PROJECT_ROOT.is_dir()
 
 
 def test_index_header_is_pinned(tmp_path):
@@ -224,25 +297,15 @@ def test_index_preserves_a_slide_id_carrying_csv_punctuation(tmp_path):
                           "mpp": "0.5", "tissue_gray": "181.0"}]
 
 
-def test_a_pure_black_patch_passes_is_tissue():
-    # Why the transparency check in read_patch is not optional. A read that starts
-    # outside the slide converts to this, and this passes the tissue test, so a
-    # coordinate error would write black tiles that are then counted and labelled.
-    black = np.zeros((256, 256, 3), dtype=np.uint8)
-    assert is_tissue(black, tissue_gray_threshold(black), 235)
-
-
 def test_a_transparent_read_becomes_a_patch_that_is_tissue():
+    # Why the transparency check in read_patch is not optional. A read that starts
+    # outside the slide comes back as this, and this passes the tissue test, so a
+    # coordinate error would write black tiles that are then counted and labelled.
     transparent = np.zeros((256, 256, 4), dtype=np.uint8)
     assert not transparent[..., 3].any()
-    rgb = np.ascontiguousarray(transparent[..., :3])
-    assert np.array_equal(rgb, np.zeros((256, 256, 3), dtype=np.uint8))
-    assert is_tissue(rgb, tissue_gray_threshold(rgb), 235)
-
-
-def test_tissue_gray_threshold_is_the_5th_percentile():
-    ramp = np.tile(np.arange(256, dtype=np.uint8), (256, 1))[:, :, None].repeat(3, axis=2)
-    assert tissue_gray_threshold(ramp) == pytest.approx(np.percentile(ramp.mean(axis=2), 5))
+    black = np.ascontiguousarray(transparent[..., :3])
+    assert np.array_equal(black, np.zeros((256, 256, 3), dtype=np.uint8))
+    assert is_tissue(black, tissue_gray_threshold(black), GRAY_MAX)
 
 
 def test_tissue_gray_threshold_honours_a_percentile():
@@ -258,36 +321,51 @@ def test_tissue_gray_threshold_is_total_on_a_constant_image():
         assert tissue_gray_threshold(patch) == pytest.approx(float(value))
 
 
+def test_the_default_percentile_constant_is_the_configured_key():
+    # The docstring of `tissue_gray_threshold` says its default is the configured
+    # `extraction.tissue_percentile`. That is a claim about two facts in two files, so
+    # it is asserted here rather than left to the reader: change the key and this
+    # fails until the constant follows it.
+    assert TISSUE_PERCENTILE == float(load().get("extraction.tissue_percentile"))
+
+
 def test_is_tissue_rejects_a_field_above_gray_max():
     patch = np.full((256, 256, 3), 200, dtype=np.uint8)
     assert not is_tissue(patch, 200.0, 199.0)
 
 
-def test_is_tissue_reduces_to_the_mean_test_on_a_constant_patch():
-    # The second condition cannot reject a uniform patch. `threshold` is a 5th
-    # percentile of this patch's own grayscale and the minimum is the smallest value
-    # of the same set, so the minimum is never above the threshold and the margin is
-    # always satisfied. A uniform field below gray_max is therefore accepted, which is
-    # the shape the second condition exists to reject. Pinned here because it is a
-    # property of the rule as specified, so a change to it should be visible in the
-    # diff rather than discovered on a slide.
-    for value in range(0, 256, 8):
-        patch = np.full((256, 256, 3), value, dtype=np.uint8)
-        assert is_tissue(patch, tissue_gray_threshold(patch), 235) == (value < 235)
+def test_is_tissue_is_the_mean_test_alone():
+    # The sample, so the claim is reproducible: 200 patches of 64x64x3 drawn from
+    # `numpy.random.default_rng(2026)` in four bands whose means straddle `gray_max`
+    # from both sides, plus every constant field from 0 to 255 in steps of 8. Each is
+    # compared against `mean < 235` computed here, which is the whole rule. The
+    # straddle is asserted rather than assumed, because a sample entirely below the
+    # threshold would pass this test without ever reaching the clause under test.
+    rng = np.random.default_rng(2026)
+    patches = [
+        rng.integers(low, high, size=(64, 64, 3), dtype=np.uint8)
+        for low, high in ((150, 200), (200, 226), (226, 240), (240, 256))
+        for _ in range(50)
+    ]
+    patches += [np.full((64, 64, 3), value, dtype=np.uint8) for value in range(0, 256, 8)]
+    for patch in patches:
+        assert is_tissue(patch, tissue_gray_threshold(patch), GRAY_MAX) == (
+            patch.mean(axis=2).mean() < GRAY_MAX
+        )
+    means = [patch.mean(axis=2).mean() for patch in patches]
+    assert len(patches) == 232
+    assert sum(1 for value in means if value < GRAY_MAX) == 180
+    assert sum(1 for value in means if value >= GRAY_MAX) == 52
+    assert sum(1 for value in means if 230.0 < value < 240.0) == 51
 
 
-def test_is_tissue_reduces_to_the_mean_test_on_textured_patches():
-    rng = np.random.default_rng(11)
-    for _ in range(50):
-        patch = rng.integers(0, 256, size=(64, 64, 3), dtype=np.uint8)
-        mean = patch.mean(axis=2).mean()
-        assert is_tissue(patch, tissue_gray_threshold(patch), 235) == (mean < 235)
-
-
-def test_a_40x_slide_is_planned_as_508_source_pixels_for_a_256_patch():
-    info = _plan(load())
-    assert (info.read_px, info.level, info.level_downsample) == (508, 0, 1.0)
-    assert info.achieved_mpp == pytest.approx(0.5002, abs=5e-4)
+def test_is_tissue_accepts_a_uniform_faint_field__known_gap():
+    # The filter has no background-rejection behaviour and its sensitivity is
+    # unmeasured: a field of one value holds no structure at all and is accepted,
+    # because the only test is its mean against `gray_max`. Delete this test in the
+    # same commit that gives the filter a structure test.
+    faint = np.full((256, 256, 3), 200, dtype=np.uint8)
+    assert is_tissue(faint, tissue_gray_threshold(faint), GRAY_MAX)
 
 
 def test_read_patch_passes_the_origin_and_level_through_untransformed(monkeypatch):
@@ -311,6 +389,9 @@ def test_read_patch_honours_an_overridden_patch_size(monkeypatch):
 
 
 def test_read_patch_resizes_with_area_interpolation(monkeypatch):
+    cv2 = pytest.importorskip("cv2", reason="opencv cannot be imported, so the read "
+                                "cannot be resized and no patch can be produced")
+    Image = _pil()
     slide = _install_fake_slide(monkeypatch, FakeSlide())
     info = _plan(load())
     source = np.full((info.read_px, info.read_px, 3), 200, dtype=np.uint8)
@@ -336,6 +417,7 @@ def test_read_patch_rejects_a_fully_transparent_read(monkeypatch):
 
 
 def test_read_patch_keeps_a_read_holding_one_opaque_pixel(monkeypatch):
+    Image = _pil()
     slide = _install_fake_slide(monkeypatch, FakeSlide())
     info = _plan(load())
     region = _tissue_region((info.read_px, info.read_px))
@@ -361,6 +443,7 @@ def test_read_patch_rejects_a_read_that_is_not_an_image(monkeypatch):
 
 
 def test_read_patch_rejects_a_read_it_cannot_be_written_from(monkeypatch):
+    Image = _pil()
     slide = _install_fake_slide(monkeypatch, FakeSlide())
     info = _plan(load())
     two_channel = np.zeros((info.read_px, info.read_px, 2), dtype=np.uint8)
@@ -382,7 +465,7 @@ def test_extraction_cross_checks_the_manifest_resolution(monkeypatch, tmp_path):
     monkeypatch.setattr(slides_module, "open_info", spy)
     _install_fake_slide(monkeypatch, FakeSlide())
     specimen = _specimen("2", "data/2.svs")
-    extract_slide(specimen, tmp_path / "patches", load())
+    extract_slide(specimen, tmp_path / "patches", load(), rows=[])
     assert calls, "extract_slide never planned a read"
     assert calls[0]["expected_mpp"] == specimen.mpp
     assert calls[0]["slide_id"] == specimen.id
@@ -397,7 +480,7 @@ def test_extraction_uses_the_configured_tissue_gray_max(monkeypatch, tmp_path):
     # a slide reported blank.
     _install_fake_slide(monkeypatch, FakeSlide())
     stats = extract_slide(_specimen("2", "data/2.svs"), tmp_path / "patches",
-                          load(overrides=["extraction.tissue_gray_max=100"]))
+                          load(overrides=["extraction.tissue_gray_max=100"]), rows=[])
     assert (stats.patches_written, stats.tissue_rejected, stats.skipped_blank) == (0, 9, True)
 
 
@@ -435,6 +518,18 @@ def test_extraction_writes_patches_named_by_source_coordinates(monkeypatch, tmp_
     assert rows[0]["tissue_gray"] == pytest.approx(TISSUE_BACKGROUND)
 
 
+def test_an_index_row_carries_exactly_the_pinned_columns(monkeypatch, tmp_path):
+    # `INDEX_COLUMNS` is declared where `write_index` reads it and the row is built
+    # where `extract_slide` appends it, and nothing tied the two together: a key added
+    # to one and not the other would drop silently. This is what ties them.
+    _install_fake_slide(monkeypatch, FakeSlide())
+    rows = []
+    extract_slide(_specimen("2", "data/2.svs"), tmp_path / "patches", load(), rows=rows)
+    assert rows
+    assert tuple(rows[0]) == INDEX_COLUMNS
+    assert set(rows[0]) == set(INDEX_COLUMNS)
+
+
 def test_extraction_counts_a_read_with_no_pixels_as_a_failure(monkeypatch, tmp_path):
     slide = _install_fake_slide(monkeypatch, FakeSlide())
     out = tmp_path / "patches"
@@ -450,7 +545,7 @@ def test_extraction_counts_a_read_with_no_pixels_as_a_failure(monkeypatch, tmp_p
 def test_extraction_counts_a_short_read_as_a_failure(monkeypatch, tmp_path):
     slide = _install_fake_slide(monkeypatch, FakeSlide())
     slide.regions[(0, 0)] = _tissue_region((16, 16))
-    stats = extract_slide(_specimen("2", "data/2.svs"), tmp_path / "patches", load())
+    stats = extract_slide(_specimen("2", "data/2.svs"), tmp_path / "patches", load(), rows=[])
     assert (stats.read_failures, stats.patches_written) == (1, 8)
 
 
@@ -462,10 +557,10 @@ def test_extraction_logs_a_read_that_raises_with_its_coordinates(monkeypatch, tm
 
     slide.read_region = explode
     with caplog.at_level("ERROR"):
-        stats = extract_slide(_specimen("2", "data/2.svs"), tmp_path / "patches", load())
+        stats = extract_slide(_specimen("2", "data/2.svs"), tmp_path / "patches", load(), rows=[])
     assert (stats.read_failures, stats.patches_written, stats.skipped_blank) == (9, 0, True)
     message = "\n".join(record.getMessage() for record in caplog.records)
-    assert "2" in message
+    assert "slide 2" in message
     assert "(0, 0)" in message
     assert "OSError" in message
     assert "tile pyramid is truncated" in message
@@ -531,15 +626,63 @@ def test_extraction_rejects_a_manifest_that_no_longer_describes_the_file(tmp_pat
     assert declared.mpp is not None
     out = tmp_path / "patches"
     with pytest.raises(SlideError, match="manifest"):
-        extract_slide(dataclasses.replace(declared, mpp=declared.mpp * 1.01), out, load())
+        extract_slide(dataclasses.replace(declared, mpp=declared.mpp * 1.01), out, load(), rows=[])
     assert not out.exists()
 
 
-def _load_cli():
+def test_summarise_tissue_gray_reports_the_distribution_of_an_index(tmp_path):
+    # A synthetic index rather than a real one: reading 1.0 GB of slides to
+    # characterise a column is the deferred measurement, not this task's. The values
+    # are hand-picked so every number in the summary is arithmetic a reader can check:
+    # percentiles of five sorted values at index 0.2, 2.0 and 3.8 of the range.
+    rows = [
+        {"patch_id": f"p{index}", "slide_id": "2", "x": index, "y": 0,
+         "mpp": 0.5, "tissue_gray": value}
+        for index, value in enumerate((12.0, 40.0, 150.0, 181.0, 250.0))
+    ]
+    index = tmp_path / "patches.csv"
+    write_index(rows, index)
+    assert summarise_tissue_gray(index) == {
+        "count": 5,
+        "min": 12.0,
+        "max": 250.0,
+        "mean": pytest.approx(126.6),
+        "p05": pytest.approx(17.6),
+        "p50": pytest.approx(150.0),
+        "p95": pytest.approx(236.2),
+        "skipped_blank_rows": 0,
+    }
+
+
+def test_summarise_tissue_gray_counts_the_rows_of_a_slide_reported_blank(tmp_path):
+    rows = [
+        {"patch_id": f"p{index}", "slide_id": "2" if index < 3 else "3", "x": index, "y": 0,
+         "mpp": 0.5, "tissue_gray": 100.0 + index}
+        for index in range(5)
+    ]
+    index = tmp_path / "patches.csv"
+    write_index(rows, index)
+    assert summarise_tissue_gray(index, blank_slides=["3"])["skipped_blank_rows"] == 2
+    assert summarise_tissue_gray(index)["skipped_blank_rows"] == 0
+
+
+def test_summarise_tissue_gray_reports_no_number_for_an_index_with_no_rows(tmp_path):
+    index = tmp_path / "patches.csv"
+    write_index([], index)
+    summary = summarise_tissue_gray(index)
+    assert summary["count"] == 0
+    assert summary["skipped_blank_rows"] == 0
+    assert all(summary[name] is None for name in ("min", "max", "mean", "p05", "p50", "p95"))
+
+
+def _load_cli(monkeypatch):
     path = PROJECT_ROOT / "bin" / "extract_patches.py"
     spec = importlib.util.spec_from_file_location("blobcount_cli_extract_patches", path)
     module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
+    # Through `monkeypatch` rather than `sys.modules[...] = ...`, so the entry is torn
+    # down with the test. Five tests load this module and a plain assignment leaves
+    # whichever copy ran last in `sys.modules` for the rest of the session.
+    monkeypatch.setitem(sys.modules, spec.name, module)
     spec.loader.exec_module(module)
     return module
 
@@ -553,9 +696,9 @@ def _config_pointing_patches_at(target):
 
 
 @pytest.fixture
-def cli(tmp_path, monkeypatch):
-    module = _load_cli()
-    out = tmp_path / "patches"
+def cli(project_scratch, monkeypatch):
+    module = _load_cli(monkeypatch)
+    out = project_scratch / "patches"
     monkeypatch.setattr("blobcount.config.DEFAULT_CONFIG_PATH", _config_pointing_patches_at(out))
     monkeypatch.setattr(module, "load_registry", lambda *a, **k: [
         _specimen("2", "data/2.svs"), _specimen("3", "data/3.svs"),
@@ -594,6 +737,17 @@ def test_cli_refuses_to_overwrite_without_force(cli, monkeypatch, capsys):
     assert len(list(out.glob("*.png"))) == 18
 
 
+def test_cli_refuses_to_delete_a_target_outside_the_project(cli, tmp_path, capsys):
+    module, _ = cli
+    outside = tmp_path / "escape"
+    outside.mkdir()
+    (outside / "keep.png").write_bytes(b"x")
+    module.patches_dir = lambda cfg=None: outside
+    assert module.main(["--force"]) == 2
+    assert "refusing" in capsys.readouterr().err
+    assert (outside / "keep.png").read_bytes() == b"x"
+
+
 def test_cli_exits_non_zero_when_a_slide_yields_no_tissue(cli, monkeypatch):
     module, out = cli
     _blank_slide(monkeypatch)
@@ -613,4 +767,22 @@ def test_cli_reports_a_manifest_contradiction_as_a_refusal(cli, monkeypatch, cap
     _install_fake_slide(monkeypatch, FakeSlide())
     assert module.main([]) == 2
     assert "manifest" in capsys.readouterr().err
-    assert not any(out.glob("*.png")) if out.exists() else True
+    assert not out.exists() or not any(out.glob("*.png"))
+
+
+def test_cli_indexes_the_slides_it_finished_before_a_manifest_contradiction(cli, monkeypatch, capsys):
+    # Without the index, the tree holds nine patches that no `patches.csv` describes,
+    # and the next run is refused for holding a previous run, so recovering needs
+    # `--force`, which deletes what this run just produced.
+    module, out = cli
+    monkeypatch.setattr(module, "load_registry", lambda *a, **k: [
+        _specimen("2", "data/2.svs"), _specimen("3", "data/3.svs", mpp=9.0),
+    ])
+    _install_fake_slide(monkeypatch, FakeSlide())
+    assert module.main([]) == 2
+    assert "manifest" in capsys.readouterr().err
+    assert len(list(out.glob("*.png"))) == 9
+    lines = (out / "patches.csv").read_text(encoding="utf-8").splitlines()
+    assert lines[0] == "patch_id,slide_id,x,y,mpp,tissue_gray"
+    assert len(lines) == 10
+    assert {line.split(",")[1] for line in lines[1:]} == {"2"}

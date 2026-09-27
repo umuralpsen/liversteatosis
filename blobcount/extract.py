@@ -7,14 +7,21 @@ last inheritance this package still carries, and it is not independently justifi
 repository establishes its value. `patch.py`'s own docstring called 210 "found
 empirically"; nothing here repeats that, and a change to the key changes the filter.
 
-`is_tissue` keeps that mean test and adds a second clause: the patch must also hold
-at least one pixel below `threshold + DARK_MARGIN`, where `threshold` is the 5th
-percentile of the patch's own grayscale. That second clause is a tautology, because a
-5th percentile is never above the minimum of the same values, so `is_tissue` in this
-build reduces to `mean < gray_max` and the filter is the original one with a
-different constant. The clause is implemented as specified and kept, and
-`is_tissue`'s docstring carries the measurement, because the key beside it is a
-configured parameter and changing the rule here would be a decision nobody made.
+`is_tissue` is that mean test and nothing else. The build before this one added a
+second clause, that a pixel darker than the patch's own 5th percentile plus a margin
+must exist in the patch, and that clause could never be false: a percentile is never
+above the minimum of the same values, so the filter was one factor while reading as
+two. The clause is deleted rather than given a threshold, because a floor on the
+spread or on the median would be a constant nobody has measured.
+
+**The filter has no background-rejection behaviour and its sensitivity is unmeasured.**
+A uniform field of any value below `gray_max` is accepted, so the rule cannot tell a
+blank field from a flat field of tissue, and a real `3.svs` window at (14732, 3048)
+with mean 235.0, std 22.1 and min 63.3 is rejected by the mean clause alone, so
+neither a floor on spread nor a raised `gray_max` recovers it. Whether one mean
+threshold separates tissue from background across the whole grid is a question about
+a full-grid measurement rather than about this function, and `summarise_tissue_gray`
+makes it answerable from a committed index instead of from a claim.
 
 **The transparency check in `read_patch` is the only thing standing between a grid
 arithmetic error and a silently corrupted dataset.** `slide.read_region` does not
@@ -40,12 +47,12 @@ out: a caller that forgets it gets a plausible run against an unverified file.
 
 **Coordinates are level-0 source pixels.** `iter_coords` yields the origin pair
 `slide.read_region` takes for its location, and `info.read_px` is the source-pixel
-tile size, which is 508 for the five 40x slides and 257 for the 20x one. Neither is
-transformed here, and the read is then resized to `extraction.patch_size` with
-`cv2.INTER_AREA`, which is where the field of view becomes `patch_size * target_mpp`
-microns for every slide in the set. The tile grid is walked by `iter_coords`, which
-drops incomplete edge tiles, so a `read_failure` means something actually went wrong
-rather than that the walk reached a border.
+tile size, which is 507 to 515 for the five 40x slides and 257 for the 20x one.
+Neither is transformed here, and the read is then resized to `extraction.patch_size`
+with `cv2.INTER_AREA`, which is where the field of view becomes
+`patch_size * target_mpp` microns for every slide in the set. The tile grid is walked
+by `iter_coords`, which drops incomplete edge tiles, so a `read_failure` means
+something actually went wrong rather than that the walk reached a border.
 
 Every accepted patch is written as `{slide_id}_{x}_{y}.png` with the *source*
 coordinates, so the file name records where on the slide the patch came from, and one
@@ -64,19 +71,23 @@ Declared interface, in `__all__` order:
         tissue_rejected: int
         read_failures: int
         skipped_blank: bool
+    OutputPathError
     extract_slide(
         specimen: Specimen,
         out_dir: Path,
         cfg: Config,
         *,
-        rows: list[dict] | None = None,
+        rows: list[dict],
     ) -> ExtractionStats
     is_tissue(patch: np.ndarray, threshold: float, gray_max: float) -> bool
     patches_dir(cfg: Config | None = None) -> Path
-    prepare_output(out_dir: Path) -> None
+    prepare_output(
+        out_dir: Path, *, root: Path | None = None, protected: Sequence[Path] | None = None
+    ) -> None
     read_patch(
         slide: Any, info: SlideInfo, x: int, y: int, *, patch_size: int | None = None
     ) -> np.ndarray | None
+    summarise_tissue_gray(index_path: Path, *, blank_slides: Collection[str] = ()) -> dict
     tissue_gray_threshold(patch: np.ndarray, percentile: float = TISSUE_PERCENTILE) -> float
     write_index(rows: Sequence[dict], path: Path) -> None
 """
@@ -86,24 +97,26 @@ from __future__ import annotations
 import csv
 import logging
 import shutil
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
-from blobcount.config import Config, default_config
+from blobcount.config import PROJECT_ROOT, Config, default_config
 from blobcount.registry import Specimen
 from blobcount.slides import SlideInfo, iter_coords_from_config, open_info_from_config
 
 __all__ = [
     "ExtractionStats",
+    "OutputPathError",
     "extract_slide",
     "is_tissue",
     "patches_dir",
     "prepare_output",
     "read_patch",
+    "summarise_tissue_gray",
     "tissue_gray_threshold",
     "write_index",
 ]
@@ -115,15 +128,14 @@ INDEX_COLUMNS = ("patch_id", "slide_id", "x", "y", "mpp", "tissue_gray")
 
 # The default `extraction.tissue_percentile`: the background level of a patch is the
 # dark end of it, and 5 keeps a handful of the darkest pixels from setting the level
-# of a patch that is otherwise background.
+# of a patch that is otherwise background. A test pins this constant to the
+# configured value, because the two are the same fact stated twice and a change to
+# the key must not leave the constant behind.
 TISSUE_PERCENTILE = 5
 
-# How far below the background level a pixel must fall for the patch to count as more
-# than background. See `is_tissue`: because the background level is a low percentile
-# of the same grayscale, this margin cannot currently reject anything, and the
-# constant is kept because the rule specifies it and the threshold beside it is a
-# configured parameter.
-DARK_MARGIN = 20
+
+class OutputPathError(Exception):
+    """Raised when a directory `prepare_output` was asked to delete is not one to delete."""
 
 
 @dataclass(frozen=True)
@@ -132,10 +144,13 @@ class ExtractionStats:
 
     `patches_written` counts accepted patches and nothing else. `tissue_rejected`
     counts reads that succeeded and were filtered as background, and `read_failures`
-    counts reads that yielded no usable region at all: a short read, a region with no
-    opaque pixel in it, or an exception. The two failure modes are counted apart
-    because they mean different things, a read that is filtered is a measurement and
-    a read that fails is a hole in the record.
+    counts reads that produced no patch: a short read, a region with no opaque pixel
+    in it, an exception raised by the reader, or a PNG that could not be written. The
+    two failure modes are counted apart because they mean different things, a read
+    that is filtered is a measurement and a read that fails is a hole in the record.
+    A failed write is counted with the failed reads rather than apart from them
+    because the outcome is the same: a window that was read, accepted, and then did
+    not reach the disk, and its coordinates appear in no index row.
 
     `skipped_blank` is True when the slide produced no accepted patch, whether because
     every read was rejected as background or because every read failed. A slide in
@@ -171,47 +186,47 @@ def tissue_gray_threshold(patch: np.ndarray, percentile: float = TISSUE_PERCENTI
     the constant, so a blank patch yields a number and never a `NaN`, and the value
     returned for a blank patch is the same value that rejects it.
 
-    `percentile` carries the configured `extraction.tissue_percentile`, which the
-    interface this function declares does not otherwise pass; it is keyword-defaulted
-    to the configured value so that a caller reading the configuration gets one
-    threshold and an extraction run reading it gets the same one.
+    `percentile` defaults to the module constant `TISSUE_PERCENTILE`, which a test
+    pins to `extraction.tissue_percentile`, so the default and the configured value
+    cannot drift apart. `extract_slide` passes the configured value through as an
+    argument, so an override reaches a run without touching the constant.
+
+    **The filter does not consult this number.** `is_tissue` is a mean test alone,
+    and the function stays because the value it returns is recorded in the
+    `tissue_gray` column of `patches.csv`, which the counting, labeling and training
+    tasks read to derive a per-slide background level. It is kept for that consumer
+    and not because it decides which patches are kept.
     """
     return float(np.percentile(_grayscale(patch), percentile))
 
 
 def is_tissue(patch: np.ndarray, threshold: float, gray_max: float) -> bool:
-    """Report whether `patch` holds tissue rather than background.
+    """Report whether `patch` holds tissue rather than background: one mean test.
 
-    Two conditions, both required. The mean grayscale is below `gray_max`, which is
-    the test `patch.py` made and the reason the key is named for it. And the patch is
-    not uniformly background: at least one pixel must be darker than `threshold` plus
-    `DARK_MARGIN`, where `threshold` is the background level `tissue_gray_threshold`
-    measured on the same patch.
+    A patch is tissue when its mean grayscale is below `gray_max`. That is the whole
+    rule, and it is the test `patch.py` made, which is why the key is named for it.
 
-    **The second condition cannot currently reject anything, and a caller deciding
-    whether to keep it needs to know that.** `threshold` is the 5th percentile of this
-    patch's own grayscale and `gray.min()` is the smallest of the same values, so
-    `min <= threshold` always and `min < threshold + DARK_MARGIN` holds for every
-    patch, including a constant one, where the percentile equals the constant. Over
-    2000 random patches and every constant value from 0 to 255, the condition was
-    never false. The consequence is that `is_tissue` reduces to `mean < gray_max`: the
-    mean test of the original `patch.py` with a different threshold, and a uniform
-    field of anything below `gray_max` is accepted, which is the shape the second
-    condition exists to reject. A sampled sweep of 240 real windows over `1.svs`,
-    `2.svs` and `5.svs` found no obviously non-tissue window passing, so this is a
-    documented gap in the rule rather than an observed corruption.
+    `threshold` is the background level `tissue_gray_threshold` measures on the same
+    patch, and it is **not consulted**. The signature keeps it because the interface
+    is declared, and the number is recorded per patch in the `tissue_gray` index
+    column that later tasks read; it is kept for that consumer and not because it
+    decides this answer. An earlier build also required a pixel darker than
+    `threshold + 20` to exist, which could never be false: `threshold` is a percentile
+    of this patch's own grayscale and the minimum is the smallest of the same values,
+    so the minimum is never above the threshold and the margin is always satisfied.
+    It was deleted rather than given a threshold, because any floor on the spread or
+    the median would be a constant nobody has measured.
 
-    The rule is implemented as specified and left in place. It is a parameter pair in
-    `configs/default.yaml`, and a change to either key is a decision to be made
-    deliberately, not a correction to be slipped in here.
-
-    To make the second condition able to reject something, the background level has
-    to come from outside the patch, or the comparison has to be against the patch's
-    own median rather than its 5th percentile. Both change what the number means, and
-    both are a different rule from the one specified.
+    **The filter has no background-rejection behaviour and its sensitivity is
+    unmeasured.** A uniform field of any value below `gray_max` is accepted, so a
+    blank field and a flat field of tissue are indistinguishable here, and a real
+    `3.svs` window at (14732, 3048) with mean 235.0, std 22.1 and min 63.3 is
+    rejected by the mean clause alone, so neither a floor on spread nor a raised
+    `gray_max` recovers it. `tests/test_extract.py` pins the acceptance of a uniform
+    faint field under a name that says so, and it is deleted by whichever change
+    closes the gap.
     """
-    gray = _grayscale(patch)
-    return bool(gray.mean() < gray_max and gray.min() < threshold + DARK_MARGIN)
+    return bool(_grayscale(patch).mean() < gray_max)
 
 
 def read_patch(
@@ -278,7 +293,7 @@ def extract_slide(
     out_dir: Path,
     cfg: Config,
     *,
-    rows: list[dict] | None = None,
+    rows: list[dict],
 ) -> ExtractionStats:
     """Extract every accepted patch of `specimen` into `out_dir` and report the counts.
 
@@ -292,23 +307,32 @@ def extract_slide(
     and drops incomplete edge tiles, so the coordinates that reach the reader come
     from one place and are not recomputed here.
 
-    A patch is accepted when `is_tissue` accepts it against the background level
-    `tissue_gray_threshold` measures, and is then written as
-    `{slide_id}_{x}_{y}.png` with the source coordinates, which is what the file name
-    means and what `patches.csv` records. `mpp` in an index row is the resolution the
-    patch was actually read at, `info.achieved_mpp`, and not the target that was
-    requested, so a run's resolution is auditable from the patch record alone.
+    An accepted patch is written as `{slide_id}_{x}_{y}.png` with the source
+    coordinates, which is what the file name means and what `patches.csv` records.
+    `is_tissue` decides acceptance and the background level
+    `tissue_gray_threshold` measures is recorded beside it, not consulted by the
+    filter. `mpp` in an index row is the resolution the patch was actually read at,
+    `info.achieved_mpp`, and not the target that was requested, so a run's resolution
+    is auditable from the patch record alone.
 
-    Every exception raised per patch is caught, logged with the slide id, the
-    coordinates and the exception object, and counted as a `read_failure`; the walk
-    continues, because a run that stops at the first bad tile reports one failure and
-    hides the rest. `SlideError` from the plan is not caught: it describes the slide
-    rather than a patch, and it is raised before `out_dir` is created so a rejected
-    slide leaves the output tree alone.
+    Every exception raised by the reader per patch is caught, logged with the slide
+    id, the coordinates and the exception object, and counted as a `read_failure`; the
+    walk continues, because a run that stops at the first bad tile reports one failure
+    and hides the rest. A write that raises is caught and counted the same way, with
+    the specimen id, the coordinates and the file name. Nothing else in the loop is
+    guarded: `read_patch` has already returned a uint8 `(H, W, 3)` array, and
+    `tissue_gray_threshold` and `is_tissue` are total over one, so a `try` around
+    them could only catch a defect in this function.
+    `SlideError` from the plan is not caught: it describes the slide rather than a
+    patch, and it is raised before `out_dir` is created so a rejected slide leaves the
+    output tree alone.
 
-    The return type carries counts only, so the index rows a run needs in order to
-    write one `patches.csv` are appended to `rows` when a caller supplies a list. A
-    caller that wants only the counts passes none.
+    **`rows` is required.** The return type carries counts only, so the index rows a
+    run needs in order to write one `patches.csv` come back through the list the
+    caller supplies. Making it optional would give the caller a way to write patches
+    with no index row and no way to recover their `tissue_gray` afterwards, and that
+    is a loss the counts do not repay. A caller that wants only the counts passes an
+    empty list and ignores it.
 
     `PIL` is imported inside the write for the same reason `cv2` is imported inside
     the read: it is a native wheel, and making it a module-scope import would make an
@@ -349,33 +373,28 @@ def extract_slide(
                 )
                 failures += 1
                 continue
-            try:
-                threshold = tissue_gray_threshold(patch, percentile)
-                accepted = is_tissue(patch, threshold, gray_max)
-            except Exception as exc:
-                LOGGER.error("slide %s: patch at (%d, %d) raised %r", specimen.id, x, y, exc)
-                failures += 1
-                continue
-            if not accepted:
+            threshold = tissue_gray_threshold(patch, percentile)
+            if not is_tissue(patch, threshold, gray_max):
                 rejected += 1
                 continue
             name = f"{specimen.id}_{x}_{y}.png"
             try:
                 Image.fromarray(patch).save(out / name)
             except Exception as exc:
-                LOGGER.error("slide %s: writing %s raised %r", specimen.id, name, exc)
+                LOGGER.error(
+                    "slide %s: writing %s at (%d, %d) raised %r", specimen.id, name, x, y, exc
+                )
                 failures += 1
                 continue
             written += 1
-            if rows is not None:
-                rows.append({
-                    "patch_id": name,
-                    "slide_id": specimen.id,
-                    "x": x,
-                    "y": y,
-                    "mpp": info.achieved_mpp,
-                    "tissue_gray": threshold,
-                })
+            rows.append({
+                "patch_id": name,
+                "slide_id": specimen.id,
+                "x": x,
+                "y": y,
+                "mpp": info.achieved_mpp,
+                "tissue_gray": threshold,
+            })
 
     return ExtractionStats(
         slide_id=specimen.id,
@@ -386,7 +405,40 @@ def extract_slide(
     )
 
 
-def prepare_output(out_dir: Path) -> None:
+def _is_below(target: Path, root: Path) -> bool:
+    """Report whether `target` lies strictly below `root`.
+
+    Both are resolved first, so a `..` is collapsed and a link cannot point out, and
+    the test is `root in target.parents` rather than a string prefix: `Proje-backup`
+    starts with the characters of `Proje` and is a different directory, and a prefix
+    test would place it inside the project. Being `root` itself is not below it, which
+    is what makes a call that would delete the project root a refusal rather than a
+    delete.
+    """
+    return Path(root).resolve() in Path(target).resolve().parents
+
+
+def _protected_paths() -> tuple[tuple[str, Path], ...]:
+    """Return the `(name, path)` pairs a run may not delete by clearing a directory.
+
+    The slides and the manifest are read from the configuration rather than pinned
+    here, so a run whose configuration moves them is guarded against the paths it
+    actually uses. They are read from the default configuration because they are
+    project facts rather than per-run settings, and the CLI passes nothing.
+    """
+    active = default_config()
+    return (
+        ("paths.slides", active.path("paths.slides")),
+        ("paths.manifest", active.path("paths.manifest")),
+    )
+
+
+def prepare_output(
+    out_dir: Path,
+    *,
+    root: Path | None = None,
+    protected: Sequence[Path] | None = None,
+) -> None:
     """Delete `out_dir` and create it empty.
 
     Extraction and, later, labeling write into one directory that a previous run may
@@ -396,8 +448,47 @@ def prepare_output(out_dir: Path) -> None:
     written into. Deleting is not guarded by `ignore_errors`: a tree that cannot be
     cleared must not be written into, because the stale files would survive into the
     dataset and the run would look complete.
+
+    **`paths.patches` is a hand-edited string in `configs/default.yaml`, and this
+    function deletes whatever `Path` it is handed.** `paths.patches: .` makes a
+    `--force` run an irreversible deletion of the repository, the manifest and every
+    staged slide, with no confirmation and no way back. Three targets are refused
+    before anything is removed, and the refusal is an `OutputPathError` rather than a
+    partial delete:
+
+    - the project root itself, and
+    - any directory that contains `paths.slides` or `paths.manifest`, and
+    - anything not strictly below the project root, which covers a target outside the
+      project and one reached through a `..` that climbs out of it.
+
+    `root` defaults to the project root and `protected` to the configured slides and
+    manifest. Both are parameters so a test can state the boundary instead of
+    inheriting the checkout's, and so the containment rule has one implementation
+    rather than one per call site.
     """
     target = Path(out_dir)
+    boundary = Path(root) if root is not None else PROJECT_ROOT
+    resolved = target.resolve()
+    if resolved == boundary.resolve():
+        raise OutputPathError(
+            f"refusing to delete the project root {resolved}: it holds the source, the "
+            f"configuration and the manifest, and --force is not a licence to remove it"
+        )
+    guarded = (
+        _protected_paths() if protected is None
+        else tuple((str(item), Path(item)) for item in protected)
+    )
+    for name, item in guarded:
+        if _is_below(item, resolved):
+            raise OutputPathError(
+                f"refusing to delete {resolved}: {name} is at {item} and is inside it, so "
+                f"clearing this directory would destroy the source data"
+            )
+    if not _is_below(resolved, boundary):
+        raise OutputPathError(
+            f"refusing to delete {resolved}: it is not strictly below the project root "
+            f"{boundary}, so the target is not one this project owns"
+        )
     if target.exists():
         shutil.rmtree(target)
     target.mkdir(parents=True)
@@ -429,3 +520,52 @@ def write_index(rows: Sequence[dict], path: Path) -> None:
         writer = csv.DictWriter(handle, fieldnames=list(INDEX_COLUMNS))
         writer.writeheader()
         writer.writerows(rows)
+
+
+def summarise_tissue_gray(index_path: Path, *, blank_slides: Collection[str] = ()) -> dict:
+    """Return the distribution of the `tissue_gray` column over an index.
+
+    The keys are `count`, `min`, `max`, `mean`, `p05`, `p50`, `p95` and
+    `skipped_blank_rows`. The statistics are `None` rather than a number for an index
+    with no rows, because a percentile of nothing has no value and reporting `0.0`
+    would put a plausible number where a missing one is the truth.
+
+    **This is the characterisation the tissue filter is missing, made answerable
+    from an artifact rather than from a claim.** `is_tissue` accepts a patch on its
+    mean alone and rejects one on the same number, so whether that one threshold
+    separates tissue from background across the whole grid is a question about the
+    spread of the recorded `tissue_gray` values: a distribution with a long bright
+    tail reaching `tissue_gray_max` is one where a real background window was
+    accepted, and a distribution that never reaches it is one where nothing needs
+    deciding. Running this over the full grid is deferred, because it needs the full
+    extraction; what belongs to this module is the function, so that the measurement
+    is one command against a committed index.
+
+    `skipped_blank_rows` counts the rows whose `slide_id` is in `blank_slides`. The
+    flag is passed rather than read because the index has no such column: a slide
+    reported `skipped_blank` wrote no rows at all, so the flag lives in the
+    `ExtractionStats` of the run that saw it and not in the file. Called with no
+    `blank_slides` the count is 0, which is the correct answer for an index this
+    pipeline writes and not a default to be trusted.
+    """
+    target = Path(index_path)
+    with target.open(encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    values = [float(row["tissue_gray"]) for row in rows]
+    blank = set(blank_slides)
+    summary = {
+        "count": len(values),
+        "skipped_blank_rows": sum(1 for row in rows if row["slide_id"] in blank),
+    }
+    if not values:
+        return {**summary, **{name: None for name in ("min", "max", "mean", "p05", "p50", "p95")}}
+    percentiles = np.percentile(np.asarray(values, dtype=np.float64), [5, 50, 95])
+    return {
+        **summary,
+        "min": min(values),
+        "max": max(values),
+        "mean": float(np.mean(values)),
+        "p05": float(percentiles[0]),
+        "p50": float(percentiles[1]),
+        "p95": float(percentiles[2]),
+    }

@@ -12,7 +12,15 @@ patches, so an empty or failed extraction cannot pass for a completed one.
 Without `--force` a non-empty output directory is refused rather than cleared, because
 the patches in it are a previous run's and destroying them is not this command's
 decision to make. `--force` deletes and recreates it through
-`blobcount.extract.prepare_output`.
+`blobcount.extract.prepare_output`, which refuses a target that is the project root,
+that holds the slides or the manifest, or that is not below the project root at all;
+`paths.patches` is a hand-edited string and `--force` deletes what it names, so the
+refusal is reported and exits 2 rather than raised as a traceback.
+
+A slide that contradicts its manifest row stops the run, and the index for the slides
+already extracted is written before it returns. Otherwise the tree would hold
+thousands of patches that no `patches.csv` describes, and the refusal on a re-run
+would then need `--force`, which deletes what the run just produced.
 """
 
 from __future__ import annotations
@@ -25,6 +33,7 @@ from collections.abc import Sequence
 from blobcount.config import load
 from blobcount.extract import (
     ExtractionStats,
+    OutputPathError,
     extract_slide,
     patches_dir,
     prepare_output,
@@ -114,7 +123,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     out_dir = patches_dir(cfg)
     if args.force:
-        prepare_output(out_dir)
+        try:
+            prepare_output(out_dir)
+        except OutputPathError as error:
+            print(f"extract_patches: {error}", file=sys.stderr)
+            return EXIT_REFUSED
     elif out_dir.is_dir() and any(out_dir.iterdir()):
         print(
             f"extract_patches: {out_dir} already holds a previous run; "
@@ -131,8 +144,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     except SlideError as error:
         # A slide that contradicts its manifest row is not a slide this run may
         # extract from, and the run stops rather than continuing past the record that
-        # describes the dataset.
+        # describes the dataset. The slides already extracted are indexed first: they
+        # are on disk, and an unindexed patch tree is a tree a re-run cannot resume
+        # without `--force`, which would delete it. The directory does not exist when
+        # the first slide is the one that fails, because `extract_slide` raises before
+        # it creates anything, and there is then nothing to index.
         print(f"extract_patches: {error}", file=sys.stderr)
+        if out_dir.is_dir():
+            write_index(rows, out_dir / "patches.csv")
         return EXIT_REFUSED
     write_index(rows, out_dir / "patches.csv")
 
