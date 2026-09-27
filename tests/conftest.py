@@ -1,7 +1,10 @@
 from collections import namedtuple
+from collections.abc import Iterator
 
 import numpy as np
 import pytest
+
+from blobcount.config import _reset_default_config
 
 SyntheticPatch = namedtuple("SyntheticPatch", "array disc_centres disc_radius")
 
@@ -10,6 +13,19 @@ _DISC_RADIUS = 12
 _BACKGROUND = 180
 _DISC_VALUE = 255
 _DISC_CENTRES = ((64, 64), (128, 90), (200, 170))
+
+
+@pytest.fixture(autouse=True)
+def reset_default_config() -> Iterator[None]:
+    """Drop the cached default config around every test.
+
+    `default_config()` hands out one mutable process global. Without this, the
+    first test that calls `Config.set` on it leaks that change into every test
+    after it, in this order and every later run.
+    """
+    _reset_default_config()
+    yield
+    _reset_default_config()
 
 
 @pytest.fixture

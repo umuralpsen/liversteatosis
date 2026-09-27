@@ -10,6 +10,7 @@ from blobcount.config import (
     ConfigError,
     _find_project_root,
     _iter_keys,
+    default_config,
     get_device,
     load,
     set_seed,
@@ -21,8 +22,9 @@ _KEY_READ = re.compile(r"""\.(?:get|path)\(\s*["']([A-Za-z_]\w*(?:\.[A-Za-z_]\w*
 
 # Every declared key that no module under blobcount/ reads yet. This task ships
 # the loader only, so the 44 consumer keys arrive with later tasks. A key that
-# loses its reader must not be added here, because the scan then fails. This set
-# is expected to be empty once the pipeline is complete.
+# gains a reader fails the scan and must be deleted from this set. A key listed
+# here that loses its reader while it stays listed is not caught, so this set has
+# to shrink to empty before the branch merges; the plan's final gate checks that.
 _KEYS_WITHOUT_READER: frozenset[str] = frozenset(
     {
         "ablation.thresholds",
@@ -168,11 +170,33 @@ def test_set_rejects_an_undeclared_key():
         "augmentation.horizontal_flip=flase",
         "training.pretrained=fals",
         "blobs.stain_normalization=nope",
+        "augmentation.horizontal_flip=1",
+        "blobs.area_um2_max=true",
     ],
 )
 def test_mistyped_override_value_is_rejected(override):
     with pytest.raises(ConfigError, match="has type"):
         load(overrides=[override])
+
+
+def test_mistyped_override_error_names_the_expected_type():
+    with pytest.raises(ConfigError) as caught:
+        load(overrides=["augmentation.horizontal_flip=flase"])
+    message = str(caught.value)
+    assert "bool" in message, message
+    assert "str" in message, message
+
+
+def test_int_override_widens_to_float_for_a_float_key():
+    cfg = load(overrides=["blobs.area_um2_max=125"])
+    value = cfg.get("blobs.area_um2_max")
+    assert value == 125.0
+    assert isinstance(value, float)
+
+
+def test_int_override_is_not_accepted_for_an_int_key():
+    with pytest.raises(ConfigError, match="has type"):
+        load(overrides=["extraction.patch_size=256.0"])
 
 
 def test_override_without_equals_raises():
@@ -260,3 +284,18 @@ def test_get_device_returns_known_device():
 
 def test_get_device_falls_back_to_the_default_config():
     assert get_device() in {"cpu", "cuda"}
+
+
+# The next two tests are one unit and depend on this order. The first mutates the
+# process-wide default config; the autouse fixture in conftest.py has to hand the
+# second one a config built fresh from configs/default.yaml.
+
+
+def test_default_config_is_mutated_by_this_test():
+    default_config().set("project.name", "mutated-by-an-earlier-test")
+    assert default_config().get("project.name") == "mutated-by-an-earlier-test"
+
+
+def test_default_config_mutation_does_not_leak_into_the_next_test():
+    assert default_config().get("project.name") == load().get("project.name")
+    assert default_config().get("project.seed") == load().get("project.seed")

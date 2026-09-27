@@ -20,16 +20,23 @@ substitutes for the other:
   `cfg.path("...")` literal. The source scan stops a declared key that no code
   reads from passing unnoticed.
 
-Declared interface:
+Declared interface, in `__all__` order:
 
-    load(path: Path | None = None, overrides: Sequence[str] = ()) -> Config
+    Config
+        Config.__init__(self, data: dict[str, Any], *, source: Path | None = None) -> None
+        Config.get(self, key: str, default: Any = _UNSET) -> Any
+        Config.set(self, key: str, value: Any) -> None
+        Config.path(self, key: str) -> Path
+        Config.unknown_keys(self) -> set[str]
+    ConfigError
+    DEFAULT_CONFIG_PATH: Path
+    KNOWN_KEYS: frozenset[str]
+    PROJECT_ROOT: Path
+    REQUIRED_KEYS: frozenset[str]
     default_config() -> Config
     get_device(cfg: Config | None = None) -> str
+    load(path: Path | None = None, overrides: Sequence[str] = ()) -> Config
     set_seed(seed: int | None = None, cfg: Config | None = None) -> None
-    Config.get(self, key: str, default: Any = _UNSET) -> Any
-    Config.set(self, key: str, value: Any) -> None
-    Config.path(self, key: str) -> Path
-    Config.unknown_keys(self) -> set[str]
 """
 
 from __future__ import annotations
@@ -296,6 +303,11 @@ def load(path: Path | None = None, overrides: Sequence[str] = ()) -> Config:
     types survive; a value that is not valid YAML, such as `%VAR%/out`, is kept
     as a string. An override whose parsed type differs from the type already
     configured is rejected, so a mistyped boolean cannot silently invert a run.
+    The one exception is an `int` written to a key configured as a `float`, which
+    is widened, because `blobs.area_um2_max=125` states the same limit as the
+    configured `125.0`. The comparison is exact on both sides, so `bool` never
+    passes: `bool` subclasses `int`, and an `isinstance` check would accept
+    `augmentation.horizontal_flip=1` as a truthy integer.
 
     No key is read here. Callers request keys after this returns, so marking them
     read now would make `unknown_keys()` unconditionally empty.
@@ -317,10 +329,14 @@ def load(path: Path | None = None, overrides: Sequence[str] = ()) -> Config:
     for key, raw, value in parsed:
         found, existing = _lookup(data, key)
         if found and type(value) is not type(existing):
-            raise ConfigError(
-                f"override '{key}={raw}' has type {type(value).__name__}, "
-                f"but the configured value is {type(existing).__name__}"
-            )
+            if type(existing) is float and type(value) is int:
+                value = float(value)
+            else:
+                raise ConfigError(
+                    f"override '{key}={raw}' has type {type(value).__name__}, "
+                    f"but the configured value is {type(existing).__name__}; "
+                    f"supply a value of type {type(existing).__name__} for '{key}'"
+                )
         _set_dotted(data, key, value)
 
     declared = _iter_keys(data)
@@ -341,12 +357,23 @@ def default_config() -> Config:
 
     `get_device` and `set_seed` use it when they are given no config. It is
     built on first use, so a caller that changes it with `Config.set` changes
-    what those two functions see.
+    what those two functions see. `_reset_default_config` drops it.
     """
     global _DEFAULT_CONFIG
     if _DEFAULT_CONFIG is None:
         _DEFAULT_CONFIG = load()
     return _DEFAULT_CONFIG
+
+
+def _reset_default_config() -> None:
+    """Drop the cached default config, so the next `default_config` rebuilds it.
+
+    `default_config` is a mutable process global with no invalidation of its
+    own, so a `Config.set` on it outlives whatever made it. This is the hook
+    that ends that; the test suite calls it between tests.
+    """
+    global _DEFAULT_CONFIG
+    _DEFAULT_CONFIG = None
 
 
 def set_seed(seed: int | None = None, cfg: Config | None = None) -> None:
