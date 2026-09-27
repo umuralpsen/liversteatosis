@@ -571,7 +571,7 @@ git commit -m "feat: add resolution planning that normalizes field of view acros
 - Produces:
   - `blobcount.extract.tissue_gray_threshold(patch: np.ndarray) -> float` — the 5th percentile of the patch's grayscale, the background level
   - `blobcount.extract.is_tissue(patch: np.ndarray, threshold: float, gray_max: float) -> bool`
-  - `blobcount.extract.read_patch(slide, info: SlideInfo, x: int, y: int) -> np.ndarray | None` — `None` when the read returns fewer than `read_px` pixels on either axis
+  - `blobcount.extract.read_patch(slide, info: SlideInfo, x: int, y: int) -> np.ndarray | None` — `x` and `y` are **level-0 source pixels**, exactly as yielded by `iter_coords`; `None` when the read returns fewer than `read_px` pixels on either axis
   - `blobcount.extract.extract_slide(specimen: Specimen, out_dir: Path, cfg: Config) -> ExtractionStats`
   - `blobcount.extract.prepare_output(out_dir: Path) -> None` — deletes and recreates the directory; used by extraction and, later, by labeling
   - `blobcount.extract.ExtractionStats` — frozen dataclass: `slide_id: str`, `patches_written: int`, `tissue_rejected: int`, `read_failures: int`, `skipped_blank: bool`
@@ -627,7 +627,20 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'blobcount.extract'`
 
 - [ ] **Step 3: Implement `blobcount/extract.py`**
 
-`tissue_gray_threshold` returns `float(np.percentile(grayscale, 5))` and is total: for a constant image the percentile equals the constant, so the value is never `NaN`, which is what pins Review Focus item 4. `is_tissue` returns `True` when the patch's mean grayscale is below `gray_max` and the patch is not uniformly background, that is when at least one pixel is darker than `threshold + 20`. `read_patch` calls `slide.read_region((x, y), info.level, (info.read_px, info.read_px))`, converts to an RGB array, and returns `None` if the returned array is smaller than `read_px` on either axis, logging the slide id and coordinates. `extract_slide` iterates `iter_coords`, calls `read_patch`, counts `read_failures` on `None`, calls `is_tissue` and counts `tissue_rejected`, and on acceptance resizes to `extraction.patch_size` with `cv2.INTER_AREA` and writes a PNG named `{slide_id}_{x}_{y}.png`. Every exception is caught with `except Exception as exc` and logged with slide id, coordinates, and `exc`. `prepare_output` deletes and recreates the directory. `write_index` writes UTF-8 with the pinned header.
+`tissue_gray_threshold` returns `float(np.percentile(grayscale, 5))` and is total: for a constant image the percentile equals the constant, so the value is never `NaN`, which is what pins Review Focus item 4. `is_tissue` returns `True` when the patch's mean grayscale is below `gray_max` and the patch is not uniformly background, that is when at least one pixel is darker than `threshold + 20`.
+
+`read_patch` calls `slide.read_region((x, y), info.level, (info.read_px, info.read_px))` with `x` and `y` passed through untransformed, because `iter_coords` yields level-0 source coordinates. It converts to an RGB array and resizes to `extraction.patch_size` with `cv2.INTER_AREA`.
+
+**An out-of-bounds `read_region` does not raise.** Verified on `data/2.svs` at an origin 5000 px past the right edge: it returns a 16x16 RGBA image that is entirely `[0, 0, 0, 0]`, where an in-bounds read of the same size has 77 distinct colours. A fully transparent patch converts to solid black, whose mean grayscale is 0 and therefore **passes** `is_tissue`. A coordinate bug therefore does not announce itself — it writes black patches that are then labelled. `read_patch` must reject a read whose alpha channel is entirely zero, treating it as a `read_failure` and counting it, in addition to the size check. This is the only guard between a grid arithmetic error and a silently corrupted dataset.
+
+`extract_slide` iterates `iter_coords`, and **must** call
+`open_info(specimen.slide_path, specimen.id, target_mpp, patch_size,
+expected_mpp=specimen.mpp)`, passing the manifest's recorded resolution so that
+`open_info` cross-checks it against the slide's own `openslide.mpp-x` and raises
+on divergence beyond 1e-3 relative. Omitting `expected_mpp` is a defect, not a
+default: the cross-check is the only thing that detects the manifest ceasing to
+describe the file feeding the patient-level split, and the parameter is opt-in by
+construction, so this call site is what makes it real. It then calls `read_patch`, counts `read_failures` on `None`, calls `is_tissue` and counts `tissue_rejected`, and on acceptance writes a PNG named `{slide_id}_{x}_{y}.png` where `x` and `y` are the source coordinates from `iter_coords`, so the filename records where on the slide the patch came from. Every exception is caught with `except Exception as exc` and logged with slide id, coordinates, and `exc`. `prepare_output` deletes and recreates the directory. `write_index` writes UTF-8 with the pinned header.
 
 - [ ] **Step 4: Create `bin/extract_patches.py`**
 
