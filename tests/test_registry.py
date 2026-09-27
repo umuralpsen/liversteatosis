@@ -1,9 +1,9 @@
 import re
+from dataclasses import fields
 
-import openslide
 import pytest
 from blobcount.config import default_config
-from blobcount.registry import RegistryError, load_registry, usable_for_training, excluded
+from blobcount.registry import RegistryError, Specimen, load_registry, usable_for_training, excluded
 
 
 def test_loads_six_entries():
@@ -78,19 +78,40 @@ def _write_manifest(tmp_path, body):
 
 
 def _skip_without_slides():
-    """Skip rather than fail where the slide images are absent.
+    """Skip rather than fail where a slide cannot be opened, and say which reason holds.
 
-    `.gitignore` holds `data/` and `*.svs`, so the images are out of the repository
-    on purpose and a fresh clone has the manifest but no slides. A test that opens
-    a slide is meaningful only where the slides are staged, and failing on a clone
-    that was never given 30 GB of WSI would be a false alarm about the manifest.
+    Two independent things can be missing, and they call for opposite remedies, so
+    this distinguishes them instead of reporting one generic skip. `openslide` is
+    a native binding, not a pure-Python package: `pyproject.toml` declares
+    `openslide-python`, and the shared library it binds arrives as the
+    `openslide-bin` wheel on Windows and macOS, which has no Linux build, so a
+    Linux runner needs a system `libopenslide0` installed by the image. The import
+    is therefore attempted here, inside the helper, rather than at module scope: a
+    module-scope import would make one absent native library a collection *error*
+    for every test in this file, including all the ones that never open a slide
+    and would otherwise pass anywhere.
+
+    The slides are the second reason. `.gitignore` holds `data/` and `*.svs`, so
+    the images are out of the repository on purpose and a fresh clone has the
+    manifest but no slides. A test that opens a slide is meaningful only where the
+    slides are staged, and failing on a clone that was never given 30 GB of WSI
+    would be a false alarm about the manifest.
+
+    Returns the imported `openslide` module for the caller to open slides with.
     """
+    openslide = pytest.importorskip(
+        "openslide",
+        reason="openslide cannot be imported, so no .svs can be opened; install the "
+        "native library (the openslide-bin wheel on Windows and macOS, a system "
+        "libopenslide0 on Linux, which openslide-bin has no wheel for)",
+    )
     manifest = default_config().path("paths.manifest")
     if not any(manifest.parent.glob("*.svs")):
         pytest.skip(
             f"no .svs beside {manifest}: the slides are git-ignored by design, "
             f"so a fresh clone carries the manifest and no image files"
         )
+    return openslide
 
 
 _QUICKHASH_LINE = re.compile(r"^#\s+(\S+\.svs)\s+([0-9a-f]{64})$")
@@ -104,6 +125,27 @@ def _recorded_quickhashes():
         if match is not None:
             recorded[match.group(1)] = match.group(2)
     return recorded
+
+
+# The header's field-provenance table, one row per `Specimen` field. A row is any
+# three-space-indented comment line that is not a quickhash line: the field name is
+# the first token, the marking is the last. The marking is not matched here on
+# purpose, so a misspelled one is parsed as the row it is rather than vanishing
+# from the table and leaving the check below with nothing to complain about.
+_PROVENANCE_ROW = re.compile(r"^#\s{3}(\S+)\s+.+\s+(\S+)$")
+_PROVENANCE_MARKINGS = ("read", "derived", "inferred", "assigned")
+
+
+def _recorded_provenance_rows():
+    manifest = default_config().path("paths.manifest")
+    rows = []
+    for line in manifest.read_text(encoding="utf-8").splitlines():
+        if _QUICKHASH_LINE.match(line) is not None:
+            continue
+        match = _PROVENANCE_ROW.match(line)
+        if match is not None:
+            rows.append((match.group(1), match.group(2)))
+    return rows
 
 
 def test_missing_required_field_is_rejected(tmp_path):
@@ -244,7 +286,7 @@ def test_shipped_manifest_points_at_the_slides_on_disk():
 
 
 def test_manifest_header_quickhashes_match_the_slide_files():
-    _skip_without_slides()
+    openslide = _skip_without_slides()
     slides = {specimen.slide_path.name: specimen.slide_path for specimen in load_registry()}
     recorded = _recorded_quickhashes()
     assert sorted(recorded) == sorted(slides), (
@@ -255,6 +297,28 @@ def test_manifest_header_quickhashes_match_the_slide_files():
     for name, digest in sorted(recorded.items()):
         with openslide.OpenSlide(str(slides[name])) as opened:
             assert opened.properties["openslide.quickhash-1"] == digest, name
+
+
+def test_manifest_header_provenance_table_covers_every_specimen_field():
+    rows = _recorded_provenance_rows()
+    recorded = {field for field, _ in rows}
+    declared = {field.name for field in fields(Specimen)}
+    assert recorded == declared, (
+        "the manifest header documents one provenance row per Specimen field, and a "
+        f"field added to the dataclass is legal in a manifest without that row; "
+        f"rows missing from the header: {sorted(declared - recorded)}; rows in the "
+        f"header that are not fields: {sorted(recorded - declared)}"
+    )
+    assert len(rows) == len(declared), "the header must not repeat a Specimen field"
+
+
+def test_manifest_header_provenance_markings_are_ones_the_header_declares():
+    rows = _recorded_provenance_rows()
+    assert rows, "the manifest header carries no field-provenance table to check"
+    unknown = sorted({marking for _, marking in rows} - set(_PROVENANCE_MARKINGS))
+    assert not unknown, (
+        f"the header declares its markings as {_PROVENANCE_MARKINGS}; found {unknown}"
+    )
 
 
 def test_shipped_manifest_records_the_scanner_and_the_inferred_stain():
@@ -328,6 +392,45 @@ def test_whitespace_only_licence_with_a_named_source_is_rejected(tmp_path):
         '  licence: "   "\n  slide_path: a.svs\n',
     )
     with pytest.raises(RegistryError, match="no licence"):
+        load_registry(manifest)
+
+
+def test_padded_source_is_compared_as_the_unpadded_escape_hatch(tmp_path):
+    """`source: "unknown "` is the escape hatch, padding and all.
+
+    The licence rule at `_parse_entry` compares `source` against the literal
+    `"unknown"`. An unstripped value misses that comparison, so a padded escape
+    hatch is read as a named source with no licence and the whole manifest is
+    rejected for a row that in fact declares one.
+    """
+    manifest = _write_manifest(
+        tmp_path,
+        'specimens:\n- id: X\n  source: "unknown "\n  slide_path: a.svs\n',
+    )
+    specimens = load_registry(manifest)
+    assert specimens[0].source == "unknown"
+    assert [s.id for s in excluded(specimens)] == ["X"]
+
+
+def test_padded_slide_path_resolves_to_the_file_that_exists(tmp_path):
+    (tmp_path / "a.svs").write_bytes(b"")
+    manifest = _write_manifest(
+        tmp_path,
+        'specimens:\n- id: X\n  source: unknown\n  slide_path: " a.svs "\n',
+    )
+    slide_path = load_registry(manifest)[0].slide_path
+    assert slide_path == tmp_path / "a.svs"
+    assert slide_path.is_file()
+
+
+def test_padded_identifier_does_not_defeat_the_duplicate_check(tmp_path):
+    manifest = _write_manifest(
+        tmp_path,
+        "specimens:\n"
+        '- id: "X "\n  source: unknown\n  slide_path: a.svs\n'
+        '- id: "X"\n  source: unknown\n  slide_path: b.svs\n',
+    )
+    with pytest.raises(RegistryError, match="duplicate"):
         load_registry(manifest)
 
 

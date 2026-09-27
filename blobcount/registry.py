@@ -129,7 +129,7 @@ def _required_text(entry: dict[str, Any], field: str, manifest: Path) -> str:
         )
     if not value.strip():
         raise RegistryError(f"manifest {manifest} field '{field}' is empty")
-    return value
+    return value.strip()
 
 
 def _optional_text(entry: dict[str, Any], field: str, manifest: Path) -> str | None:
