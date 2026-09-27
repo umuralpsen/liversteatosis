@@ -3,10 +3,11 @@
 from blobcount.config import (
     Config,
     ConfigError,
+    default_config,
     get_device,
     load,
     set_seed,
 )
 
-__all__ = ["Config", "ConfigError", "get_device", "load", "set_seed"]
+__all__ = ["Config", "ConfigError", "default_config", "get_device", "load", "set_seed"]
 __version__ = "0.1.0"

@@ -4,10 +4,32 @@
 overrides, rejects undeclared keys and missing required keys, and returns a
 `Config` whose keys can be read with dot notation.
 
-The declaration of what the code reads lives in `KNOWN_KEYS`. A key that is
-present in a configuration file but absent from `KNOWN_KEYS` is a hard error at
-load time, so a configuration key can never drift away from the code that uses
-it.
+Two independent checks keep configuration and code in agreement, and neither
+substitutes for the other:
+
+- `KNOWN_KEYS` is the declaration of what the code may read. A key present in a
+  configuration file, or introduced by an override, that is absent from
+  `KNOWN_KEYS` is a hard error at load time. The schema stops an undeclared key
+  from reaching a run; it says nothing about a declared key that nothing reads.
+  `tests/test_config.py` asserts that `KNOWN_KEYS` and `configs/default.yaml`
+  hold the same key set, in both directions.
+- `load` reads no key on the caller's behalf, because a caller asks for keys
+  after `load` has already returned, so read tracking can never be complete at
+  load time. A test instead scans the source of every module under `blobcount/`
+  and requires each declared key to appear there as a `cfg.get("...")` or
+  `cfg.path("...")` literal. The source scan stops a declared key that no code
+  reads from passing unnoticed.
+
+Declared interface:
+
+    load(path: Path | None = None, overrides: Sequence[str] = ()) -> Config
+    default_config() -> Config
+    get_device(cfg: Config | None = None) -> str
+    set_seed(seed: int | None = None, cfg: Config | None = None) -> None
+    Config.get(self, key: str, default: Any = _UNSET) -> Any
+    Config.set(self, key: str, value: Any) -> None
+    Config.path(self, key: str) -> Path
+    Config.unknown_keys(self) -> set[str]
 """
 
 from __future__ import annotations
@@ -15,7 +37,7 @@ from __future__ import annotations
 import os
 import random
 from collections.abc import Sequence
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
 import yaml
@@ -27,6 +49,7 @@ __all__ = [
     "KNOWN_KEYS",
     "PROJECT_ROOT",
     "REQUIRED_KEYS",
+    "default_config",
     "get_device",
     "load",
     "set_seed",
@@ -37,12 +60,29 @@ class ConfigError(Exception):
     """Raised when a configuration is unreadable, incomplete, or undeclared."""
 
 
-def _find_project_root() -> Path:
-    module = Path(__file__).resolve()
+class _Unset:
+    """Sentinel type telling `Config.get` that the caller passed no default."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "_UNSET"
+
+
+_UNSET = _Unset()
+
+
+def _find_project_root(start: Path | None = None) -> Path:
+    """Walk up from `start`, or from this module, to the holding pyproject.toml."""
+    module = Path(__file__).resolve() if start is None else Path(start).resolve()
     for candidate in module.parents:
         if (candidate / "pyproject.toml").is_file():
             return candidate
-    return module.parent.parent
+    raise ConfigError(
+        f"project root not found: no pyproject.toml in {module} or any parent directory, "
+        "so the expected configuration file 'configs/default.yaml' cannot be located; "
+        "run from a checkout of the project or pass an explicit path to load()"
+    )
 
 
 PROJECT_ROOT: Path = _find_project_root()
@@ -186,59 +226,48 @@ class Config:
     """Dotted-key view over loaded configuration data.
 
     Every `get`, `set`, and `path` call is recorded, so `unknown_keys()` can
-    report which declared keys no code has asked for.
+    report which declared keys no code has asked for. `load` records nothing
+    itself, so on a freshly loaded config `unknown_keys()` is every declared key.
     """
 
-    def __init__(
-        self,
-        data: dict[str, Any],
-        *,
-        source: Path | None = None,
-        project_root: Path | None = None,
-    ) -> None:
+    def __init__(self, data: dict[str, Any], *, source: Path | None = None) -> None:
         self._data = data
         self._source = Path(source) if source is not None else None
-        self._project_root = Path(project_root) if project_root is not None else PROJECT_ROOT
         self._read: set[str] = set()
 
-    @property
-    def source(self) -> Path | None:
-        return self._source
-
-    @property
-    def project_root(self) -> Path:
-        return self._project_root
-
-    def keys(self) -> list[str]:
+    def _keys(self) -> list[str]:
         """Return every dotted key currently declared by the loaded data."""
         return sorted(_iter_keys(self._data))
 
-    def get(self, key: str, default: Any = None) -> Any:
-        """Return the value at `key`, or `default` when `default` is not None."""
+    def get(self, key: str, default: Any = _UNSET) -> Any:
+        """Return the value at `key`.
+
+        A bare `get(key)` raises `ConfigError` for a key the data does not
+        declare. `get(key, default)` returns `default` instead, including when
+        `default` is `None`, so an optional key reads the way it is written.
+        """
         self._read.add(key)
         found, value = _lookup(self._data, key)
         if found:
             return value
-        if default is not None:
+        if default is not _UNSET:
             return default
         raise ConfigError(f"unknown key '{key}' in {self._describe()}")
 
     def set(self, key: str, value: Any) -> None:
-        """Write `value` at the dotted `key`, creating sections as needed."""
-        parts = key.split(".")
-        if not all(parts):
-            raise ConfigError(f"invalid key '{key}'")
+        """Write `value` at the dotted `key`, under the same check `load` applies."""
+        _validate_key(key, self._describe())
         _set_dotted(self._data, key, value)
         self._read.add(key)
 
     def path(self, key: str) -> Path:
-        """Return the value at `key` as a path.
+        """Return the value at `key` as a concrete platform `Path`.
 
-        Environment variables and `~` are expanded first. A value that is still
-        relative is resolved against the project root. On a non-POSIX platform a
-        configured POSIX-absolute value is returned as a `PurePosixPath` so the
-        configured string is preserved instead of being resolved against the
-        Windows project root.
+        Environment variables and `~` are expanded first. An absolute value is
+        returned as it stands; a value still relative afterwards is resolved
+        against the project root. A POSIX-absolute value on a non-POSIX platform
+        is read as an absolute path on the current drive, which is the only
+        interpretation that yields a `Path` able to open, create, or stat.
         """
         raw = self.get(key)
         if not isinstance(raw, str):
@@ -249,15 +278,11 @@ class Config:
         if not expanded.strip():
             raise ConfigError(f"key '{key}' holds an empty path in {self._describe()}")
         native = Path(expanded)
-        if native.is_absolute():
-            return native
-        if PurePosixPath(expanded).is_absolute():
-            return PurePosixPath(expanded)
-        return self._project_root / native
+        return native if native.is_absolute() else PROJECT_ROOT / native
 
     def unknown_keys(self) -> set[str]:
         """Return declared keys that were never requested through get, set, or path."""
-        return set(_iter_keys(self._data)) - self._read
+        return set(self._keys()) - self._read
 
     def _describe(self) -> str:
         return str(self._source) if self._source is not None else "in-memory configuration"
@@ -269,7 +294,11 @@ def load(path: Path | None = None, overrides: Sequence[str] = ()) -> Config:
     `path` defaults to `configs/default.yaml` inside the project. Each override
     is a `key=value` string whose value is parsed with `yaml.safe_load` so that
     types survive; a value that is not valid YAML, such as `%VAR%/out`, is kept
-    as a string.
+    as a string. An override whose parsed type differs from the type already
+    configured is rejected, so a mistyped boolean cannot silently invert a run.
+
+    No key is read here. Callers request keys after this returns, so marking them
+    read now would make `unknown_keys()` unconditionally empty.
     """
     source = Path(path) if path is not None else DEFAULT_CONFIG_PATH
     if not source.is_file():
@@ -280,40 +309,63 @@ def load(path: Path | None = None, overrides: Sequence[str] = ()) -> Config:
     if not isinstance(data, dict):
         raise ConfigError(f"configuration file must hold a mapping at the top level: {source}")
 
-    parsed = []
+    parsed: list[tuple[str, str, Any]] = []
     for item in overrides:
         key, raw, value = _parse_override(item)
         _validate_key(key, f"override '{key}={raw}'")
-        parsed.append((key, value))
-    for key, value in parsed:
+        parsed.append((key, raw, value))
+    for key, raw, value in parsed:
+        found, existing = _lookup(data, key)
+        if found and type(value) is not type(existing):
+            raise ConfigError(
+                f"override '{key}={raw}' has type {type(value).__name__}, "
+                f"but the configured value is {type(existing).__name__}"
+            )
         _set_dotted(data, key, value)
 
-    for key in _iter_keys(data):
+    declared = _iter_keys(data)
+    for key in declared:
         _validate_key(key, str(source))
-    missing = sorted(REQUIRED_KEYS - set(_iter_keys(data)))
+    missing = sorted(REQUIRED_KEYS - set(declared))
     if missing:
         raise ConfigError(f"missing required keys in {source}: " + ", ".join(missing))
 
-    config = Config(data, source=source)
-    for key in config.keys():
-        config.get(key)
-    for key in config.keys():
-        if key.startswith("paths."):
-            config.path(key)
-    return config
+    return Config(data, source=source)
 
 
-def set_seed(seed: int | None = None) -> None:
+_DEFAULT_CONFIG: Config | None = None
+
+
+def default_config() -> Config:
+    """Return the process-wide `Config` built from `configs/default.yaml`.
+
+    `get_device` and `set_seed` use it when they are given no config. It is
+    built on first use, so a caller that changes it with `Config.set` changes
+    what those two functions see.
+    """
+    global _DEFAULT_CONFIG
+    if _DEFAULT_CONFIG is None:
+        _DEFAULT_CONFIG = load()
+    return _DEFAULT_CONFIG
+
+
+def set_seed(seed: int | None = None, cfg: Config | None = None) -> None:
     """Seed `random`, `numpy`, and `torch` for reproducible runs.
 
-    When `seed` is None the value of `project.seed` from the default
-    configuration is used.
+    `seed` wins when given; otherwise the seed is `project.seed` read from `cfg`,
+    or from `configs/default.yaml` when `cfg` is None.
+
+    The `PYTHONHASHSEED` assignment below does not affect the running
+    interpreter: Python reads that variable once, at startup, so setting it here
+    is a no-op for this process. It is kept so that a child process launched
+    later in the run inherits the seed. Hash determinism for the current process
+    has to come from the launcher's environment.
     """
     import numpy as np
     import torch
 
     if seed is None:
-        seed = int(load().get("project.seed"))
+        seed = int((cfg if cfg is not None else default_config()).get("project.seed"))
     seed = int(seed)
     os.environ["PYTHONHASHSEED"] = str(seed)
     random.seed(seed)
@@ -325,11 +377,16 @@ def set_seed(seed: int | None = None) -> None:
     torch.backends.cudnn.benchmark = False
 
 
-def get_device() -> str:
-    """Return the configured device, probing CUDA when `project.device` is `auto`."""
+def get_device(cfg: Config | None = None) -> str:
+    """Return the configured device, probing CUDA when `project.device` is `auto`.
+
+    `project.device` is read from `cfg`, or from `configs/default.yaml` when
+    `cfg` is None. A value that is neither `auto`, `cpu`, nor `cuda` raises
+    `ConfigError` rather than being handed to `torch.device` unchecked.
+    """
     import torch
 
-    device = str(load().get("project.device"))
+    device = str((cfg if cfg is not None else default_config()).get("project.device"))
     if device == "auto":
         return "cuda" if torch.cuda.is_available() else "cpu"
     if device not in {"cpu", "cuda"}:
