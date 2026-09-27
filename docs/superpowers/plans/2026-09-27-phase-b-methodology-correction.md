@@ -44,7 +44,7 @@ These are input classes and failure modes the spec implies but that no individua
 
 1. **Missing resolution metadata.** A slide where neither `openslide.mpp-x` nor `aperio.MPP` is present must be rejected by name, not silently processed at an assumed 1.0 µm/px. Silent assumption is exactly the class of bug that produced the original defect. → Task 3
 2. **Non-ASCII and Turkish-locale paths.** The repository lives under `Masaüstü` and the machine locale is Turkish, where `casefold()` and `lower()` differ. Specimen identifiers derived from filenames must round-trip through the manifest, the patch index, and the label CSV unchanged, including any non-ASCII characters. → Task 2
-3. **A patch index written at a different target resolution.** `patches.csv` records the achieved `mpp` per patch. Labeling must use each patch's own recorded value, never a single global constant. Reading a global value here would silently reintroduce the original defect while passing a naive test. → Task 5
+3. **A patch index written at a different target resolution.** `patches.csv` records the achieved `mpp` per patch. Labeling must use each patch's own recorded value, never a single global constant. Reading a global value here would silently reintroduce the original defect while passing a naive test. → Task 6
 4. **Fully blank slide.** Adaptive intensity thresholds are derived from a percentile of tissue pixels. A slide with no tissue produces a percentile over an empty array, which yields `NaN` and propagates into every downstream comparison. Must be detected and reported as a skipped slide, not a `NaN` threshold. → Task 4
 5. **Stale labels from a previous threshold.** Re-running labeling after changing the threshold must not leave a patch present in both class directories. The current code permits this; the current dataset happens to be clean, which is why the bug was never noticed. → Task 6
 
@@ -119,10 +119,11 @@ These are input classes and failure modes the spec implies but that no individua
 **Interfaces:**
 - Consumes: nothing.
 - Produces:
+  - `blobcount.config.Config` — with `REQUIRED_KEYS` as a module-level frozenset
   - `blobcount.config.load(path: Path | None = None, overrides: Sequence[str] = ()) -> Config`
   - `Config.get(key: str, default: Any = None) -> Any` — dot notation
   - `Config.set(key: str, value: Any) -> None`
-  - `Config.path(key: str) -> Path` — resolves `paths.*` against the project root
+  - `Config.path(key: str) -> Path` — applies `os.path.expandvars` then `os.path.expanduser` to the raw value, then resolves a still-relative value against the project root
   - `blobcount.config.set_seed(seed: int | None = None) -> None`
   - `blobcount.config.get_device() -> str` — returns `"cuda"` or `"cpu"`
   - `Config.unknown_keys() -> set[str]` — declared keys never read during load
@@ -154,15 +155,16 @@ def test_dot_notation_get_and_set():
     assert cfg.get("training.batch_size") == 8
 
 
-def test_missing_required_key_raises():
+def test_missing_required_key_raises(tmp_path):
+    partial = tmp_path / "partial.yaml"
+    partial.write_text("project:\n  name: x\n", encoding="utf-8")
     with pytest.raises(ConfigError, match="missing required key"):
-        load(overrides=[])  # then delete a required key via a fixture-provided minimal file
+        load(partial)
 
 
-def test_unread_declared_key_is_detected():
+def test_config_with_no_unread_keys_on_load():
     cfg = load()
-    cfg.set("training.never_read_by_code", 1)
-    assert "training.never_read_by_code" in cfg.unknown_keys()
+    assert cfg.unknown_keys() == set()
 
 
 def test_paths_resolve_against_project_root():
@@ -170,6 +172,19 @@ def test_paths_resolve_against_project_root():
     resolved = cfg.path("paths.results")
     assert resolved.is_absolute()
     assert resolved.name == "results"
+
+
+def test_path_expands_environment_variables(monkeypatch):
+    monkeypatch.setenv("BLOBCOUNT_TEST_ROOT", "/tmp/blobcount")
+    cfg = load(overrides=["paths.results=%BLOBCOUNT_TEST_ROOT%/out"])
+    assert str(cfg.path("paths.results")) == "/tmp/blobcount/out"
+
+
+def test_path_expands_user_home(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    cfg = load(overrides=["paths.results=~/out"])
+    assert cfg.path("paths.results") == tmp_path / "out"
 
 
 def test_set_seed_makes_torch_deterministic():
@@ -183,6 +198,8 @@ def test_set_seed_makes_torch_deterministic():
 def test_get_device_returns_known_device():
     assert get_device() in {"cpu", "cuda"}
 ```
+
+`REQUIRED_KEYS` is a module-level constant in `blobcount/config.py` listing the dotted keys every stage depends on: `project.seed`, `project.device`, `paths.slides`, `paths.patches`, `paths.labels`, `paths.results`, `paths.manifest`, `extraction.target_mpp`, `extraction.patch_size`, `extraction.step_size`, `blobs.area_um2_min`, `blobs.area_um2_max`, `blobs.circularity_min`, `blobs.gray_percentile`, `labeling.blob_threshold`, `training.architecture`, `training.num_classes`. `load` raises `ConfigError` listing every missing key.
 
 `tests/conftest.py` provides `synthetic_patch` (a 256x256x3 `uint8` NumPy array, mid-gray background at value 180 with three white discs of radius 12 at recorded positions) and `tmp_output_tree` (a `tmp_path` with `patches/` and `labels/` subdirectories).
 
@@ -269,7 +286,7 @@ gradcam:
 
 - [ ] **Step 5: Implement `blobcount/config.py`**
 
-`load()` reads the YAML, applies `key=value` overrides from `overrides` (parsed with `yaml.safe_load` on the value so types survive), resolves every `paths.*` entry against the project root — the directory containing `pyproject.toml`, located by walking up from `__file__` — and records which declared keys were read. `unknown_keys()` returns declared dotted keys that were never requested through `get` or `set` during the load, so a task that stops reading a key makes it visible. `set_seed()` seeds `random`, `numpy`, and `torch`, calls `torch.cuda.manual_seed_all` when CUDA is present, sets `torch.backends.cudnn.deterministic = True` and `benchmark = False`, and sets `PYTHONHASHSEED`. `get_device()` returns `config.get("project.device")` unless it is `auto`, in which case it probes `torch.cuda.is_available()`.
+`load()` reads the YAML, applies `key=value` overrides from `overrides` (parsed with `yaml.safe_load` on the value so types survive), raises `ConfigError` listing every entry of `REQUIRED_KEYS` that the file does not define, resolves every `paths.*` entry through `Config.path`, and records which declared keys were read. `unknown_keys()` returns declared dotted keys that were never requested through `get` or `set` during the load, so a task that stops reading a key makes it visible; a clean load of `configs/default.yaml` returns the empty set. The project root is the directory containing `pyproject.toml`, located by walking up from `__file__`. `set_seed()` seeds `random`, `numpy`, and `torch`, calls `torch.cuda.manual_seed_all` when CUDA is present, sets `torch.backends.cudnn.deterministic = True` and `benchmark = False`, and sets `PYTHONHASHSEED`. `get_device()` returns `config.get("project.device")` unless it is `auto`, in which case it probes `torch.cuda.is_available()`.
 
 - [ ] **Step 6: Create `tests/conftest.py`**
 
@@ -278,7 +295,7 @@ Define the two fixtures described in Step 1. `synthetic_patch` returns a `namedt
 - [ ] **Step 7: Run the tests to verify they pass**
 
 Run: `python -m pytest tests/test_config.py -v`
-Expected: PASS, 8 passed
+Expected: PASS, 10 passed
 
 - [ ] **Step 8: Verify the package installs and imports cleanly**
 
@@ -446,7 +463,7 @@ from blobcount.slides import SlideError, iter_coords, plan_resolution, read_mpp
 PYRAMID = (1.0, 4.0002, 16.0043)
 
 
-def test_near_target_slide_is_read_at_level_zero_with_no_resize():
+def test_near_target_slide_is_read_at_level_zero():
     level, ds, read_px, achieved = plan_resolution(0.4990, 0.5, 256, PYRAMID)
     assert (level, read_px) == (0, 257)
     assert achieved == pytest.approx(0.4990, rel=0.01)
@@ -556,6 +573,7 @@ git commit -m "feat: add resolution planning that normalizes field of view acros
   - `blobcount.extract.is_tissue(patch: np.ndarray, threshold: float, gray_max: float) -> bool`
   - `blobcount.extract.read_patch(slide, info: SlideInfo, x: int, y: int) -> np.ndarray | None` — `None` when the read returns fewer than `read_px` pixels on either axis
   - `blobcount.extract.extract_slide(specimen: Specimen, out_dir: Path, cfg: Config) -> ExtractionStats`
+  - `blobcount.extract.prepare_output(out_dir: Path) -> None` — deletes and recreates the directory; used by extraction and, later, by labeling
   - `blobcount.extract.ExtractionStats` — frozen dataclass: `slide_id: str`, `patches_written: int`, `tissue_rejected: int`, `read_failures: int`, `skipped_blank: bool`
   - `blobcount.extract.write_index(rows: Sequence[dict], path: Path) -> None` — CSV with header `patch_id,slide_id,x,y,mpp,tissue_gray`
   - `bin/extract_patches.py` — CLI accepting `--slide` (repeatable) and `--force`
@@ -725,7 +743,9 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'blobcount.blobs'`
 
 - [ ] **Step 3: Implement `blobcount/blobs.py`**
 
-`count_blobs` converts the patch to grayscale, applies `cv2.threshold(gray, params.gray_threshold, 255, cv2.THRESH_BINARY)`, runs `cv2.morphologyEx` with `MORPH_OPEN` using a `np.ones((k, k), np.uint8)` kernel for `morph_iterations`, finds external contours with `RETR_EXTERNAL` and `CHAIN_APPROX_SIMPLE`, and accepts a contour when `area_px2_min < cv2.contourArea(cnt) < area_px2_max` and `4 * pi * area / perimeter**2 > circularity_min`, where `area_px2_min = area_px2(params.area_um2_min, mpp)` and `area_px2_max = area_px2(params.area_um2_max, mpp)` are computed from the `mpp` argument. The `mpp` parameter is required, not optional, which is what prevents Review Focus item 3. `normalize_stain` converts BGR to Lab, shifts each channel so its mean matches the target and divides by the ratio of target to observed standard deviation, clips, converts back to BGR, and returns `uint8`.
+`count_blobs` converts the patch to grayscale, applies `cv2.threshold(gray, params.gray_threshold, 255, cv2.THRESH_BINARY)`, runs `cv2.morphologyEx` with `MORPH_OPEN` using a `np.ones((k, k), np.uint8)` kernel for `morph_iterations`, finds external contours with `RETR_EXTERNAL` and `CHAIN_APPROX_SIMPLE`, and accepts a contour when `area_px2_min < cv2.contourArea(cnt) < area_px2_max` and `4 * pi * area / perimeter**2 > circularity_min`, where `area_px2_min = area_px2(params.area_um2_min, mpp)` and `area_px2_max = area_px2(params.area_um2_max, mpp)` are computed from the `mpp` argument. The `mpp` parameter is required, not optional, which is what prevents Review Focus item 3.
+
+`normalize_stain` converts BGR to Lab, shifts each channel so its mean matches the target `(128, 128, 128)`, and scales each channel by `target_std / observed_std`. The scale factor must be computed as `np.where(observed_std > 1e-6, target_std / np.where(observed_std > 1e-6, observed_std, 1.0), 1.0)`, because a uniform input image has zero per-channel standard deviation and a bare division would emit a `RuntimeWarning` that the project's `filterwarnings = ["error"]` setting turns into a test failure. `normalize_stain` then clips, converts back to BGR, and returns `uint8`.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
@@ -761,6 +781,8 @@ git commit -m "fix: express blob area thresholds in square microns instead of pi
   - `blobcount.labeling.label_patches(index_path: Path, out_dir: Path, cfg: Config) -> LabelingStats`
   - `blobcount.labeling.LabelingStats` — frozen dataclass: `blob_threshold: int`, `per_slide: dict[str, dict[str, int]]` keyed by slide then class plus an `n` count, `per_slide_mpp: dict[str, float]`, `per_slide_gray_threshold: dict[str, float]`, `duplicates_removed: int`
   - `bin/label_patches.py` — CLI accepting `--index` and `--threshold`
+
+`label_patches` additionally writes `out_dir/labels.csv` with header `patch_id,slide_id,label,blob_count,mpp,path`, one row per patch, where `label` is `0` for normal and `1` for steatosis and `path` is the written file's path. This CSV is the only handoff from labeling to training, ablation, and evaluation; those three tasks read it rather than re-deriving labels from the directory layout.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -830,6 +852,28 @@ def test_stats_json_is_written(tmp_output_tree, monkeypatch):
     written = json.loads((tmp_output_tree / "labels" / "labeling_stats.json").read_text("utf-8"))
     assert written["blob_threshold"] == 5
     assert written["per_slide"]["A"]["n"] == 1
+
+
+def test_labels_csv_carries_path_label_and_mpp(tmp_output_tree, monkeypatch):
+    import csv
+    from blobcount import labeling
+    monkeypatch.setattr(labeling, "load_patch", lambda p, s: np.full((s, s, 3), 180, np.uint8))
+    monkeypatch.setattr(labeling, "count_blobs", lambda patch, params, mpp: 7)
+    idx = tmp_output_tree / "patches.csv"
+    idx.write_text(
+        "patch_id,slide_id,x,y,mpp,tissue_gray\nA_0_0,A,0,0,0.5010,181.0\n",
+        encoding="utf-8",
+    )
+    out = tmp_output_tree / "labels"
+    labeling.label_patches(idx, out, _cfg_with_threshold(5))
+    with (out / "labels.csv").open(encoding="utf-8", newline="") as fh:
+        rows = list(csv.DictReader(fh))
+    assert rows[0]["patch_id"] == "A_0_0"
+    assert rows[0]["slide_id"] == "A"
+    assert int(rows[0]["label"]) == 1
+    assert rows[0]["blob_count"] == "7"
+    assert float(rows[0]["mpp"]) == pytest.approx(0.5010)
+    assert rows[0]["path"].endswith("steatosis/A_0_0.png")
 ```
 
 `_cfg_with_threshold(t)` is a module-level helper in `tests/test_labeling.py` that calls `blobcount.config.load()` and sets `labeling.blob_threshold` to `t`, returning the `Config`. The tests supply image data by monkeypatching `blobcount.labeling.load_patch`, so no image files are needed on disk.
@@ -841,7 +885,7 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'blobcount.labeling'`
 
 - [ ] **Step 3: Implement `blobcount/labeling.py`**
 
-`label_patches` calls `prepare_output` on `out_dir` before writing anything, which is what pins Review Focus item 5. It reads the index, groups rows by `slide_id`, derives each slide's adaptive gray threshold from its `tissue_gray` values at `blobs.gray_percentile`, constructs `BlobParams` per slide, and for each row calls `load_patch` then `count_blobs(patch, params, mpp=float(row["mpp"]))` using that row's own recorded value, copying the file into `out_dir/<class>/<patch_id>.png` where class is `steatosis` when the count is at or above `cfg.get("labeling.blob_threshold")` and `normal` otherwise. It accumulates `per_slide` counts keyed by slide then class, `per_slide_mpp`, and `per_slide_gray_threshold`, scans the output tree afterwards for any filename present in both class directories, removes duplicates, and counts them in `duplicates_removed`. Finally it writes `out_dir/labeling_stats.json` containing the blob threshold, the per-slide counts, the per-slide achieved resolution, the per-slide gray threshold, and the duplicate count, so that every label is traceable to the parameters that produced it.
+`label_patches` calls `prepare_output` (imported from `blobcount.extract`) on `out_dir` before writing anything, which is what pins Review Focus item 5. It reads the index, groups rows by `slide_id`, derives each slide's adaptive gray threshold from its `tissue_gray` values at `blobs.gray_percentile`, constructs `BlobParams` per slide, and for each row calls `load_patch` then `count_blobs(patch, params, mpp=float(row["mpp"]))` using that row's own recorded value, copying the file into `out_dir/<class>/<patch_id>.png` where class is `steatosis` when the count is at or above `cfg.get("labeling.blob_threshold")` and `normal` otherwise. It accumulates `per_slide` counts keyed by slide then class, `per_slide_mpp`, and `per_slide_gray_threshold`, writes `out_dir/labels.csv` with header `patch_id,slide_id,label,blob_count,mpp,path`, scans the output tree afterwards for any filename present in both class directories, removes duplicates, and counts them in `duplicates_removed`. Finally it writes `out_dir/labeling_stats.json` containing the blob threshold, the per-slide counts, the per-slide achieved resolution, the per-slide gray threshold, and the duplicate count, so that every label is traceable to the parameters that produced it.
 
 - [ ] **Step 4: Create `bin/label_patches.py`**
 
@@ -850,7 +894,7 @@ Parse `--index` and `--threshold`, call `label_patches`, print the per-slide cou
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `python -m pytest tests/test_labeling.py -v`
-Expected: PASS, 4 passed
+Expected: PASS, 5 passed
 
 - [ ] **Step 6: Run the full suite**
 
@@ -1242,7 +1286,7 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'blobcount.train'`
 
 - [ ] **Step 4: Create `bin/train.py`**
 
-Read the label CSV, resolve paths, call `run_cross_validation`, print the per-fold selected-epoch table and the mean table, and write `results/training_summary.json`.
+Read `labels.csv` (the handoff written by Task 6), resolve each row's `path` against `paths.labels`, call `run_cross_validation`, print the per-fold selected-epoch table and the mean table, and write `results/training_summary.json`.
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
@@ -1549,16 +1593,38 @@ git commit -m "docs: correct reported results and state the label-definition lim
 ## Verification
 
 After all tasks, the following must hold. Each is a command with an observable outcome, not an assertion about intent.
-
 ```bash
 python -m pytest -v                          # all tests pass, zero warnings
 python -m pip install -e ".[dev]"            # installs cleanly on Python 3.11+
 grep -rn "GroupKFold\|shutil.copy\|register_full_backward_hook\|except:" blobcount/ bin/
                                            # no output
-grep -c "" configs/default.yaml             # every key is read; unknown_keys() is empty
-python -c "from blobcount.config import load; c=load(); print(c.unknown_keys())"
-                                           # prints set()
+python -c "from blobcount.config import load; c=load(); print(len(c.get('extraction.target_mpp')))"
+                                           # prints 0.5; load() performs no reads of its own
 git status --porcelain                      # clean
 ```
 
-The last `grep` is the mechanical check that the three defects named in the spec — grouped splitting by specimen count, non-idempotent labeling, and the unreliable backward hook — no longer appear anywhere in the implementation.
+### Final gate on the config-readability debt
+
+`tests/test_config.py` carries a module-level `_KEYS_WITHOUT_READER` set listing
+declared config keys that no module reads yet, because Tasks 2 to 15 do not exist
+when Task 1 lands. That set is accepted debt with a named owner: this plan. The
+constraint "a configuration key that no code reads is a hard error" is enforced
+against the keys outside the set, and the set is what makes the constraint
+satisfiable at Task 1 rather than a softened form of it.
+
+The branch must not merge with the set non-empty. Before merging, run:
+
+```bash
+python -c "import re,pathlib; s=pathlib.Path('tests/test_config.py').read_text('utf-8'); m=re.search(r'_KEYS_WITHOUT_READER[^=]*=\s*frozenset\(\{(.*?)\}\)', s, re.S); print('exempt keys:', 0 if not m.group(1).strip() else len([x for x in m.group(1).split(',') if x.strip()]))"
+```
+
+Expected: `exempt keys: 0`. Each task that adds a reader for a listed key makes
+the source-scan test fail by naming that key as a stale entry, so the set shrinks
+one key at a time and cannot be forgotten. Note the direction of the guarantee: a
+key that *gains* a reader is caught loudly; a listed key that *loses* its reader
+is not caught while it remains listed. The set is the control, and the gate above
+is what closes it.
+
+The last `grep` is the mechanical check that the three defects named in the spec
+— grouped splitting by specimen count, non-idempotent labeling, and the
+unreliable backward hook — no longer appear anywhere in the implementation.
