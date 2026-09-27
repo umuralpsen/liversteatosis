@@ -452,14 +452,22 @@ def prepare_output(
     **`paths.patches` is a hand-edited string in `configs/default.yaml`, and this
     function deletes whatever `Path` it is handed.** `paths.patches: .` makes a
     `--force` run an irreversible deletion of the repository, the manifest and every
-    staged slide, with no confirmation and no way back. Three targets are refused
+    staged slide, with no confirmation and no way back. Every target below is refused
     before anything is removed, and the refusal is an `OutputPathError` rather than a
     partial delete:
 
     - the project root itself, and
+    - `paths.slides` and `paths.manifest` themselves, and
     - any directory that contains `paths.slides` or `paths.manifest`, and
     - anything not strictly below the project root, which covers a target outside the
       project and one reached through a `..` that climbs out of it.
+
+    A protected path is refused on equality as well as on containment. `_is_below` is
+    strict, so a target that *is* `paths.slides` is not below it and the ancestor clause
+    alone would let it through; in the real configuration `paths.slides` is `data`, so
+    a `paths.patches` hand-edit to `data` is one character from the case that is
+    covered and reaches the delete. That is the same catastrophe, so it is refused
+    before the containment test rather than after it.
 
     `root` defaults to the project root and `protected` to the configured slides and
     manifest. Both are parameters so a test can state the boundary instead of
@@ -479,6 +487,11 @@ def prepare_output(
         else tuple((str(item), Path(item)) for item in protected)
     )
     for name, item in guarded:
+        if resolved == item.resolve():
+            raise OutputPathError(
+                f"refusing to delete {resolved}: it is {name} itself, so clearing it "
+                f"would destroy the source data"
+            )
         if _is_below(item, resolved):
             raise OutputPathError(
                 f"refusing to delete {resolved}: {name} is at {item} and is inside it, so "
@@ -526,7 +539,7 @@ def summarise_tissue_gray(index_path: Path, *, blank_slides: Collection[str] = (
     """Return the distribution of the `tissue_gray` column over an index.
 
     The keys are `count`, `min`, `max`, `mean`, `p05`, `p50`, `p95` and
-    `skipped_blank_rows`. The statistics are `None` rather than a number for an index
+    `skipped_blank_slides`. The statistics are `None` rather than a number for an index
     with no rows, because a percentile of nothing has no value and reporting `0.0`
     would put a plausible number where a missing one is the truth.
 
@@ -541,21 +554,22 @@ def summarise_tissue_gray(index_path: Path, *, blank_slides: Collection[str] = (
     extraction; what belongs to this module is the function, so that the measurement
     is one command against a committed index.
 
-    `skipped_blank_rows` counts the rows whose `slide_id` is in `blank_slides`. The
-    flag is passed rather than read because the index has no such column: a slide
-    reported `skipped_blank` wrote no rows at all, so the flag lives in the
-    `ExtractionStats` of the run that saw it and not in the file. Called with no
-    `blank_slides` the count is 0, which is the correct answer for an index this
-    pipeline writes and not a default to be trusted.
+    **`skipped_blank_slides` counts the slides the caller reports blank, not the rows
+    the file carries for them.** A slide reported `skipped_blank` wrote no patches and
+    no rows, so the index of a run that saw one names it nowhere and a count taken from
+    the file is 0 for every index this pipeline writes. The flag is passed in rather
+    than read, because the index has no such column and its header is pinned for the
+    consumers downstream. Called with no `blank_slides` the count is 0, which is then
+    the correct answer for an index this pipeline writes and not a default to be
+    trusted.
     """
     target = Path(index_path)
     with target.open(encoding="utf-8", newline="") as handle:
         rows = list(csv.DictReader(handle))
     values = [float(row["tissue_gray"]) for row in rows]
-    blank = set(blank_slides)
     summary = {
         "count": len(values),
-        "skipped_blank_rows": sum(1 for row in rows if row["slide_id"] in blank),
+        "skipped_blank_slides": len(set(blank_slides)),
     }
     if not values:
         return {**summary, **{name: None for name in ("min", "max", "mean", "p05", "p50", "p95")}}

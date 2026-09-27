@@ -1,6 +1,7 @@
 import csv
 import dataclasses
 import importlib.util
+import shutil
 import sys
 from pathlib import Path
 
@@ -249,6 +250,36 @@ def test_prepare_output_refuses_a_directory_that_holds_the_slides(project_scratc
     assert (slides / "2.svs").read_bytes() == b"x"
 
 
+def test_prepare_output_refuses_a_target_that_is_the_slides_directory(project_scratch):
+    # The same slide directory as the test above, handed over as the target rather
+    # than as a directory containing it. `_is_below` is strict, so a target that *is*
+    # the protected path is not below it and the ancestor clause does not fire.
+    slides = project_scratch / "data" / "slides"
+    slides.mkdir(parents=True)
+    (slides / "2.svs").write_bytes(b"x")
+    with pytest.raises(OutputPathError, match="slides") as refused:
+        prepare_output(slides, protected=[slides])
+    assert "destroy the source data" in str(refused.value)
+    assert (slides / "2.svs").read_bytes() == b"x"
+
+
+def test_prepare_output_refuses_the_configured_slides_directory():
+    # `paths.patches` hand-edited to the directory `paths.slides` names, with
+    # `--force`. The target and the protected path are then the same directory, and
+    # clearing it takes the manifest and every staged slide. Asserted against the
+    # real configuration because the equality to be refused is between two configured
+    # paths, and the target is read here through a separate load from the one the
+    # guard reads, so a caller and the guard cannot agree by accident.
+    slides = load().path("paths.slides")
+    staged = sorted(path.name for path in slides.glob("*.svs"))
+    assert staged, "no staged slides, so the refusal would not be exercised against anything"
+    with pytest.raises(OutputPathError, match="paths.slides") as refused:
+        prepare_output(slides)
+    assert "destroy the source data" in str(refused.value)
+    assert slides.is_dir()
+    assert sorted(path.name for path in slides.glob("*.svs")) == staged
+
+
 def test_prepare_output_refuses_a_target_outside_the_project_root(tmp_path):
     outside = tmp_path / "patches"
     outside.mkdir()
@@ -263,8 +294,18 @@ def test_prepare_output_refuses_a_sibling_that_shares_the_root_prefix():
     # directory. A string-prefix containment test would call it inside the project.
     sibling = Path(f"{PROJECT_ROOT}-backup")
     assert sibling.name == f"{PROJECT_ROOT.name}-backup"
-    with pytest.raises(OutputPathError, match="not strictly below"):
-        prepare_output(sibling)
+    # The target does not exist, so the refusal is the only thing that keeps this test
+    # from making a directory in the user's OneDrive parent. If the guard ever
+    # regresses, `prepare_output` reaches `mkdir` and the test removes what it made
+    # rather than leaving a `Proje-backup` behind and reporting only a bare failure.
+    created = not sibling.exists()
+    try:
+        with pytest.raises(OutputPathError, match="not strictly below"):
+            prepare_output(sibling)
+    finally:
+        if created:
+            shutil.rmtree(sibling, ignore_errors=True)
+    assert not sibling.exists()
 
 
 def test_prepare_output_refuses_a_target_reached_through_a_dot_dot(project_scratch):
@@ -650,20 +691,33 @@ def test_summarise_tissue_gray_reports_the_distribution_of_an_index(tmp_path):
         "p05": pytest.approx(17.6),
         "p50": pytest.approx(150.0),
         "p95": pytest.approx(236.2),
-        "skipped_blank_rows": 0,
+        "skipped_blank_slides": 0,
     }
 
 
-def test_summarise_tissue_gray_counts_the_rows_of_a_slide_reported_blank(tmp_path):
-    rows = [
-        {"patch_id": f"p{index}", "slide_id": "2" if index < 3 else "3", "x": index, "y": 0,
-         "mpp": 0.5, "tissue_gray": 100.0 + index}
-        for index in range(5)
-    ]
+def test_summarise_tissue_gray_counts_the_slides_reported_blank(monkeypatch, tmp_path):
+    # A slide reported blank writes no patches and no rows, so the index of a run that
+    # saw one carries no evidence that it was skipped: the count is slides the caller
+    # reports, not rows found in the file. Both the rows and the index here come from a
+    # real run over a fake blank slide, and the slide that is reported blank is named in
+    # no row of it, which is why `count` is 0 while the blank count is 1.
+    _install_fake_slide(monkeypatch, FakeSlide(default=_blank))
+    rows = []
+    stats = extract_slide(_specimen("2", "data/2.svs"), tmp_path / "patches", load(), rows=rows)
+    assert (stats.skipped_blank, rows, stats.patches_written) == (True, [], 0)
     index = tmp_path / "patches.csv"
     write_index(rows, index)
-    assert summarise_tissue_gray(index, blank_slides=["3"])["skipped_blank_rows"] == 2
-    assert summarise_tissue_gray(index)["skipped_blank_rows"] == 0
+    assert summarise_tissue_gray(index, blank_slides=[stats.slide_id]) == {
+        "count": 0,
+        "min": None,
+        "max": None,
+        "mean": None,
+        "p05": None,
+        "p50": None,
+        "p95": None,
+        "skipped_blank_slides": 1,
+    }
+    assert summarise_tissue_gray(index)["skipped_blank_slides"] == 0
 
 
 def test_summarise_tissue_gray_reports_no_number_for_an_index_with_no_rows(tmp_path):
@@ -671,7 +725,7 @@ def test_summarise_tissue_gray_reports_no_number_for_an_index_with_no_rows(tmp_p
     write_index([], index)
     summary = summarise_tissue_gray(index)
     assert summary["count"] == 0
-    assert summary["skipped_blank_rows"] == 0
+    assert summary["skipped_blank_slides"] == 0
     assert all(summary[name] is None for name in ("min", "max", "mean", "p05", "p50", "p95"))
 
 
