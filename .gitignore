@@ -35,3 +35,6 @@ venv/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Superpowers SDD scratch workspace (ledger, briefs, review packages)
+.superpowers/
