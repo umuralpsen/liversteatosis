@@ -1525,7 +1525,23 @@ Edit `configs/default.yaml` so `paths.slides` and `paths.manifest` are absolute 
 
 - [ ] **Step 6: Update `.gitignore`**
 
-Keep the existing rules. Add `Colab_Proje.zip` explicitly with a comment recording that it is 10.1 GB and is a graduation-project archive whose contents have not yet been inspected, so that it cannot be committed by accident even if the `*.zip` rule is ever removed.
+Keep the existing rules. Two changes are required, and the first is not
+optional.
+
+Replace the bare `data/` line with `data/*`, then add `!data/manifest.yaml`
+immediately after it. Git cannot re-include a file inside an excluded
+directory, so a bare `data/` plus a negation leaves the manifest ignored and
+invisible; `data/*` excludes the directory's contents while permitting the one
+negated path. Verify with `git check-ignore -v data/manifest.yaml`, which must
+produce no output, and `git ls-files data/`, which must list only the manifest
+and none of the six `.svs` files. This is the state the manifest is already
+committed in, reached by `git add -f`; the ignore rule must be brought in line
+with it.
+
+Add `Colab_Proje.zip` explicitly with a comment recording that it is 10.1 GB and
+is a graduation-project archive whose contents were inspected on 2026-09-27 and
+found to contain no larger cohort, so that it cannot be committed by accident
+even if the `*.zip` rule is ever removed.
 
 - [ ] **Step 7: Verify the configuration still loads and the registry still validates**
 
