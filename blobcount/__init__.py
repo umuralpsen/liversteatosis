@@ -1,5 +1,14 @@
 """Liver steatosis detection: patching, blob counting, and histopathology classification."""
 
+from blobcount.blobs import (
+    BlobParams,
+    area_px2,
+    count_blobs,
+    gray_threshold_from_patch,
+    normalize_stain,
+    params_from_config,
+    prepare_patch,
+)
 from blobcount.config import (
     Config,
     ConfigError,
@@ -37,6 +46,7 @@ from blobcount.slides import (
 )
 
 __all__ = [
+    "BlobParams",
     "Config",
     "ConfigError",
     "ExtractionStats",
@@ -44,19 +54,25 @@ __all__ = [
     "SlideError",
     "SlideInfo",
     "Specimen",
+    "area_px2",
+    "count_blobs",
     "default_config",
     "excluded",
     "extract_slide",
     "get_device",
+    "gray_threshold_from_patch",
     "is_tissue",
     "iter_coords",
     "iter_coords_from_config",
     "load",
     "load_registry",
+    "normalize_stain",
     "open_info",
     "open_info_from_config",
     "patches_dir",
+    "params_from_config",
     "plan_resolution",
+    "prepare_patch",
     "prepare_output",
     "read_mpp",
     "read_patch",

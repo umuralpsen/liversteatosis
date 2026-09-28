@@ -21,7 +21,7 @@ from blobcount.config import (
 # `cfg.path("a.b")`. A key the code never reads cannot match.
 _KEY_READ = re.compile(r"""\.(?:get|path)\(\s*["']([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+)["']""")
 
-# Every declared key that no module under blobcount/ reads yet. The other 36
+# Every declared key that no module under blobcount/ reads yet. The other 29
 # consumer keys arrive with later tasks. The equality below pins both directions,
 # so this set cannot mask a regression in either one: a key that gains a reader is
 # named as a stale entry to delete, and a key that loses one is named as an unread
@@ -37,13 +37,6 @@ _KEYS_WITHOUT_READER: frozenset[str] = frozenset(
         "augmentation.horizontal_flip",
         "augmentation.rotation_degrees",
         "augmentation.vertical_flip",
-        "blobs.area_um2_max",
-        "blobs.area_um2_min",
-        "blobs.circularity_min",
-        "blobs.gray_percentile",
-        "blobs.morph_iterations",
-        "blobs.morph_kernel_size",
-        "blobs.stain_normalization",
         "evaluation.bootstrap_samples",
         "evaluation.confidence_level",
         "gradcam.alpha",
