@@ -26,19 +26,24 @@ would then need `--force`, which deletes what the run just produced.
 **Three outcomes, three codes.** A run that completed is `EXIT_OK = 0`. A selected
 specimen that yielded no accepted patch is `EXIT_BLANK_SLIDE = 1`. A refusal is
 `EXIT_REFUSED = 2`, and a refusal is always an answer about the configuration or the
-dataset, never about this program. Nine refusals reach it, in four groups by the exception
-that carries them, and nothing else does:
+dataset, never about this program. **Eight** refusals reach it — one per arm of `main` that
+can refuse, plus this program's own empty-tree check, and with the opening `ConfigError`
+arm counted twice because it carries two of them. They are: `load` refusing the file and a
+`paths.patches` `Config.path` refuses, on that one arm; the `ConfigError` around
+`load_registry`; the `RegistryError` beside it; the `LookupError` around `_select`; the
+check that an unforced patch tree is empty; the `OutputPathError` around `prepare_output`;
+and the `SlideError` around `extract_slide`. In four groups by the exception that carries
+them, and nothing this program does does. It was nine before round 6, and the one that
+left is `paths.slides` refused from inside the guard, which now arrives on the
+`OutputPathError` arm below rather than on an arm of its own:
 
 - **A configuration**, as a `ConfigError`. `load` refusing the file: it is not there, its
   top level is not a mapping, it declares a key this project does not, or it omits one the
   project requires. And a `paths.*` that `load` accepted because it validates nothing past
   the key's presence but `Config.path` refused, because it is not a path string or is
-  empty: `paths.patches` for this program's own output target, `paths.manifest` inside
-  `load_registry`, and `paths.slides` inside the guard `prepare_output` resolves before it
-  deletes anything — that guard reads `paths.manifest` as well, but `load_registry` has
-  already resolved that key above, so `paths.slides` is the only one that can be the first
-  refusal there. Every one of them is refused before a patch is written or a file is
-  removed.
+  empty: `paths.patches` for this program's own output target, and `paths.manifest`
+  inside `load_registry`. Every one of them is refused before a patch is written or a file
+  is removed.
 - **The dataset manifest**, as a `RegistryError`. A manifest that is not there, cannot be
   read, is not a mapping, holds a `specimens` that is not a list, holds an entry that is
   not a mapping or carries a key this project does not declare, is missing a required
@@ -52,15 +57,28 @@ that carries them, and nothing else does:
 - **The output target, and the slide.** A `--force` target `prepare_output` will not
   clear — the project root, `paths.slides` or `paths.manifest` themselves, a directory
   holding either, anything not strictly below the project root, an existing path that is a
-  file rather than a directory — which arrives as an `OutputPathError`; and a slide that
-  will not open, declares no resolution, carries a resolution the row that records it
+  file rather than a directory, and a `paths.slides` or a `paths.manifest` the guard
+  cannot resolve from the configuration at all, which it wraps into this same
+  `OutputPathError` because a guard that cannot resolve what it protects cannot show the
+  target is safe to clear — which arrives as an `OutputPathError`; and a slide that will
+  not open, declares no resolution, carries a resolution the row that records it
   contradicts, or presents a pyramid that cannot be planned against, which arrives as a
   `SlideError`. The run stops at the first such slide and indexes the slides it finished,
   as the paragraph above says.
 
-All nine are printed on stderr behind this program's name, and none of them is a
-traceback. The last paragraph below says what is left over, and it is not a fourth
-outcome.
+All eight are printed on stderr behind this program's name, and none of them is a
+traceback.
+
+**A bad argument is not one of the eight, and not one of this program's outcomes at all.**
+`argparse` refuses an option this program does not declare and one given no value, by
+printing its own message and calling `sys.exit(2)` inside `parse_args`, before the first
+statement of `main` runs. Nothing else reaches it: `--slide` is read as a string and
+`--force` is a flag, so neither can fail the parser's own conversion, and a `--slide`
+naming an id the manifest does not is refused below with the rest rather than here. The
+parser's status is the same number as `EXIT_REFUSED` and no code can tell the two apart, so
+the separation is on stderr, where the parser names the argument and its usage and none of
+the eight names either. The last paragraph says what else is left over, and that is not an
+outcome either.
 
 **The `cfg.get` reads further down cannot be the source of a refusal.** `extract_slide`
 reads `extraction.patch_size`, `extraction.tissue_percentile` and
@@ -75,14 +93,17 @@ program deletes anything. The test that holds that line down is
 checks that a key is declared and nothing at all about its value, so
 `extraction.patch_size: big` is a configuration this project accepts and the only thing
 that refuses it is the `int()` in `open_info_from_config`. A `ValueError` from a conversion
-like that, a `TypeError` or `ValueError` out of planning a read, an `OSError` out of a
-write, and a `PermissionError` out of listing or clearing a directory are all left to the
-interpreter to report as tracebacks. A catch wide enough to hold them would also hold a
-defect in this project's own arithmetic, and reporting a defect as a refusal would send the
-caller to fix a configuration that is fine — the ruling `bin/label_patches.py` records for
-a `blobs.gray_percentile` outside [0, 100]. The status such a traceback exits with is 1,
-the same status `EXIT_BLANK_SLIDE` uses, so a caller that has to tell the two apart reads
-stderr: the blank-slide message names the specimens that yielded nothing, and a traceback
+like that, a `TypeError` or `ValueError` out of planning a read, an `OSError` out of the
+index write, and a `PermissionError` out of listing or clearing a directory are all left
+to the interpreter to report as tracebacks. A per-patch read or write that raises is not in
+that list because `extract_slide` catches both, logs the exception object with the slide
+id and the coordinates, and counts the patch as a `read_failure`. A catch wide enough to
+hold the four would also hold a defect in this project's own arithmetic, and reporting a
+defect as a refusal would send the caller to fix a configuration that is fine — the ruling
+`bin/label_patches.py` records for a `blobs.gray_percentile` outside [0, 100]. The status
+such a traceback exits with is 1, the same status `EXIT_BLANK_SLIDE` uses, so a caller that
+has to tell the two apart reads stderr: the blank-slide message names the specimens that
+yielded nothing, and a traceback
 names a file and a line. `main`'s *return value* is the contract, and an exception never
 returns one.
 """
@@ -225,22 +246,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             prepare_output(out_dir)
         except OutputPathError as error:
-            # The five targets `prepare_output` will not clear: the project root,
+            # The targets `prepare_output` will not clear: the project root,
             # `paths.slides` and `paths.manifest` themselves, a directory holding either,
-            # anything not strictly below the project root, and an existing path that is a
-            # file rather than a directory. Each is an answer about the string
-            # `paths.patches` was hand-edited to, so it is reported rather than raised.
-            print(f"extract_patches: {error}", file=sys.stderr)
-            return EXIT_REFUSED
-        except ConfigError as error:
-            # `prepare_output` resolves `paths.slides` and `paths.manifest` through
-            # `_protected_paths` before it deletes anything, so the same two `Config.path`
-            # refusals can surface from inside the guard itself, and a `paths.slides: 7`
-            # reached them with this arm catching `OutputPathError` only. It is caught
-            # here rather than by widening the arm above `prepare_output`, so the delete
-            # still happens strictly after every refusal that can precede it: this one
-            # raises ahead of `shutil.rmtree`, which is what leaves the previous run on
-            # disk.
+            # anything not strictly below the project root, an existing path that is a
+            # file rather than a directory, and either of those two keys when `Config.path`
+            # refuses them. The last of those is the one the guard wraps rather than
+            # letting out: `_protected_paths` resolves both keys off the *default*
+            # configuration before the delete, so a `paths.slides: 7` refused the target
+            # from inside the guard itself, as a `ConfigError` this arm did not catch and
+            # this one does now. It is one arm rather than two because the answer is the
+            # same either way — this target cannot be shown to be safe to clear — and a
+            # caller that had to know which of two types stopped the guard would have to
+            # know the guard's internals to report a configuration string. Each refusal is
+            # an answer about the string `paths.patches` was hand-edited to, so it is
+            # reported rather than raised, and each arrives ahead of `shutil.rmtree`,
+            # which is what leaves the previous run on disk.
             print(f"extract_patches: {error}", file=sys.stderr)
             return EXIT_REFUSED
     elif out_dir.is_dir() and any(out_dir.iterdir()):

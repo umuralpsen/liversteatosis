@@ -104,7 +104,7 @@ from typing import Any
 
 import numpy as np
 
-from blobcount.config import PROJECT_ROOT, Config, default_config
+from blobcount.config import PROJECT_ROOT, Config, ConfigError, default_config
 from blobcount.registry import Specimen
 from blobcount.slides import SlideInfo, iter_coords_from_config, open_info_from_config
 
@@ -424,7 +424,10 @@ def _protected_paths() -> tuple[tuple[str, Path], ...]:
     The slides and the manifest are read from the configuration rather than pinned
     here, so a run whose configuration moves them is guarded against the paths it
     actually uses. They are read from the default configuration because they are
-    project facts rather than per-run settings, and the CLI passes nothing.
+    project facts rather than per-run settings, and the CLI passes nothing. Both
+    `Config.path` calls refuse a value that is not a path string or is empty, so this
+    can raise `ConfigError`; `prepare_output` is the one that wraps it, because it is the
+    boundary a caller catches.
     """
     active = default_config()
     return (
@@ -468,6 +471,24 @@ def prepare_output(
       four above keep their precedence: a file at the project root is the project root
       first, and the name it would be refused under says so.
 
+    **Every refusal is an `OutputPathError`, including the one this guard cannot
+    resolve for itself.** `_protected_paths` reads `paths.slides` and `paths.manifest`
+    through `Config.path`, which refuses a value that is not a path string or is empty,
+    and that refusal is a `ConfigError`. A `paths.slides: 7` therefore left this function
+    as a `ConfigError` while its own docstring said the refusal was an `OutputPathError`,
+    and every caller had to catch a second type to keep a mistyped configuration string
+    from reaching its command line as a traceback — `bin/extract_patches.py` exited 1,
+    which is `EXIT_BLANK_SLIDE`, and `bin/label_patches.py` exited 1, which is
+    `EXIT_CONTRADICTORY`. The `ConfigError` is wrapped and re-raised as an
+    `OutputPathError` here rather than caught in two command lines, because the judgement
+    the guard could not make is the same judgement in both: it cannot know what the slides
+    and the manifest are, so it cannot show that clearing the target leaves them alone, and
+    the honest response to that is to refuse the target. A caller should not have to know
+    which of its two configuration keys stopped the guard from doing its job. The wrap is
+    around the resolution and before the loop that uses it, so it is a sixth refusal of the
+    same kind and not a partial delete; the original is the `__cause__`, because the
+    message names the target and the traceback behind it names the key.
+
     A protected path is refused on equality as well as on containment. `_is_below` is
     strict, so a target that *is* `paths.slides` is not below it and the ancestor clause
     alone would let it through; in the real configuration `paths.slides` is `data`, so
@@ -488,10 +509,24 @@ def prepare_output(
             f"refusing to delete the project root {resolved}: it holds the source, the "
             f"configuration and the manifest, and --force is not a licence to remove it"
         )
-    guarded = (
-        _protected_paths() if protected is None
-        else tuple((str(item), Path(item)) for item in protected)
-    )
+    try:
+        guarded = (
+            _protected_paths() if protected is None
+            else tuple((str(item), Path(item)) for item in protected)
+        )
+    except ConfigError as error:
+        # Only the `protected is None` branch can raise here, and that is the point: a
+        # caller that states its own protected set has already named what it may not
+        # delete, so there is nothing left to resolve. Wrapped rather than left to escape
+        # because a guard whose refusals arrive as two types is a guard each caller has to
+        # know two things about, and the reason this one is refused is the same as the
+        # reason for the five clauses above — this target cannot be shown to be safe to
+        # clear. The refusal is still ahead of the `shutil.rmtree` below it.
+        raise OutputPathError(
+            f"refusing to delete {resolved}: the paths this run would clear it against "
+            f"could not be resolved from the configuration ({error}), so there is nothing "
+            f"to show that clearing it would leave the source data alone"
+        ) from error
     for name, item in guarded:
         if resolved == item.resolve():
             raise OutputPathError(

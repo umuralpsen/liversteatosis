@@ -144,15 +144,22 @@ _PATCH_SUFFIX = ".png"
 class LabelingInputError(Exception):
     """Raised when what the index named is not the data a labeling run needs.
 
-    It covers the four things a caller can point at and be wrong about: an index that
-    cannot be read, a header that is not the `patches.csv` header, a cell that is not the
-    number its column records, and a patch file that is not the `uint8`
+    It covers the six things a caller can point at and be wrong about: an index that is
+    not there, one that cannot be opened, one carrying a cell longer than
+    `csv.field_size_limit`, a header that is not the `patches.csv` header, a cell that is
+    not the number its column records, and a patch file that is not the `uint8`
     `(patch_size, patch_size, 3)` array `count_blobs` requires. What it deliberately does
     not cover is a defect in `label_patches` itself. **Only three things are wrapped: the
     read of the index, the conversion of the two numeric columns, and the read of each
-    patch file** — so a `ValueError` from `np.percentile` on a configured percentile, from
+    patch file**, so a `ValueError` from `np.percentile` on a configured percentile, from
     the counting or from the normalization propagates as itself rather than reaching a
-    caller as a bad `--index`. The original exception is the `__cause__` of every
+    caller as a bad `--index`. Six refusals out of three operations, and the count was
+    four until `csv.Error` joined the first: `csv.DictReader` raises it on a cell over
+    `csv.field_size_limit` rather than truncating the cell, it is neither an `OSError` nor
+    a `ValueError`, and a catch around the read that omitted it let it reach a caller that
+    then exited 1 — which `bin/label_patches.py` defines as `EXIT_CONTRADICTORY`, so a
+    malformed index would have been reported to anyone reading the exit code as the labels
+    contradicting themselves. The original exception is the `__cause__` of every
     instance, because the message alone says the run refused and the traceback behind it
     says which read refused.
     """

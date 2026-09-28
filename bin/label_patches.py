@@ -28,33 +28,54 @@ resolution and one labelled 20% at another is a magnification difference before 
 disease difference, and the resolution is what tells the two apart.
 
 Three outcomes, three codes. A run that completed is 0. A refusal is 2, and a refusal is
-always an answer about what the caller pointed at. Six of them can reach it, in three
-groups, and nothing else does:
+always an answer about what the caller pointed at. Seven of them can reach it, in three
+groups, and nothing this program does does:
 
 - **A configuration.** One that cannot be loaded — missing, unreadable, not a mapping, a
   key the code does not declare, a required key the file does not declare — and a
   `paths.labels` that `load` accepted because it validates nothing past the key's
   presence but `Config.path` refuses, because it is not a path string or is empty. Both
-  arrive as a `ConfigError`.
-- **An output target.** An `--out` or a `paths.labels` that `prepare_output` will not
-  clear: the project root, `paths.slides` or `paths.manifest` themselves, a directory
-  holding either, anything not strictly below the project root, and an existing path that
-  is a file rather than a directory. It arrives as an `OutputPathError`.
+  arrive as a `ConfigError`, and both are caught here.
+- **An output target.** A target `prepare_output` will not clear: the project root,
+  `paths.slides` or `paths.manifest` themselves, a directory holding either, anything not
+  strictly below the project root, and an existing path that is a file rather than a
+  directory, which an `--out` or a `paths.labels` reaches. The second of this group's two
+  is a `paths.slides` or a `paths.manifest` the guard cannot resolve at all, which the
+  paragraph below is about. Both arrive as an `OutputPathError`.
 - **The index and the patches it names.** An index that cannot be read — it is not there,
   it cannot be opened, or it carries a cell longer than `csv.field_size_limit` — or whose
   header is not the one this pipeline writes; a cell of that index that is not the number
   its column records; and a patch file the index names that is not the `uint8`
   `(patch_size, patch_size, 3)` array `count_blobs` needs. All three arrive as a
-  `LabelingInputError`, which `label_patches` raises around the two reads that can fail
-  that way and around the conversion of the two numeric columns, and around nothing else,
-  so a defect inside it is not reported as a bad `--index`.
+  `LabelingInputError` — six shapes of refusal, which is the grain
+  `blobcount.labeling.LabelingInputError` enumerates them at — and `label_patches` raises
+  that one type around the two reads that can fail that way and around the conversion of
+  the two numeric columns, and around nothing else, so a defect inside it is not reported
+  as a bad `--index`.
 
-All six are reported on stderr and none of them is a traceback.
+That second refusal of the second group is why that group is one arm and not two, and it
+is the seventh of the seven. The guard resolves `paths.slides` and `paths.manifest` through
+the *default* configuration rather than through
+the one this run loaded, so a `paths.slides` `load` accepted but `Config.path` refused — a
+number where a path string belongs, say — refused the target from inside `prepare_output`,
+as a `ConfigError` this file did not catch around that call. The process exited 1, and 1
+is `EXIT_CONTRADICTORY`: a configuration string reported to a caller as the labels
+contradicting themselves. `blobcount.extract.prepare_output` now wraps that `ConfigError`
+into the same `OutputPathError` as the five targets beside it, so the whole group arrives
+on the one arm below and no second arm exists here for a type that no longer escapes.
 
-**`--threshold` is not one of the six.** Its argument is typed `int` by the parser, so a
-value that is not an integer never reaches `main`: the parser refuses it and exits 2 of
-its own accord. There is no run in which a threshold is applied that the configuration
-would not take, because the only value the run can produce for
+All seven are reported on stderr and none of them is a traceback.
+
+**A bad argument is not one of the seven, and not one of this program's outcomes at
+all.** `argparse` refuses a `--threshold` that is not an integer, an option this program
+does not declare, and one given no value, by printing its own message and calling
+`sys.exit(2)` inside `parse_args`, before the first statement of `main` runs. `--out` is
+typed `Path` and no string fails that conversion, so a mistyped `--out` is not one of
+these: it reaches `main` and is refused below as a path, which is where its judgement
+belongs. The parser's status is the same number as `EXIT_REFUSED` and no code can tell the
+two apart, so the separation is on stderr, where the parser names the argument and its
+usage and none of the seven names either. There is no run in which a threshold is applied
+that the configuration would not take, because the only value the run can produce for
 `labeling.blob_threshold` is an `int` and that is what the key is configured as.
 
 **A defect inside `label_patches` is never a refusal.** A `ValueError` from the counting,
@@ -195,19 +216,28 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         stats = label_patches(args.index, out_dir, cfg)
     except OutputPathError as error:
-        # The refusal from `prepare_output`: the target is the project root, the slides,
-        # the manifest, something holding either, not below the project root at all, or an
-        # existing path that is a file rather than a directory. It is caught rather than
-        # raised because it is an answer about the argument the user passed, and a
-        # traceback is not an answer.
+        # The refusal from `prepare_output`, and the whole of it on this one arm: the
+        # target is the project root, the slides, the manifest, something holding either,
+        # not below the project root at all, or an existing path that is a file rather than
+        # a directory — and the two configuration keys the guard reads through
+        # `Config.path` themselves, which it refuses as this type because it wraps the
+        # `ConfigError` rather than letting a second type reach a caller that would then
+        # have to know both. It is caught rather than raised because it is an answer about
+        # the argument the user passed, and a traceback is not an answer. There is no
+        # `ConfigError` arm here for that last refusal: it is this one, and an arm for the
+        # type it used to arrive as would be dead.
         print(f"label_patches: {error}", file=sys.stderr)
         return EXIT_REFUSED
     except LabelingInputError as error:
-        # The six things the caller pointed at and got wrong: an index that is not there,
-        # cannot be opened, carries a cell longer than `csv.field_size_limit`, or is not
-        # the `patches.csv` header; a cell of it that is not the number its column
-        # records; and a patch file that is not the `uint8` `(patch_size, patch_size, 3)`
-        # array `count_blobs` needs. `label_patches` raises this around those two reads
+        # The six things a caller can point at and be wrong about, and only those — the
+        # three the module docstring groups, at the shape each of their refusals takes:
+        # an index that is not there, cannot be opened, carries a cell longer than
+        # `csv.field_size_limit`, or is not the `patches.csv` header; a cell of it that is
+        # not the number its column records; and a patch file that is not the `uint8`
+        # `(patch_size, patch_size, 3)` array `count_blobs` needs. The same six are
+        # enumerated in `blobcount.labeling.LabelingInputError`'s own docstring, which is
+        # the definition and this is the instance.
+        # `label_patches` raises this around those two reads
         # and the conversion of the two numeric columns, and around nothing else, so a
         # `ValueError` from anywhere else in it — a `blobs.gray_percentile` outside
         # [0, 100], the counting, the normalization — is not caught here and reaches the

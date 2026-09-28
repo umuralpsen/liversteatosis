@@ -351,6 +351,43 @@ def test_prepare_output_refuses_a_target_that_is_a_file(project_scratch):
     assert target.read_text(encoding="utf-8") == "not a directory\n"
 
 
+def test_prepare_output_reports_a_config_it_cannot_resolve_as_a_path_refusal(
+    project_scratch, monkeypatch
+):
+    # The one refusal this guard had two types for. `_protected_paths` reads
+    # `paths.slides` and `paths.manifest` through `Config.path`, which refuses a value
+    # that is not a path string, and that refusal is a `ConfigError` — so the guard whose
+    # docstring promised "the refusal is an `OutputPathError`" could also refuse with a
+    # type of its own, and a caller had to catch both to keep a mistyped configuration
+    # string from leaving its command line as a traceback. It is wrapped here, at the one
+    # site both callers share, and the two things this pins are the type it arrives as and
+    # the ordering: it still arrives before `shutil.rmtree`, so a wrap placed after the
+    # delete would report the same sentence and still take the previous run with it.
+    #
+    # `_protected_paths` is replaced rather than a configuration written, because the two
+    # callers reach it differently — one passes `protected` and never calls it at all —
+    # and a hand-edited `paths.slides` would only exercise the caller that does not. The
+    # configuration route is driven end to end by
+    # `test_cli_force_refuses_a_paths_slides_config_path_refuses`.
+    from blobcount import extract
+    from blobcount.config import ConfigError
+
+    def _unresolvable():
+        raise ConfigError("key 'paths.slides' must hold a path string, got int")
+
+    monkeypatch.setattr(extract, "_protected_paths", _unresolvable)
+    target = project_scratch / "patches"
+    target.mkdir()
+    (target / "2_0_0.png").write_bytes(b"the previous run")
+    with pytest.raises(OutputPathError, match="paths.slides") as refused:
+        prepare_output(target)
+    # The original is attached rather than copied, for the reason
+    # `labeling._row_numbers` attaches: the message says the target is refused and the
+    # `__cause__` says which key could not be resolved to make that judgement.
+    assert isinstance(refused.value.__cause__, ConfigError)
+    assert (target / "2_0_0.png").read_bytes() == b"the previous run"
+
+
 def test_index_header_is_pinned(tmp_path):
     out = tmp_path / "patches.csv"
     write_index([], out)
@@ -1052,15 +1089,24 @@ def test_cli_refuses_a_manifest_it_cannot_load(
 def test_cli_force_refuses_a_paths_slides_config_path_refuses(
     cli, project_scratch, monkeypatch, capsys
 ):
-    # The fourth, and the one only the sweep found: `prepare_output` resolves the paths it
-    # guards the delete against through `_protected_paths`, which reads `paths.slides` and
-    # `paths.manifest` off the *default* configuration. A `paths.slides` `load` accepted
-    # but `Config.path` refused therefore raised `ConfigError` from inside the `--force`
-    # arm, which caught `OutputPathError` and nothing else, and the process exited 1.
+    # **A pin as it stands, and the mechanism under it changed in round 6.** It was red
+    # evidence when the `--force` arm's own `except ConfigError` closed it: `prepare_output`
+    # resolves the paths it guards the delete against through `_protected_paths`, which
+    # reads `paths.slides` and `paths.manifest` off the *default* configuration, so a
+    # `paths.slides` `load` accepted but `Config.path` refused raised `ConfigError` from
+    # inside the guard and left a `--force` arm that caught `OutputPathError` and nothing
+    # else, so the process exited 1. That arm is gone: the guard now wraps the
+    # `ConfigError` into its own `OutputPathError`, and the arm above catches it. So this
+    # test is green before the wrap and green after it, and it is here because it is the
+    # only end-to-end drive of the wrap from a real configuration file, and because the
+    # exit code a caller reads for `paths.slides: 7` must not move while the type it
+    # arrives as does. The type and the `__cause__` are pinned by
+    # `test_prepare_output_reports_a_config_it_cannot_resolve_as_a_path_refusal`.
     #
-    # The stale file is the assertion that matters: `_protected_paths` runs before
-    # `shutil.rmtree`, so the refusal this produces deletes nothing. A catch placed after
-    # the delete would return the same refusal code and still take the previous run with it.
+    # The stale file is the assertion that still matters and is still red evidence for the
+    # ordering: `_protected_paths` runs before `shutil.rmtree`, so the refusal this produces
+    # deletes nothing. A wrap placed after the delete would return the same refusal code and
+    # still take the previous run with it.
     module, out = cli
     _install_fake_slide(monkeypatch, FakeSlide())
     stale = out / "2_0_0.png"

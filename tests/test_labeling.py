@@ -719,3 +719,37 @@ def test_cli_refuses_an_out_that_is_an_existing_file(cli, project_scratch, capsy
     assert "refusing" in err
     assert "not a directory" in err
     assert as_file.read_text(encoding="utf-8") == "not a directory\n"
+
+
+def test_cli_refuses_a_paths_slides_config_path_refuses(
+    cli, project_scratch, monkeypatch, capsys
+):
+    # R6-1 and R6-2, and the only half of round 5's mechanism this program never got.
+    # `prepare_output` resolves the paths it guards the delete against through
+    # `_protected_paths`, off the *default* configuration rather than the `cfg` this run
+    # loaded, so a `paths.slides` that `load` accepted because it validates nothing past
+    # a key's presence but `Config.path` refused reached this program from inside its own
+    # guard. `main` caught `OutputPathError` and `LabelingInputError`, so it left as a
+    # traceback and the process exited 1 — which this file defines as
+    # `EXIT_CONTRADICTORY`, "the labels contradicted themselves", reported to a caller
+    # over a hand-edited configuration string.
+    #
+    # The stale label is the assertion that matters, and it is the same one the extract
+    # side makes: `_protected_paths` runs before `shutil.rmtree`, so a refusal here
+    # deletes nothing. A fix that caught the exception after the delete would return the
+    # same code and still take the previous run with it.
+    module, index, out = cli
+    (out / "normal").mkdir(parents=True)
+    (out / "normal" / "previous_run.png").write_bytes(b"the previous run")
+    monkeypatch.setattr(
+        "blobcount.config.DEFAULT_CONFIG_PATH",
+        _config_file(
+            project_scratch, "config-slides-not-a-path.yaml",
+            labels=str(out), paths={"slides": 7},
+        ),
+    )
+    assert module.main(["--index", str(index)]) == module.EXIT_REFUSED
+    err = capsys.readouterr().err
+    assert "paths.slides" in err
+    assert "Traceback" not in err
+    assert (out / "normal" / "previous_run.png").read_bytes() == b"the previous run"
