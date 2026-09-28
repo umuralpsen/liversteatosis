@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 import yaml
 
-from blobcount.config import DEFAULT_CONFIG_PATH, PROJECT_ROOT, ConfigError, load
+from blobcount.config import DEFAULT_CONFIG_PATH, PROJECT_ROOT, load
 from blobcount.extract import (
     INDEX_COLUMNS,
     TISSUE_PERCENTILE,
@@ -790,6 +790,23 @@ def _config_pointing_patches_at(target):
     return path
 
 
+def _config_with(project_scratch, name, patches, edits=None):
+    """Write a configuration at `paths.patches = patches`, then apply `edits`.
+
+    `edits` is a nested mapping of section to key to value, so a test states the
+    hand-edited string or the mistyped number it needs without rebuilding the file, and
+    the file is written the way a user writes one: UTF-8, at a path the CLI is pointed at.
+    """
+    data = yaml.safe_load(DEFAULT_CONFIG_PATH.read_text(encoding="utf-8"))
+    data["paths"]["patches"] = str(patches)
+    for section, entries in (edits or {}).items():
+        for key, value in entries.items():
+            data[section][key] = value
+    path = project_scratch / name
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    return path
+
+
 @pytest.fixture
 def cli(project_scratch, monkeypatch):
     module = _load_cli(monkeypatch)
@@ -867,7 +884,7 @@ def test_cli_force_refuses_a_paths_patches_that_is_a_file(cli, project_scratch, 
 
 
 def test_cli_force_refuses_before_clearing_when_a_key_extract_slide_reads_is_missing(
-    cli, project_scratch, monkeypatch
+    cli, project_scratch, monkeypatch, capsys
 ):
     # The same shape as the labeling side, one file over, and found by the check R4-3
     # asked for: `extract_slide` reads `extraction.tissue_percentile` and
@@ -879,12 +896,14 @@ def test_cli_force_refuses_before_clearing_when_a_key_extract_slide_reads_is_mis
     # are the fix and the only one: the key has to fail at load, before the delete, not
     # be caught after it.
     #
-    # The exception is asserted rather than an exit code because this entry point does
-    # not wrap `load()`: an unloadable configuration — a missing file, a top level that
-    # is not a mapping, an undeclared key — has always left `main` as the `ConfigError`
-    # it is, and this test records that the change adds no new handling and no new
-    # delete. `bin/label_patches.py` does wrap `load()`, which is why the labeling
-    # counterpart in `tests/test_labeling.py` asserts `EXIT_REFUSED` instead.
+    # **Updated in round 5, and the new assertion is strictly stronger.** This asserted
+    # `pytest.raises(ConfigError)`, which is a statement about the *current* wrapping: it
+    # passes only because `load` is not caught, and it locks in the defect R5-1 named. It
+    # now asserts the refusal the CLI contract promises — the exit code, the message on
+    # stderr, and the absence of a traceback — and keeps the stale file. Nothing was
+    # dropped: the `ConfigError` type match and the key name are still asserted, through
+    # the message instead of through the exception, so every fact the old test proved is
+    # proved and the process status a caller reads is one of the three this file defines.
     module, out = cli
     stale = out / "2_0_0.png"
     stale.parent.mkdir(parents=True)
@@ -896,11 +915,190 @@ def test_cli_force_refuses_before_clearing_when_a_key_extract_slide_reads_is_mis
     config.write_text(yaml.safe_dump(data), encoding="utf-8")
     monkeypatch.setattr("blobcount.config.DEFAULT_CONFIG_PATH", config)
 
-    with pytest.raises(ConfigError, match="missing required keys") as refused:
-        module.main(["--force"])
-    assert "extraction.tissue_percentile" in str(refused.value)
+    assert module.main(["--force"]) == module.EXIT_REFUSED
+    err = capsys.readouterr().err
+    assert "missing required keys" in err
+    assert "extraction.tissue_percentile" in err
+    assert "Traceback" not in err
     # The point of the finding: the previous run is still on disk.
     assert stale.read_bytes() == b"the previous run"
+
+
+@pytest.mark.parametrize(
+    "fault, expected",
+    [
+        ("not a mapping", "must hold a mapping at the top level"),
+        ("not there", "configuration file not found"),
+    ],
+)
+def test_cli_refuses_a_configuration_it_cannot_load(
+    project_scratch, monkeypatch, capsys, fault, expected
+):
+    # R5-1 itself. `load()` was not wrapped, so a configuration that is not there, whose
+    # top level is not a mapping, or that omits a required key raised `ConfigError` out of
+    # `main` and the process exited 1 — which this file defines as `EXIT_BLANK_SLIDE`, so
+    # "your configuration is broken" reported to any caller reading the exit code as "no
+    # tissue was found in any specimen". The two shapes here are the ones the finding
+    # names beyond a missing key; the missing key is the test above, which also has to
+    # prove nothing was deleted.
+    module = _load_cli(monkeypatch)
+    out = project_scratch / "patches"
+    if fault == "not a mapping":
+        source = project_scratch / "config-not-a-mapping.yaml"
+        source.write_text("- a specimen is a mapping\n", encoding="utf-8")
+    else:
+        source = project_scratch / "config-that-is-not-there.yaml"
+    monkeypatch.setattr("blobcount.config.DEFAULT_CONFIG_PATH", source)
+
+    assert module.main([]) == module.EXIT_REFUSED
+    err = capsys.readouterr().err
+    assert expected in err
+    assert "Traceback" not in err
+    assert not out.exists()
+
+
+@pytest.mark.parametrize("value", ["", 7])
+def test_cli_refuses_a_paths_patches_config_path_refuses(
+    cli, project_scratch, monkeypatch, capsys, value
+):
+    # The first of the four the R5-1 sweep found beyond `load()`. `paths.patches` is a
+    # hand-edited string and `load` checks that the key is declared and nothing about its
+    # value, so an empty string and a number both reach `Config.path`, which is where the
+    # refusal of them lives. `patches_dir(cfg)` sat outside every `try` in `main`, so both
+    # left it as a traceback and the process exited 1. Not reachable through any argument:
+    # this program names the key and nothing on the command line stands in for it. The
+    # number is passed through `edits` rather than as `patches`, because the helper
+    # stringifies what it is given and `"7"` is a directory name rather than a number.
+    module, out = cli
+    monkeypatch.setattr(
+        "blobcount.config.DEFAULT_CONFIG_PATH",
+        _config_with(project_scratch, f"config-patches-{type(value).__name__}.yaml", out,
+                     {"paths": {"patches": value}}),
+    )
+    assert module.main([]) == module.EXIT_REFUSED
+    err = capsys.readouterr().err
+    assert "paths.patches" in err
+    assert "Traceback" not in err
+    assert not out.exists()
+
+
+def test_cli_refuses_a_manifest_path_config_path_refuses(
+    project_scratch, monkeypatch, capsys
+):
+    # The second of the four, and it is inside `load_registry` rather than this file:
+    # `paths.manifest` is resolved by `blobcount.registry.load_registry` through the
+    # default configuration, so `Config.path` refuses a value `load` accepted there, from
+    # the call this program makes to load the dataset. The `try` around that call caught
+    # `LookupError` and nothing else, so the `ConfigError` left `main` and the process
+    # exited 1.
+    module = _load_cli(monkeypatch)
+    out = project_scratch / "patches"
+    monkeypatch.setattr(
+        "blobcount.config.DEFAULT_CONFIG_PATH",
+        _config_with(project_scratch, "config-manifest-not-a-path.yaml", out,
+                     {"paths": {"manifest": 7}}),
+    )
+    assert module.main([]) == module.EXIT_REFUSED
+    err = capsys.readouterr().err
+    assert "paths.manifest" in err
+    assert "Traceback" not in err
+    assert not out.exists()
+
+
+@pytest.mark.parametrize(
+    "fault, expected",
+    [
+        ("not there", "manifest not found"),
+        ("undeclared entry key", "neither a Specimen field nor provenance_note"),
+    ],
+)
+def test_cli_refuses_a_manifest_it_cannot_load(
+    project_scratch, monkeypatch, capsys, fault, expected
+):
+    # The third. `load_registry` is all-or-nothing by design and raises `RegistryError` for
+    # a manifest that is absent, unreadable, not a mapping, holds a `specimens` that is not
+    # a list, holds an entry that is not a mapping, holds an entry key this project does
+    # not declare, is missing a required field, declares a duplicate id, or claims a
+    # source it holds no licence for. The `try` around that call caught `LookupError`, so
+    # every one of those left `main` as a traceback and the process exited 1 — the code
+    # this file means for a slide that yielded no patches, for a dataset that could not
+    # even be read. The real `load_registry` drives it: the `cli` fixture stubs that call
+    # out, so no test of this CLI could reach the exception at all.
+    module = _load_cli(monkeypatch)
+    out = project_scratch / "patches"
+    if fault == "not there":
+        manifest = project_scratch / "no-such-manifest.yaml"
+    else:
+        manifest = project_scratch / "manifest-with-a-misspelled-field.yaml"
+        manifest.write_text(
+            yaml.safe_dump({"specimens": [
+                {"id": "2", "source": "unknown", "slide_path": "2.svs", "mpp": 0.252,
+                 "mispelled_mpp": 0.252}
+            ]}),
+            encoding="utf-8",
+        )
+    monkeypatch.setattr(
+        "blobcount.config.DEFAULT_CONFIG_PATH",
+        _config_with(project_scratch, f"config-{fault.replace(' ', '-')}.yaml", out,
+                     {"paths": {"manifest": str(manifest)}}),
+    )
+    assert module.main([]) == module.EXIT_REFUSED
+    err = capsys.readouterr().err
+    assert expected in err
+    assert "Traceback" not in err
+    assert not out.exists()
+
+
+def test_cli_force_refuses_a_paths_slides_config_path_refuses(
+    cli, project_scratch, monkeypatch, capsys
+):
+    # The fourth, and the one only the sweep found: `prepare_output` resolves the paths it
+    # guards the delete against through `_protected_paths`, which reads `paths.slides` and
+    # `paths.manifest` off the *default* configuration. A `paths.slides` `load` accepted
+    # but `Config.path` refused therefore raised `ConfigError` from inside the `--force`
+    # arm, which caught `OutputPathError` and nothing else, and the process exited 1.
+    #
+    # The stale file is the assertion that matters: `_protected_paths` runs before
+    # `shutil.rmtree`, so the refusal this produces deletes nothing. A catch placed after
+    # the delete would return the same refusal code and still take the previous run with it.
+    module, out = cli
+    _install_fake_slide(monkeypatch, FakeSlide())
+    stale = out / "2_0_0.png"
+    stale.parent.mkdir(parents=True)
+    stale.write_bytes(b"the previous run")
+    monkeypatch.setattr(
+        "blobcount.config.DEFAULT_CONFIG_PATH",
+        _config_with(project_scratch, "config-slides-not-a-path.yaml", out,
+                     {"paths": {"slides": 7}}),
+    )
+    assert module.main(["--force"]) == module.EXIT_REFUSED
+    err = capsys.readouterr().err
+    assert "paths.slides" in err
+    assert "Traceback" not in err
+    assert stale.read_bytes() == b"the previous run"
+
+
+def test_cli_does_not_report_a_mistyped_configuration_value_as_a_refusal(
+    cli, project_scratch, monkeypatch
+):
+    # A **pin**, not red evidence, and it is here because the module docstring claims the
+    # boundary. `load` checks that a key is declared and nothing at all about its value, so
+    # `extraction.patch_size: big` is a configuration this project accepts and the only
+    # thing that refuses it is the `int()` in `open_info_from_config`. Catching
+    # `ValueError` would also catch a defect in this project's own arithmetic, and reporting
+    # one as a refusal would send the caller to fix a configuration that is fine — the
+    # ruling round 3 recorded for a percentile outside [0, 100] on the labeling side. So it
+    # leaves `main` as the exception it is, and the process status is 1, which the
+    # docstring says a caller separates from `EXIT_BLANK_SLIDE` by reading stderr.
+    module, _ = cli
+    monkeypatch.setattr(
+        "blobcount.config.DEFAULT_CONFIG_PATH",
+        _config_with(project_scratch, "config-patch-size-is-a-word.yaml",
+                     project_scratch / "patches",
+                     {"extraction": {"patch_size": "big"}}),
+    )
+    with pytest.raises(ValueError, match="invalid literal for int"):
+        module.main([])
 
 
 def test_cli_exits_non_zero_when_a_slide_yields_no_tissue(cli, monkeypatch):
