@@ -121,13 +121,16 @@ def test_elongated_contour_inside_the_area_range_is_rejected_on_circularity():
     # 3x3 opening run twice: a 3 px bar is erased outright and would leave nothing to
     # reject.
     #
-    # At 0.5 um/px the window is 12.4-49.6 px^2, and the narrowest bar that survives the
-    # opening in that window is too stubby to fall under 0.6, so the case is read at
-    # 0.25 um/px where the window is 49.6-2000 px^2. The disc is the control for the
-    # other half: a measured 170 px^2 at circularity 0.89, over the same floor and the
-    # same range, and counted.
+    # The bar and the disc control are read at both resolutions, because neither
+    # resolution is special to them. At 0.5 um/px the window is 12.4-500 px^2, and the
+    # same 200 px^2 contour is 50.0 um^2 there, inside it, with the same circularity of
+    # 0.31, so it is rejected on circularity at 0.5 um/px exactly as at 0.25 um/px. The
+    # disc is the control for the other half: a measured 170 px^2 at circularity 0.89,
+    # 42.5 um^2 at 0.5 um/px, over the same floor and the same range, and counted.
     assert count_blobs(_bar(5, 40), _params(), 0.25) == 0
+    assert count_blobs(_bar(5, 40), _params(), 0.5) == 0
     assert count_blobs(_discs(1, 8), _params(), 0.25) == 1
+    assert count_blobs(_discs(1, 8), _params(), 0.5) == 1
 
 
 def test_gray_threshold_from_patch_is_a_high_percentile():

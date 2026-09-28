@@ -47,11 +47,17 @@ runs over. What they do show is that the count is unstable: over five sampled wi
 the same slide at the same percentile the counts ran 0, 1, 1, 7 and 18, and at the 99th
 percentile every one of them was 0. None of those is yet a measurement of steatosis.
 
-The distribution that does describe the material is the one over the 120 patches the
-original extraction accepted, which is known tissue under a mean of 210. Those patches
-carry a grayscale standard deviation of 16.8 to 59.5 levels and a 95th percentile of 84
-to 247 with a median of 213, so the threshold has a structure to cut rather than a
-rounding error to resolve, and the two-level spread of the background windows is not the
+The distribution that does describe the material is the one over the accepted tissue
+patches. That figure is **one measurement and not a settled property of the accepted
+patches**: over 120 of the patches the original extraction accepted, which is known tissue
+under a mean of 210, the grayscale standard deviation is 16.8 to 59.5 levels and the 95th
+percentile is 84 to 247 with a median of 213. A second, independent measurement of the
+same population, drawn across all six slides from a pool of 12,400 accepted patches and
+subsampled to 120 at a recorded seed, gives a **narrower** standard deviation of 24.3 to
+57.9 and a 95th percentile of 183.3 to 248.3 with a median of 225.3. The two disagree past
+the first decimal and neither is a constant; what they agree on is the point of this
+paragraph, which is that the accepted patches have a structure to cut rather than a
+rounding error to resolve. So the two-level spread of the background windows is not the
 number the ablation needs to start from: that accepted-patch distribution is.
 
 The rule is the brief's and the parameter is `blobs.gray_percentile` in
@@ -217,10 +223,15 @@ def count_blobs(patch: np.ndarray, params: BlobParams, mpp: float) -> int:
     the effective cut up to a whole level above the threshold that was asked for, in
     one direction, always. Rounding leaves an error of at most half a level whose sign
     follows the third, so it has no direction to correct: the argument for it is that a
-    bias of a known sign is worth removing, not that the bias is large. On the 120
-    patches the original extraction accepted the grayscale standard deviation is 16.8 to
-    59.5 levels, so a half-level bias is about a twentieth of that spread and is not
-    what decides a count. Where the difference is large is the flat case, and there the
+    bias of a known sign is worth removing, not that the bias is large. The spread of the
+    accepted tissue patches is a measured sample and is cited as one. One measurement over
+    120 of the patches the original extraction accepted gives a grayscale standard
+    deviation of 16.8 to 59.5 levels and a second, independent one over the same population
+    gives 24.3 to 57.9, so a half-level bias is about three per cent of that spread at the
+    narrow end of the first and under one per cent at its wide end, and is not what decides
+    a count. The module docstring carries the 95th percentile of the same two measurements.
+
+    Where the difference is large is the flat case, and there the
     material is glass: on one unverified background window of `data/4.svs` at 0.5 um/px,
     standard deviation 1.4 levels, the 95th percentile counted 8 truncated against 18
     rounded, with 4.9% of pixels above the threshold against 5.8% where the percentile
