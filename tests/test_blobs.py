@@ -40,6 +40,13 @@ def _discs(n, radius, size=256):
     return img
 
 
+def _bar(w, h, size=256):
+    cv2 = _cv2()
+    img = np.full((size, size, 3), 180, dtype=np.uint8)
+    cv2.rectangle(img, (60, 128 - h // 2), (60 + w, 128 + h // 2), (250, 250, 250), -1)
+    return img
+
+
 def _params(threshold=200.0):
     return BlobParams(area_um2_min=3.1, area_um2_max=125.0, circularity_min=0.6,
                       gray_threshold=threshold, morph_kernel_size=3, morph_iterations=2)
@@ -53,6 +60,11 @@ def test_area_conversion_matches_physical_units():
     # 50 px^2 at 0.25 um/px is 3.1 um^2; the same physical area at 0.5 um/px is 12.4 px^2
     assert area_px2(3.1, 0.25) == pytest.approx(49.6, rel=0.01)
     assert area_px2(3.1, 0.5) == pytest.approx(12.4, rel=0.01)
+    # the ceiling the same way: 2000 px^2 at 0.25 um/px is 125 um^2, and 500 px^2 at
+    # 0.5 um/px. Both are exact, not approximate, so they are pinned exactly: a
+    # conversion that quietly rounded would still satisfy the two `approx` lines above.
+    assert area_px2(125.0, 0.25) == 2000.0
+    assert area_px2(125.0, 0.5) == 500.0
 
 
 def test_counts_exact_number_of_discs():
@@ -87,10 +99,10 @@ def test_mpp_argument_actually_changes_the_area_filter():
     # 0.25 um/px, comfortably inside the range, and the brief's own
     # `test_counts_exact_number_of_discs` counts that same disc at the coarse
     # resolution. No implementation can reject a blob at 0.25 um/px and accept it at
-    # 0.5 um/px unless its area falls between 12.4 px^2 and 49.6 px^2, so the radius
-    # is the smallest one that survives the 3x3 opening twice and lands in that
-    # window. The intent of the case, the name, and the direction of the two counts
-    # are unchanged.
+    # 0.5 um/px unless its area falls between 12.4 px^2 and 49.6 px^2. Radius 3 lands
+    # there too, at a measured 16 px^2, and radius 4 at 34 px^2 is used because it sits
+    # nearer the middle of that window than 16 does. The intent of the case, the name,
+    # and the direction of the two counts are unchanged.
     assert count_blobs(_discs(3, 4), _params(), 0.25) == 0
     assert count_blobs(_discs(3, 4), _params(), 0.5) == 3
 
@@ -98,6 +110,24 @@ def test_mpp_argument_actually_changes_the_area_filter():
 def test_disc_outside_area_range_is_rejected():
     # radius 40 px at 0.5 um/px is 1257 um^2, far above the 125 um^2 ceiling
     assert count_blobs(_discs(2, 40), _params(), 0.5) == 0
+
+
+def test_elongated_contour_inside_the_area_range_is_rejected_on_circularity():
+    # The area filter and the circularity filter are separate clauses and only the
+    # first of them was covered. This bar is 5 x 40 px at 0.25 um/px: a measured
+    # 200 px^2 contour, 12.5 um^2, comfortably inside the 3.1-125 um^2 range, so the
+    # area clause passes it. Its circularity is 4*pi*200/90**2 = 0.31, under the 0.6
+    # floor, so the second clause rejects it. The 5 px width is what lets it survive a
+    # 3x3 opening run twice: a 3 px bar is erased outright and would leave nothing to
+    # reject.
+    #
+    # At 0.5 um/px the window is 12.4-49.6 px^2, and the narrowest bar that survives the
+    # opening in that window is too stubby to fall under 0.6, so the case is read at
+    # 0.25 um/px where the window is 49.6-2000 px^2. The disc is the control for the
+    # other half: a measured 170 px^2 at circularity 0.89, over the same floor and the
+    # same range, and counted.
+    assert count_blobs(_bar(5, 40), _params(), 0.25) == 0
+    assert count_blobs(_discs(1, 8), _params(), 0.25) == 1
 
 
 def test_gray_threshold_from_patch_is_a_high_percentile():
@@ -122,12 +152,20 @@ def test_gray_threshold_is_constant_for_uniform_patch():
 
 
 def test_stain_normalization_changes_mean_toward_target():
-    _cv2()
-    from blobcount.blobs import normalize_stain
+    cv2 = _cv2()
     src = np.full((64, 64, 3), (140, 90, 160), dtype=np.uint8)
     out = normalize_stain(src)
     assert out.shape == src.shape
     assert out.dtype == np.uint8
+    assert not np.array_equal(out, src)
+    # A uniform patch has a zero per-channel standard deviation, so this is the case the
+    # guard exists for, and it is the one where the mean is the whole of the change: the
+    # source sits at L 122 and comes back at L 128. Asserting shape and dtype alone
+    # would pass on an identity function.
+    before = cv2.cvtColor(src, cv2.COLOR_BGR2LAB).reshape(-1, 3)[:, 0].mean()
+    after = cv2.cvtColor(out, cv2.COLOR_BGR2LAB).reshape(-1, 3)[:, 0].mean()
+    assert after == pytest.approx(128.0, abs=1.0)
+    assert abs(after - 128.0) < abs(before - 128.0)
 
 
 def test_mpp_cannot_be_omitted():
@@ -139,6 +177,13 @@ def test_mpp_cannot_be_omitted():
 def test_area_px2_rejects_a_non_positive_scale(mpp):
     with pytest.raises(ValueError, match="mpp"):
         area_px2(3.1, mpp)
+
+
+def test_count_blobs_rejects_a_non_positive_mpp_before_doing_the_work():
+    # The conversion runs first, so the failure is a caller error rather than something
+    # found after the patch has been thresholded, opened and contoured.
+    with pytest.raises(ValueError, match="mpp"):
+        count_blobs(_discs(3, 12), _params(), 0.0)
 
 
 def test_params_from_config_reads_the_configured_blob_keys():
@@ -161,13 +206,18 @@ def test_params_from_config_reads_the_configured_blob_keys():
 
 
 def test_params_from_config_uses_the_default_run_configuration():
+    cfg = load()
     params = params_from_config(_discs(3, 4))
-    assert params.area_um2_min == load().get("blobs.area_um2_min")
-    assert params.area_um2_max == load().get("blobs.area_um2_max")
-    assert params.circularity_min == load().get("blobs.circularity_min")
-    assert params.morph_kernel_size == load().get("blobs.morph_kernel_size")
-    assert params.morph_iterations == load().get("blobs.morph_iterations")
-    assert params.gray_threshold == gray_threshold_from_patch(_discs(3, 4), 95.0)
+    assert params.area_um2_min == cfg.get("blobs.area_um2_min")
+    assert params.area_um2_max == cfg.get("blobs.area_um2_max")
+    assert params.circularity_min == cfg.get("blobs.circularity_min")
+    assert params.morph_kernel_size == cfg.get("blobs.morph_kernel_size")
+    assert params.morph_iterations == cfg.get("blobs.morph_iterations")
+    # The percentile is read from the configuration rather than written into the
+    # assertion, so the case still describes the default run if the key ever moves.
+    assert params.gray_threshold == gray_threshold_from_patch(
+        _discs(3, 4), float(cfg.get("blobs.gray_percentile"))
+    )
 
 
 def test_params_from_config_threshold_follows_the_configured_percentile():
@@ -221,5 +271,7 @@ def test_normalize_stain_leaves_a_degenerate_chroma_channel_at_the_target():
     ramp = np.tile(np.linspace(100, 160, 64, dtype=np.uint8), (64, 1))
     src = np.repeat(ramp[:, :, None], 3, axis=2)
     lab = cv2.cvtColor(normalize_stain(src), cv2.COLOR_BGR2LAB).reshape(-1, 3)
+    assert lab[:, 1].mean() == pytest.approx(128.0, abs=1.0)
+    assert lab[:, 2].mean() == pytest.approx(128.0, abs=1.0)
     assert lab[:, 1].std() < 2.0
     assert lab[:, 2].std() < 2.0

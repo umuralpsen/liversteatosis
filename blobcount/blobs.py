@@ -36,19 +36,29 @@ distribution in front of it and not about the tissue: by construction roughly
 `100 - percentile` percent of the patch becomes foreground, whatever the patch contains.
 On a synthetic field of 98% mid-gray with a few pale discs in it, the 95th percentile is
 the field value 180, the threshold is equal to the background, nothing is foreground and
-the patch counts zero blobs. On a real window of `data/4.svs` at 0.5 um/px the
-grayscale is nearly flat, mean 236.1 with a standard deviation of 1.4 over a range of
-about ten levels, and the 95th percentile of 237.7 selects the top 5% of a two-level
-spread. The counts that come out of that are not yet a measurement of steatosis: over
-five sampled windows of the same slide at the same percentile they ran 0, 1, 7, 7 and 18,
-and at the 99th percentile every one of them was 0.
+the patch counts zero blobs.
+
+Four of the five windows of `data/4.svs` sampled at 0.5 um/px are nearly flat: a mean
+near 236 over a range of about ten levels, a grayscale standard deviation of 1.3 to 1.7,
+and a 95th percentile that selects the top 5% of a two-level spread. **Those four
+windows were never checked for tissue and they are slide background, not tissue**, so
+their flatness is a fact about glass and not a description of the material the counting
+runs over. What they do show is that the count is unstable: over five sampled windows of
+the same slide at the same percentile the counts ran 0, 1, 1, 7 and 18, and at the 99th
+percentile every one of them was 0. None of those is yet a measurement of steatosis.
+
+The distribution that does describe the material is the one over the 120 patches the
+original extraction accepted, which is known tissue under a mean of 210. Those patches
+carry a grayscale standard deviation of 16.8 to 59.5 levels and a 95th percentile of 84
+to 247 with a median of 213, so the threshold has a structure to cut rather than a
+rounding error to resolve, and the two-level spread of the background windows is not the
+number the ablation needs to start from: that accepted-patch distribution is.
 
 The rule is the brief's and the parameter is `blobs.gray_percentile` in
 `configs/default.yaml`; this module reads it rather than restating it, and a threshold
 smoothed, floored or replaced here would be a constant nobody has measured. What the
 rule costs across the six slides is a question for the Task 7 ablation, which is written
-to measure it, and the flatness of the distribution above is the number that ablation
-needs to start from.
+to measure it.
 
 **Stain normalization is implemented, tested, and off.** `blobs.stain_normalization` is
 `false` in `configs/default.yaml`, `prepare_patch` is the only thing that consults it, and
@@ -193,7 +203,9 @@ def count_blobs(patch: np.ndarray, params: BlobParams, mpp: float) -> int:
     the third of those and the only one that describes the array in hand. A default
     here would be a way to call this function without stating the resolution, which is
     how a pixel-valued filter came to be applied to a 20x slide as if it were a 40x
-    one. `SlideInfo.achieved_mpp` is what a caller passes.
+    one. `SlideInfo.achieved_mpp` is what a caller passes. The conversion runs first,
+    before the patch is thresholded, opened and contoured, because a non-positive
+    `mpp` is a caller error and is worth reporting before the work rather than after it.
 
     Both area bounds are exclusive. A contour whose area equals a bound exactly is not
     counted, which is stated because the bound is a limit on the criterion and a blob
@@ -203,14 +215,17 @@ def count_blobs(patch: np.ndarray, params: BlobParams, mpp: float) -> int:
     The grayscale is **rounded** to `uint8`, not truncated, before the threshold is
     applied. A mean of three channels lands on a third of a level, so truncation moves
     the effective cut up to a whole level above the threshold that was asked for, in
-    one direction, always. On `data/4.svs` at 0.5 um/px the grayscale standard deviation
-    of a patch is 1.3 to 1.7 levels, so a whole level of systematic bias is as large as
-    the entire spread the rule is choosing within: at the 95th percentile of one measured
-    window the count was 8 truncated against 18 rounded, with 4.9% of pixels above the
-    threshold against 5.8%, where the percentile asks for 5%. Rounding keeps the effective
-    cut within half a level of `gray_threshold`. Neither figure is exact on a
-    distribution that flat, which is a fact about the rule rather than about this
-    conversion; see the module docstring.
+    one direction, always. Rounding leaves an error of at most half a level whose sign
+    follows the third, so it has no direction to correct: the argument for it is that a
+    bias of a known sign is worth removing, not that the bias is large. On the 120
+    patches the original extraction accepted the grayscale standard deviation is 16.8 to
+    59.5 levels, so a half-level bias is about a twentieth of that spread and is not
+    what decides a count. Where the difference is large is the flat case, and there the
+    material is glass: on one unverified background window of `data/4.svs` at 0.5 um/px,
+    standard deviation 1.4 levels, the 95th percentile counted 8 truncated against 18
+    rounded, with 4.9% of pixels above the threshold against 5.8% where the percentile
+    asks for 5%. Both figures describe the rule on a near-flat distribution and neither
+    describes an accepted patch; the module docstring carries the tissue distribution.
 
     The circularity denominator is not guarded. A contour reaching that line has an
     area above `area_px2_min` and therefore above zero, and a closed contour enclosing
@@ -226,6 +241,9 @@ def count_blobs(patch: np.ndarray, params: BlobParams, mpp: float) -> int:
     """
     import cv2
 
+    area_min_px = area_px2(params.area_um2_min, mpp)
+    area_max_px = area_px2(params.area_um2_max, mpp)
+
     gray = np.rint(_grayscale(patch)).astype(np.uint8)
     binary = cv2.threshold(gray, params.gray_threshold, 255, cv2.THRESH_BINARY)[1]
     kernel = np.ones((params.morph_kernel_size, params.morph_kernel_size), np.uint8)
@@ -234,8 +252,6 @@ def count_blobs(patch: np.ndarray, params: BlobParams, mpp: float) -> int:
     )
     contours = cv2.findContours(opened, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0]
 
-    area_min_px = area_px2(params.area_um2_min, mpp)
-    area_max_px = area_px2(params.area_um2_max, mpp)
     counted = 0
     for contour in contours:
         area = float(cv2.contourArea(contour))
@@ -296,6 +312,16 @@ def params_from_config(patch: np.ndarray, cfg: Config | None = None) -> BlobPara
 
     `cfg` defaults to the process-wide default configuration, as the other
     `*_from_config` adapters in this package do.
+
+    **The `gray_threshold` here is superseded by a per-slide derivation and is not a
+    second live way to set one.** No task in the plan calls this function:
+    `label_patches` reads the `tissue_gray` column of the patch index and derives one
+    threshold per slide at `blobs.gray_percentile`, and the Task 7 ablation reads the
+    same column. The two boundaries disagree — a percentile of the patch in hand
+    against a percentile of the slide's own background levels — and the per-slide one
+    is the one the study uses, because a patch's own percentile moves with the patch
+    and a slide's does not. This function is kept for its other five keys, and a later
+    reader should not treat both thresholds as live.
     """
     active = default_config() if cfg is None else cfg
     return BlobParams(
