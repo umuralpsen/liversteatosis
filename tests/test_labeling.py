@@ -204,8 +204,13 @@ def test_gray_threshold_is_a_percentile_of_the_slide_not_of_the_patch(
 
     monkeypatch.setattr(blobs, "gray_threshold_from_patch", _boom)
     monkeypatch.setattr(blobs, "params_from_config", _boom)
-    # `labeling` imports neither name today, so the two sets above prove nothing about
-    # this module. These two patch the names where a regression would have to bind them.
+    # Neither name is imported here today, so neither of the two patches above changes what
+    # this run does; they close the form a regression could take, and the two below close
+    # the other. A regression written `blobs.params_from_config(...)` resolves the name on
+    # the module at call time and trips the first pair; one written as a
+    # `from blobcount.blobs import params_from_config` added to this module binds its own
+    # name here and trips the second. Between them a regression to the per-patch threshold
+    # is caught in either form, which is the state this test exists to hold.
     monkeypatch.setattr(labeling, "gray_threshold_from_patch", _boom, raising=False)
     monkeypatch.setattr(labeling, "params_from_config", _boom, raising=False)
 
@@ -346,6 +351,41 @@ def test_a_non_ascii_slide_id_round_trips_through_the_csv_and_the_json(
     assert json.loads(text)["per_slide"]["hasta-ğü-01"]["n"] == 1
 
 
+def test_a_bad_index_cell_raises_an_input_error_with_the_original_attached(
+    tmp_output_tree, monkeypatch
+):
+    # The wrapper is a re-raise and not a copy: the traceback behind the refusal is the
+    # one that says which read refused, and that is only true if the original is attached
+    # as `__cause__`. The dedicated type is what lets the command line tell this from a
+    # defect, so the two halves are pinned here rather than only through the CLI.
+    from blobcount import labeling
+    monkeypatch.setattr(labeling, "load_patch", lambda p, s: np.full((s, s, 3), 180, np.uint8))
+    idx = tmp_output_tree / "patches.csv"
+    idx.write_text(
+        "patch_id,slide_id,x,y,mpp,tissue_gray\nA_0_0,A,0,0,not-a-number,181.0\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(labeling.LabelingInputError) as refused:
+        labeling.label_patches(idx, tmp_output_tree / "labels", _cfg_with_threshold(5))
+    assert isinstance(refused.value.__cause__, ValueError)
+    assert "not-a-number" in str(refused.value.__cause__)
+
+
+def test_a_patch_that_is_not_the_expected_array_is_an_input_error(tmp_output_tree):
+    # The fourth thing the type covers: a patch file the index names and `load_patch`
+    # refuses. A valid PNG at half the size, so the file is readable and it is the array
+    # that is wrong — which is the case the run has to name rather than resize past.
+    from blobcount import labeling
+    index = _write_patches(
+        tmp_output_tree / "patches", ["A_0_0.png"], np.full((256, 256, 3), 180, np.uint8)
+    )
+    _pil().fromarray(np.full((128, 128, 3), 180, np.uint8)).save(index.parent / "A_0_0.png")
+    with pytest.raises(labeling.LabelingInputError) as refused:
+        labeling.label_patches(index, tmp_output_tree / "labels", _cfg_with_threshold(5))
+    assert isinstance(refused.value.__cause__, ValueError)
+    assert "A_0_0.png" in str(refused.value)
+
+
 def _load_cli(monkeypatch):
     path = PROJECT_ROOT / "bin" / "label_patches.py"
     spec = importlib.util.spec_from_file_location("blobcount_cli_label_patches", path)
@@ -450,3 +490,38 @@ def test_cli_refuses_an_index_without_the_expected_header(cli, capsys):
     malformed.write_text("id,slide\nA_0_0,A\n", encoding="utf-8")
     assert module.main(["--index", str(malformed)]) == module.EXIT_REFUSED
     assert "mpp" in capsys.readouterr().err
+
+
+def test_cli_refuses_an_index_carrying_a_cell_that_is_not_a_number(cli, capsys):
+    # A cell the column says is a number and is not one is the same kind of answer as the
+    # missing header above: something the caller pointed at, so it is reported on stderr
+    # and not as a traceback. Nothing was labelled, because the conversion fails before
+    # the first patch is written.
+    module, index, out = cli
+    malformed = index.parent / "bad-cell.csv"
+    malformed.write_text(
+        "patch_id,slide_id,x,y,mpp,tissue_gray\n"
+        "2_1016_0.png,2,1016,0,not-a-number,181.0\n",
+        encoding="utf-8",
+    )
+    assert module.main(["--index", str(malformed)]) == module.EXIT_REFUSED
+    err = capsys.readouterr().err
+    assert "not-a-number" in err
+    assert "Traceback" not in err
+    assert not (out / "labels.csv").exists()
+
+
+def test_cli_does_not_swallow_a_defect_from_inside_label_patches(cli, monkeypatch):
+    # The other direction, and the one a single `except (OSError, ValueError)` around the
+    # whole call cannot make: a `ValueError` from the counting is not a statement about
+    # the index, and reporting it as one would send the caller off to fix their
+    # `--index` for a defect in this project. It leaves `main` as an exception instead.
+    module, index, _ = cli
+    from blobcount import labeling
+
+    def _boom(patch, params, mpp):
+        raise ValueError("injected")
+
+    monkeypatch.setattr(labeling, "count_blobs", _boom)
+    with pytest.raises(ValueError, match="injected"):
+        module.main(["--index", str(index)])

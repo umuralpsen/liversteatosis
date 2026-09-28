@@ -54,6 +54,19 @@ records, and nothing downstream could detect it. A failure to write is likewise 
 caught: it leaves a tree that `labels.csv` does not describe, and stopping is the honest
 response to that.
 
+**`label_patches` is where a bad input stops being reportable as one.** `read_index` and
+`load_patch` are public and keep raising what they raise: a `ValueError` for a header
+that is not the `patches.csv` header and for a patch array of the wrong shape, an
+`OSError` for a path that is not there. `label_patches` wraps those reads and the
+conversions of the cells beside them — which are the step that turns a `None` or a
+`not-a-number` into a `TypeError` or a `ValueError` — and raises `LabelingInputError` with
+the original attached as its `__cause__`. That is the whole of the separation, and it is
+placed here because this is the boundary: a `ValueError` from `count_blobs`, from
+`prepare_patch` or from this run's own arithmetic is not a statement about what the caller
+pointed at, so it is not wrapped and it propagates. The command line then reports the first
+kind as a refusal and lets the second out as a traceback, because a refusal is an answer
+about the argument the user passed and a traceback is the answer about this code.
+
 `labels.csv` is written with `path` relative to `out_dir`, separated by `/` whatever the
 platform separator is, and it is the only handoff from this task to training, the ablation
 and the evaluation. Those three read it and resolve each row against the configured label
@@ -62,6 +75,7 @@ clearing above exists to make possible.
 
 Declared interface, in `__all__` order:
 
+    LabelingInputError
     LabelingStats
         blob_threshold: int
         per_slide: dict[str, dict[str, int]]
@@ -89,6 +103,7 @@ from blobcount.config import Config
 from blobcount.extract import INDEX_COLUMNS, prepare_output
 
 __all__ = [
+    "LabelingInputError",
     "LabelingStats",
     "label_patches",
     "load_patch",
@@ -120,6 +135,21 @@ LABEL_COLUMNS = ("patch_id", "slide_id", "label", "blob_count", "mpp", "path")
 # completed. The *same* name is used to find the source and to name the destination, so
 # the two cannot come to disagree about which file a label belongs to.
 _PATCH_SUFFIX = ".png"
+
+
+class LabelingInputError(Exception):
+    """Raised when what the index named is not the data a labeling run needs.
+
+    It covers the four things a caller can point at and be wrong about: an index that
+    cannot be read, a header that is not the `patches.csv` header, a cell that is not the
+    number its column records, and a patch file that is not the `uint8`
+    `(patch_size, patch_size, 3)` array `count_blobs` requires. What it deliberately does
+    not cover is a defect in `label_patches` itself: only the reads are wrapped, so a
+    `ValueError` from the counting or the normalization propagates as itself rather than
+    reaching a caller as a bad `--index`. The original exception is the `__cause__` of
+    every instance, because the message alone says the run refused and the traceback
+    behind it says which read refused.
+    """
 
 
 @dataclass(frozen=True)
@@ -337,21 +367,28 @@ def label_patches(index_path: Path, out_dir: Path, cfg: Config) -> LabelingStats
     name, so `2_1016_0` and `2_1016_0.png` in one index are the same patch and the second
     is the repeat, not a second file.
 
-    Nothing per patch is caught. A patch file that is not the shape the count needs raises
-    in `load_patch`, and a write that fails raises, and either one stopping the run is
-    better than a dataset whose CSV describes a tree that is not there.
+    Nothing per patch is caught but the read. A patch file that is not the shape the count
+    needs raises in `load_patch` and a cell that is not a number raises at the conversion
+    of it, and both arrive here as a `LabelingInputError` carrying the original as its
+    `__cause__`. A count that raises, a normalization that raises and a write that fails
+    are not caught: they are either a defect in this module or a tree that `labels.csv`
+    would not describe, and stopping is the honest response to both.
 
-    A failure of `prepare_output` is **not** caught either: it is the refusal that keeps
-    `--force` from deleting the slides, the manifest or the repository, and it reaches the
-    caller as an `OutputPathError` so the command line can report it and exit non-zero
-    rather than write into a directory it should not have.
+    A failure of `prepare_output` is **not** caught either, and is not turned into a
+    `LabelingInputError`: it is the refusal that keeps `--force` from deleting the slides,
+    the manifest or the repository, and it reaches the caller as an `OutputPathError` so
+    the command line can report it and exit non-zero rather than write into a directory it
+    should not have.
     """
     index = Path(index_path)
     out = Path(out_dir)
     # The index is read before the tree is cleared, so an index that cannot be read
     # leaves the previous run's labels on disk rather than deleting them on its way to
     # reporting why it could not be read.
-    rows = read_index(index)
+    try:
+        rows = read_index(index)
+    except (OSError, ValueError) as error:
+        raise LabelingInputError(f"the patch index could not be read: {error}") from error
     prepare_output(out)
 
     threshold = int(cfg.get("labeling.blob_threshold"))
@@ -367,26 +404,35 @@ def label_patches(index_path: Path, out_dir: Path, cfg: Config) -> LabelingStats
     for row in rows:
         grouped.setdefault(str(row["slide_id"]), []).append(row)
 
-    params = {
-        slide_id: BlobParams(
-            area_um2_min=area_um2_min,
-            area_um2_max=area_um2_max,
-            circularity_min=circularity_min,
-            gray_threshold=_slide_gray_threshold(
-                [float(row["tissue_gray"]) for row in slide_rows], percentile
-            ),
-            morph_kernel_size=morph_kernel_size,
-            morph_iterations=morph_iterations,
-        )
-        for slide_id, slide_rows in grouped.items()
-    }
-    per_slide_gray_threshold = {
-        slide_id: item.gray_threshold for slide_id, item in params.items()
-    }
-    per_slide_mpp = {
-        slide_id: float(np.mean([float(row["mpp"]) for row in slide_rows]))
-        for slide_id, slide_rows in grouped.items()
-    }
+    # The `TypeError` is here for the cell a truncated row leaves `None`, and it is safe
+    # to catch only because these three blocks are the whole of the try: nothing that
+    # could raise one from a defect is inside it.
+    try:
+        params = {
+            slide_id: BlobParams(
+                area_um2_min=area_um2_min,
+                area_um2_max=area_um2_max,
+                circularity_min=circularity_min,
+                gray_threshold=_slide_gray_threshold(
+                    [float(row["tissue_gray"]) for row in slide_rows], percentile
+                ),
+                morph_kernel_size=morph_kernel_size,
+                morph_iterations=morph_iterations,
+            )
+            for slide_id, slide_rows in grouped.items()
+        }
+        per_slide_gray_threshold = {
+            slide_id: item.gray_threshold for slide_id, item in params.items()
+        }
+        per_slide_mpp = {
+            slide_id: float(np.mean([float(row["mpp"]) for row in slide_rows]))
+            for slide_id, slide_rows in grouped.items()
+        }
+    except (TypeError, ValueError) as error:
+        raise LabelingInputError(
+            f"the patch index carries a cell that is not the number its column records: "
+            f"{error}"
+        ) from error
     per_slide = {
         slide_id: {name: 0 for name in CLASS_NAMES} | {"n": 0}
         for slide_id in grouped
@@ -407,8 +453,17 @@ def label_patches(index_path: Path, out_dir: Path, cfg: Config) -> LabelingStats
             )
             continue
         slide_id = str(row["slide_id"])
-        mpp = float(row["mpp"])
-        patch = prepare_patch(load_patch(index.parent / name, patch_size), cfg)
+        # The two reads and nothing else: `prepare_patch` and `count_blobs` sit outside
+        # the try on purpose, so a defect in either of them is not reported as a patch
+        # the index named wrongly.
+        try:
+            mpp = float(row["mpp"])
+            source = load_patch(index.parent / name, patch_size)
+        except (OSError, TypeError, ValueError) as error:
+            raise LabelingInputError(
+                f"the patch the index names could not be used: {error}"
+            ) from error
+        patch = prepare_patch(source, cfg)
         count = count_blobs(patch, params[slide_id], mpp)
         class_name = CLASS_STEATOSIS if count >= threshold else CLASS_NORMAL
 
