@@ -17,8 +17,9 @@ labeling run that wrote into a previous run's tree would leave a patch in both c
 directories, and the clearing is what makes a single label per patch a property of the
 run rather than a coincidence about the dataset. That makes the argument a deletion, so
 it goes through `blobcount.extract.prepare_output`, which refuses the project root,
-`paths.slides`, `paths.manifest`, anything containing either, and anything not strictly
-below the project root; a refusal is reported and exits 2 rather than raised.
+`paths.slides`, `paths.manifest`, anything containing either, anything not strictly
+below the project root, and a target that is a file; a refusal is reported and exits 2
+rather than raised.
 
 Two tables are printed. The first is the per-slide class count, which is the number the
 study reports. The second is the per-slide achieved resolution, printed beside it because
@@ -27,23 +28,37 @@ resolution and one labelled 20% at another is a magnification difference before 
 disease difference, and the resolution is what tells the two apart.
 
 Three outcomes, three codes. A run that completed is 0. A refusal is 2, and a refusal is
-always an answer about what the caller pointed at: a configuration that cannot be loaded,
-an `--out` that `prepare_output` will not delete, a patch index that cannot be read or
-whose header is not the one this pipeline writes, a cell of that index that is not the
-number its column records, and a patch file the index names that is not the `uint8`
-`(patch_size, patch_size, 3)` array `count_blobs` needs. The last three arrive as a
-`LabelingInputError`, which `label_patches` raises around the reads that can fail that way
-and around nothing else, so a defect inside it is not reported as a bad `--index`. All five
-are reported on stderr and none of them is a traceback.
+always an answer about what the caller pointed at. Six of them can reach it, in three
+groups, and nothing else does:
 
-**`--threshold` is not one of the five.** Its argument is typed `int` by the parser, so a
+- **A configuration.** One that cannot be loaded — missing, unreadable, not a mapping, a
+  key the code does not declare — and a `paths.labels` that `load` accepted because it
+  validates nothing past the key's presence but `Config.path` refuses, because it is not
+  a path string or is empty. Both arrive as a `ConfigError`.
+- **An output target.** An `--out` or a `paths.labels` that `prepare_output` will not
+  clear: the project root, `paths.slides` or `paths.manifest` themselves, a directory
+  holding either, anything not strictly below the project root, and an existing path that
+  is a file rather than a directory. It arrives as an `OutputPathError`.
+- **The index and the patches it names.** An index that cannot be read — it is not there,
+  it cannot be opened, or it carries a cell longer than `csv.field_size_limit` — or whose
+  header is not the one this pipeline writes; a cell of that index that is not the number
+  its column records; and a patch file the index names that is not the `uint8`
+  `(patch_size, patch_size, 3)` array `count_blobs` needs. All three arrive as a
+  `LabelingInputError`, which `label_patches` raises around the two reads that can fail
+  that way and around the conversion of the two numeric columns, and around nothing else,
+  so a defect inside it is not reported as a bad `--index`.
+
+All six are reported on stderr and none of them is a traceback.
+
+**`--threshold` is not one of the six.** Its argument is typed `int` by the parser, so a
 value that is not an integer never reaches `main`: the parser refuses it and exits 2 of
 its own accord. There is no run in which a threshold is applied that the configuration
 would not take, because the only value the run can produce for
 `labeling.blob_threshold` is an `int` and that is what the key is configured as.
 
-**A defect inside `label_patches` is not one of the three.** A `ValueError` from the
-counting, from the normalization or from a write is not caught here and leaves the
+**A defect inside `label_patches` is never a refusal.** A `ValueError` from the counting,
+from the normalization, from `np.percentile` on a `blobs.gray_percentile` outside [0, 100]
+that this project range-checks nowhere, or from a write is not caught here and leaves the
 interpreter to print a traceback, which is the honest report of a defect in this project.
 The process status it exits with is 1, the same status the sentinel below uses, so a
 caller that has to tell the two apart reads stderr: the sentinel names the contradiction it
@@ -160,35 +175,45 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         overrides = [] if args.threshold is None else [f"labeling.blob_threshold={args.threshold}"]
         cfg = load(overrides=overrides)
+        # Resolved here rather than after the `load` above, so a `paths.labels` that
+        # `Config.path` refuses — not a path string, or an empty one — is caught by the
+        # same `ConfigError` arm. Outside it, that value left a traceback and the process
+        # exited 1, which is `EXIT_CONTRADICTORY` and told a caller the labels had
+        # contradicted themselves over a hand-edited configuration string.
+        out_dir: Path = args.out if args.out is not None else cfg.path("paths.labels")
     except ConfigError as error:
-        # A configuration that is missing, unreadable or not a mapping. The override the
-        # threshold produces cannot be the cause: the parser has already typed it as the
-        # `int` the key is configured as.
+        # A configuration that is missing, unreadable or not a mapping, and a
+        # `paths.labels` `load` accepted because it validates nothing past the key's
+        # presence but `Config.path` refused. The override the threshold produces cannot
+        # be the cause: the parser has already typed it as the `int` the key is configured
+        # as, and `--out` has already been typed as a `Path`.
         print(f"label_patches: {error}", file=sys.stderr)
         return EXIT_REFUSED
 
-    out_dir: Path = args.out if args.out is not None else cfg.path("paths.labels")
     try:
         stats = label_patches(args.index, out_dir, cfg)
     except OutputPathError as error:
         # The refusal from `prepare_output`: the target is the project root, the slides,
-        # the manifest, something holding either, or not below the project root at all.
-        # It is caught rather than raised because it is an answer about the argument the
-        # user passed, and a traceback is not an answer.
+        # the manifest, something holding either, not below the project root at all, or an
+        # existing path that is a file rather than a directory. It is caught rather than
+        # raised because it is an answer about the argument the user passed, and a
+        # traceback is not an answer.
         print(f"label_patches: {error}", file=sys.stderr)
         return EXIT_REFUSED
     except LabelingInputError as error:
-        # The four things the caller pointed at and got wrong: an index that is not there
-        # or is not the `patches.csv` header, a cell of it that is not the number its
-        # column records, and a patch file that is not the `uint8` `(patch_size,
-        # patch_size, 3)` array `count_blobs` needs. `label_patches` raises this around
-        # those reads and nothing else, so a `ValueError` from anywhere else in it is not
-        # caught here and reaches the caller as a traceback — which is the point: a
-        # refusal is an answer about the argument and a traceback is the answer about our
-        # code, and reporting a defect as the first would send the caller to fix an index
-        # that is fine. A write that fails still raises for the same reason the module
-        # docstring gives: a tree that `labels.csv` does not describe is not something to
-        # report and continue past.
+        # The four things the caller pointed at and got wrong: an index that is not there,
+        # cannot be opened, carries a cell longer than `csv.field_size_limit`, or is not
+        # the `patches.csv` header; a cell of it that is not the number its column
+        # records; and a patch file that is not the `uint8` `(patch_size, patch_size, 3)`
+        # array `count_blobs` needs. `label_patches` raises this around those two reads
+        # and the conversion of the two numeric columns, and around nothing else, so a
+        # `ValueError` from anywhere else in it — a `blobs.gray_percentile` outside
+        # [0, 100], the counting, the normalization — is not caught here and reaches the
+        # caller as a traceback. Which is the point: a refusal is an answer about the
+        # argument and a traceback is the answer about our code, and reporting a defect
+        # as the first would send the caller to fix an index that is fine. A write that
+        # fails still raises for the same reason the module docstring gives: a tree that
+        # `labels.csv` does not describe is not something to report and continue past.
         print(f"label_patches: {error}", file=sys.stderr)
         return EXIT_REFUSED
 

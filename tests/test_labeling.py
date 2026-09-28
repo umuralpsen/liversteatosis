@@ -386,6 +386,47 @@ def test_a_patch_that_is_not_the_expected_array_is_an_input_error(tmp_output_tre
     assert "A_0_0.png" in str(refused.value)
 
 
+def test_a_truncated_row_leaving_no_cell_is_an_input_error(tmp_output_tree):
+    # A **pin**, not red evidence: it is green before the per-slide block is narrowed as
+    # well as after, because both places wrap a `TypeError` from a cell a short index
+    # line leaves `None`. It is here because that cell is the *only* thing the narrow
+    # conversion exists for — nothing else in the run converts a cell — so dropping its
+    # `TypeError` arm turns this red, and that arm would otherwise be untested.
+    from blobcount import labeling
+    idx = tmp_output_tree / "patches.csv"
+    # Four fields under a six-column header, so `csv.DictReader` fills `mpp` and
+    # `tissue_gray` with `None` rather than raising on the short line.
+    idx.write_text("patch_id,slide_id,x,y,mpp,tissue_gray\nA_0_0,A,0,0\n", encoding="utf-8")
+    with pytest.raises(labeling.LabelingInputError) as refused:
+        labeling.label_patches(idx, tmp_output_tree / "labels", _cfg_with_threshold(5))
+    assert isinstance(refused.value.__cause__, TypeError)
+    assert "cell that is not the number its column records" in str(refused.value)
+
+
+def test_a_configured_percentile_numpy_refuses_is_not_an_input_error(tmp_output_tree):
+    # The other direction of the boundary, and the one a `try` around the whole
+    # per-slide block cannot make: `blobs.gray_percentile: 150` is a value `load`
+    # accepts, because it range-checks nothing and only `np.percentile` refuses it. The
+    # index below is perfect, so the only thing that can fail here is this project, and
+    # reporting it as a bad cell would send the caller off to fix a `patches.csv` that is
+    # not broken. It leaves as the `ValueError` it is.
+    from blobcount import labeling
+    idx = tmp_output_tree / "patches.csv"
+    idx.write_text(
+        "patch_id,slide_id,x,y,mpp,tissue_gray\nA_0_0,A,0,0,0.5010,181.0\n",
+        encoding="utf-8",
+    )
+    cfg = load()
+    cfg.set("blobs.gray_percentile", 150)
+    with pytest.raises(ValueError) as escaped:
+        labeling.label_patches(idx, tmp_output_tree / "labels", cfg)
+    # Stated explicitly rather than left to `pytest.raises`: `LabelingInputError` derives
+    # from `Exception` and not from `ValueError`, so the `raises` alone already excludes
+    # it. This line says which exclusion is the point of the test.
+    assert not isinstance(escaped.value, labeling.LabelingInputError)
+    assert "Percentiles must be in the range" in str(escaped.value)
+
+
 def _load_cli(monkeypatch):
     path = PROJECT_ROOT / "bin" / "label_patches.py"
     spec = importlib.util.spec_from_file_location("blobcount_cli_label_patches", path)
@@ -397,12 +438,27 @@ def _load_cli(monkeypatch):
     return module
 
 
-def _config_pointing_labels_at(target):
+def _config_file(directory, name, *, labels, **sections):
+    """Return a configuration file with `paths.labels` set to `labels` and `sections` merged.
+
+    `labels` is written as given rather than through `str`, because the values this exists
+    to exercise are the ones `load` accepts and `Config.path` refuses — the empty string
+    and a non-string — and `str` would turn both into a usable path. The other `sections`
+    are merged into the default configuration, so a test can hand a run a value the
+    configuration declares and this project nevertheless refuses, such as a
+    `blobs.gray_percentile` outside [0, 100].
+    """
     data = yaml.safe_load(DEFAULT_CONFIG_PATH.read_text(encoding="utf-8"))
-    data["paths"]["labels"] = str(target)
-    path = target.parent / "config.yaml"
+    data["paths"]["labels"] = labels
+    for section, values in sections.items():
+        data[section].update(values)
+    path = directory / name
     path.write_text(yaml.safe_dump(data), encoding="utf-8")
     return path
+
+
+def _config_pointing_labels_at(target):
+    return _config_file(target.parent, "config.yaml", labels=str(target))
 
 
 @pytest.fixture
@@ -525,3 +581,84 @@ def test_cli_does_not_swallow_a_defect_from_inside_label_patches(cli, monkeypatc
     monkeypatch.setattr(labeling, "count_blobs", _boom)
     with pytest.raises(ValueError, match="injected"):
         module.main(["--index", str(index)])
+
+
+def test_cli_refuses_an_index_carrying_a_cell_over_the_csv_field_limit(cli, capsys):
+    # `csv.DictReader` raises `_csv.Error` on a field longer than `csv.field_size_limit`
+    # rather than truncating it, and `csv.Error` is neither a `ValueError` nor an
+    # `OSError`, so a catch around `read_index` that omits it lets the exception out of
+    # `main`. The process status is then 1, which this program defines as
+    # `EXIT_CONTRADICTORY` — "the labels contradicted themselves" — reported for a
+    # malformed index, and the answer a caller reading the exit contract gets is the wrong
+    # one.
+    module, index, _ = cli
+    oversized = index.parent / "oversized.csv"
+    oversized.write_text(
+        "patch_id,slide_id,x,y,mpp,tissue_gray\n"
+        f"2_1016_0.png,2,1016,0,0.5010,{'1' * 200000}\n",
+        encoding="utf-8",
+    )
+    # Asserted rather than assumed: a limit above the cell would let this pass without
+    # ever reaching the guard it exists to exercise.
+    assert csv.field_size_limit() < 200000
+    assert module.main(["--index", str(oversized)]) == module.EXIT_REFUSED
+    err = capsys.readouterr().err
+    assert "field larger than field limit" in err
+    assert "Traceback" not in err
+
+
+def test_cli_does_not_report_a_bad_percentile_as_a_bad_index(cli, project_scratch, monkeypatch):
+    # The same defect one level up, and the reason exit 2 has to be reserved for the
+    # argument: a configured percentile this project range-checks nowhere is refused by
+    # numpy, and 2 would name the caller's `patches.csv` for it. It leaves `main` as the
+    # exception it is, so stderr is a traceback naming a numpy call.
+    module, index, out = cli
+    monkeypatch.setattr(
+        "blobcount.config.DEFAULT_CONFIG_PATH",
+        _config_file(
+            project_scratch, "config-bad-percentile.yaml",
+            labels=str(out), blobs={"gray_percentile": 150},
+        ),
+    )
+    with pytest.raises(ValueError, match="Percentiles must be in the range"):
+        module.main(["--index", str(index)])
+
+
+@pytest.mark.parametrize("value", ["", 7])
+def test_cli_refuses_a_labels_path_config_path_refuses(
+    cli, project_scratch, monkeypatch, capsys, value
+):
+    # `paths.labels` is a hand-edited string and `load` checks that it is declared and
+    # nothing else, so an empty string and a non-string both reach `Config.path`, which
+    # is where the refusal of them lives. Resolved outside the `try` that catches
+    # `ConfigError`, they leave `main` as a traceback and the process exits 1. Neither
+    # value is reachable through `--out`, which the parser has already typed as a `Path`;
+    # this is the configuration's own refusal surfacing at the command line.
+    module, index, _ = cli
+    monkeypatch.setattr(
+        "blobcount.config.DEFAULT_CONFIG_PATH",
+        _config_file(
+            project_scratch, f"config-labels-{type(value).__name__}.yaml", labels=value
+        ),
+    )
+    assert module.main(["--index", str(index)]) == module.EXIT_REFUSED
+    err = capsys.readouterr().err
+    assert "paths.labels" in err
+    assert "Traceback" not in err
+
+
+def test_cli_refuses_an_out_that_is_an_existing_file(cli, project_scratch, capsys):
+    # `--out` naming a regular file. The file is inside the project on purpose: a target
+    # outside it is refused by the "not strictly below the project root" rule, which
+    # would make this green for a reason that has nothing to do with the file.
+    # `shutil.rmtree` on a regular file raises `NotADirectoryError`, and that reached the
+    # caller as a traceback exiting 1. The file is not deleted either way, and that is
+    # the part worth pinning: this path never held a previous run's labels.
+    module, index, _ = cli
+    as_file = project_scratch / "labels-as-file"
+    as_file.write_text("not a directory\n", encoding="utf-8")
+    assert module.main(["--index", str(index), "--out", str(as_file)]) == module.EXIT_REFUSED
+    err = capsys.readouterr().err
+    assert "refusing" in err
+    assert "not a directory" in err
+    assert as_file.read_text(encoding="utf-8") == "not a directory\n"

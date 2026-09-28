@@ -13,8 +13,9 @@ directory listing could no longer say which label a file carried. `label_patches
 owns. That call is the whole of the fix and it is the reason this function takes `out_dir`
 rather than a caller passing a directory it has already filled. `prepare_output` carries
 its own refusals: the project root, `paths.slides`, `paths.manifest`, anything holding
-either, and anything not strictly below the project root are all refused rather than
-deleted, and the refusal is an `OutputPathError` that reaches the caller.
+either, anything not strictly below the project root, and a target that is a file are all
+refused rather than deleted, and the refusal is an `OutputPathError` that reaches the
+caller.
 
 **Each patch is counted at the resolution it was read at.** `patches.csv` records the
 achieved `mpp` per patch, and `count_blobs` requires that number as its third argument
@@ -57,15 +58,17 @@ response to that.
 **`label_patches` is where a bad input stops being reportable as one.** `read_index` and
 `load_patch` are public and keep raising what they raise: a `ValueError` for a header
 that is not the `patches.csv` header and for a patch array of the wrong shape, an
-`OSError` for a path that is not there. `label_patches` wraps those reads and the
-conversions of the cells beside them — which are the step that turns a `None` or a
-`not-a-number` into a `TypeError` or a `ValueError` — and raises `LabelingInputError` with
-the original attached as its `__cause__`. That is the whole of the separation, and it is
-placed here because this is the boundary: a `ValueError` from `count_blobs`, from
-`prepare_patch` or from this run's own arithmetic is not a statement about what the caller
-pointed at, so it is not wrapped and it propagates. The command line then reports the first
-kind as a refusal and lets the second out as a traceback, because a refusal is an answer
-about the argument the user passed and a traceback is the answer about this code.
+`OSError` for a path that is not there, and a `csv.Error` for a cell longer than
+`csv.field_size_limit`. `label_patches` wraps those two reads and the conversion of the
+two numeric columns — which is the step that turns a `None` or a `not-a-number` into a
+`TypeError` or a `ValueError` — and raises `LabelingInputError` with the original attached
+as its `__cause__`. That is the whole of the separation, and it is placed here because
+this is the boundary: a `ValueError` from `count_blobs`, from `prepare_patch`, from
+`np.percentile` on a `blobs.gray_percentile` this project range-checks nowhere, or from
+this run's own arithmetic is not a statement about what the caller pointed at, so it is
+not wrapped and it propagates. The command line then reports the first kind as a refusal
+and lets the second out as a traceback, because a refusal is an answer about the argument
+the user passed and a traceback is the answer about this code.
 
 `labels.csv` is written with `path` relative to `out_dir`, separated by `/` whatever the
 platform separator is, and it is the only handoff from this task to training, the ablation
@@ -95,6 +98,7 @@ import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 
@@ -144,11 +148,13 @@ class LabelingInputError(Exception):
     cannot be read, a header that is not the `patches.csv` header, a cell that is not the
     number its column records, and a patch file that is not the `uint8`
     `(patch_size, patch_size, 3)` array `count_blobs` requires. What it deliberately does
-    not cover is a defect in `label_patches` itself: only the reads are wrapped, so a
-    `ValueError` from the counting or the normalization propagates as itself rather than
-    reaching a caller as a bad `--index`. The original exception is the `__cause__` of
-    every instance, because the message alone says the run refused and the traceback
-    behind it says which read refused.
+    not cover is a defect in `label_patches` itself. **Only three things are wrapped: the
+    read of the index, the conversion of the two numeric columns, and the read of each
+    patch file** — so a `ValueError` from `np.percentile` on a configured percentile, from
+    the counting or from the normalization propagates as itself rather than reaching a
+    caller as a bad `--index`. The original exception is the `__cause__` of every
+    instance, because the message alone says the run refused and the traceback behind it
+    says which read refused.
     """
 
 
@@ -201,11 +207,18 @@ def read_index(path: Path) -> list[dict]:
     a machine whose code page is Turkish mangles the non-ASCII ones. The values are left
     as strings rather than coerced here, because the caller converts each column to the
     type it needs and a single `float()` over a row would turn a patch id into a number.
+    A line with fewer fields than the header carries is not rejected here: `csv.DictReader`
+    fills the missing ones with `None`, and `label_patches` is what reports that.
 
     The header must carry every name in `extract.INDEX_COLUMNS`. It is checked here
     rather than left to the first `row["mpp"]` halfway through a run, because a truncated
     or reordered index is a defect in the extraction that produced it and the failure
     belongs on the file that has it, not on the labeling that read it.
+
+    A cell longer than `csv.field_size_limit` raises `csv.Error` from `csv.DictReader`
+    rather than being truncated, and that propagates as itself: nothing here raises a
+    `csv.Error` of its own and nothing here catches one. `label_patches` is the boundary,
+    and it is what turns it into a `LabelingInputError`.
     """
     target = Path(path)
     with target.open(encoding="utf-8", newline="") as handle:
@@ -263,6 +276,43 @@ def _patch_file_name(patch_id: str) -> str:
     source patch and to name the labelled copy.
     """
     return patch_id if patch_id.endswith(_PATCH_SUFFIX) else patch_id + _PATCH_SUFFIX
+
+
+class _RowNumbers(NamedTuple):
+    """The two numeric cells of one index row, converted.
+
+    `tissue_gray` and `mpp` are the only two columns the run treats as numbers. Both are
+    filled once, by `_row_numbers`, and every value below reads them from here rather
+    than from the cell again.
+    """
+
+    tissue_gray: float
+    mpp: float
+
+
+def _row_numbers(row: Mapping[str, str | None]) -> _RowNumbers:
+    """Return the `tissue_gray` and `mpp` of one index row, both converted to `float`.
+
+    **This conversion is the only place in the module where a cell becomes a number, and
+    the only `try` in it is the one around the two `float()` calls.** The `TypeError` is
+    for the cell a truncated index line leaves `None` — `csv.DictReader` fills a short
+    row's missing fields with `None` rather than raising on the line — and the `ValueError`
+    is for a cell that is text where its column records a number. Both are statements
+    about the file the caller pointed at, so both are raised as a `LabelingInputError`
+    with the original attached.
+
+    Nothing else is inside it, and that is what keeps the boundary true in both
+    directions: a `TypeError` or a `ValueError` from `np.percentile`, from `np.mean`,
+    from `count_blobs` or from a write is not a statement about the index, so it is not
+    wrapped and it reaches the caller as itself.
+    """
+    try:
+        return _RowNumbers(float(row["tissue_gray"]), float(row["mpp"]))
+    except (TypeError, ValueError) as error:
+        raise LabelingInputError(
+            f"the patch index carries a cell that is not the number its column records: "
+            f"{error}"
+        ) from error
 
 
 def _slide_gray_threshold(values: Sequence[float], percentile: float) -> float:
@@ -369,16 +419,19 @@ def label_patches(index_path: Path, out_dir: Path, cfg: Config) -> LabelingStats
 
     Nothing per patch is caught but the read. A patch file that is not the shape the count
     needs raises in `load_patch` and a cell that is not a number raises at the conversion
-    of it, and both arrive here as a `LabelingInputError` carrying the original as its
-    `__cause__`. A count that raises, a normalization that raises and a write that fails
-    are not caught: they are either a defect in this module or a tree that `labels.csv`
-    would not describe, and stopping is the honest response to both.
+    of it — the two numeric columns are converted once per row, before the first patch is
+    read, so a bad cell costs no write — and both arrive here as a `LabelingInputError`
+    carrying the original as its `__cause__`. A count that raises, a normalization that
+    raises, a percentile outside [0, 100] and a write that fails are not caught: they are
+    either a defect in this module or a tree that `labels.csv` would not describe, and
+    stopping is the honest response to both.
 
-    A failure of `prepare_output` is **not** caught either, and is not turned into a
+    **A failure of `prepare_output` is not caught either**, and is not turned into a
     `LabelingInputError`: it is the refusal that keeps `--force` from deleting the slides,
     the manifest or the repository, and it reaches the caller as an `OutputPathError` so
     the command line can report it and exit non-zero rather than write into a directory it
-    should not have.
+    should not have. That is also the answer for a target that is a file: `prepare_output`
+    refuses it rather than handing `shutil.rmtree` a regular file to fail on.
     """
     index = Path(index_path)
     out = Path(out_dir)
@@ -387,7 +440,11 @@ def label_patches(index_path: Path, out_dir: Path, cfg: Config) -> LabelingStats
     # reporting why it could not be read.
     try:
         rows = read_index(index)
-    except (OSError, ValueError) as error:
+    except (OSError, ValueError, csv.Error) as error:
+        # `csv.Error` is in the tuple because `csv.DictReader` raises it on a cell
+        # longer than `csv.field_size_limit` rather than truncating the cell, and it is
+        # neither an `OSError` nor a `ValueError`. It is a file the caller pointed at,
+        # so it belongs with the two.
         raise LabelingInputError(f"the patch index could not be read: {error}") from error
     prepare_output(out)
 
@@ -400,39 +457,44 @@ def label_patches(index_path: Path, out_dir: Path, cfg: Config) -> LabelingStats
     morph_kernel_size = int(cfg.get("blobs.morph_kernel_size"))
     morph_iterations = int(cfg.get("blobs.morph_iterations"))
 
-    grouped: dict[str, list[dict]] = {}
-    for row in rows:
-        grouped.setdefault(str(row["slide_id"]), []).append(row)
+    # The two numeric columns are converted here, once per row, and the values are read
+    # from the converted list everywhere below. Converting at each point of use instead
+    # would mean a second conversion of a cell already checked, and two conversions of
+    # one cell are two places to come to disagree about what the index said.
+    numbers = [_row_numbers(row) for row in rows]
+    # Positions rather than the row dictionaries, so the grouping indexes `numbers` as
+    # well and the two stay in step. `grouped` is built after the conversion so a row
+    # whose cell is not a number is reported before anything is grouped around it.
+    grouped: dict[str, list[int]] = {}
+    for position, row in enumerate(rows):
+        grouped.setdefault(str(row["slide_id"]), []).append(position)
 
-    # The `TypeError` is here for the cell a truncated row leaves `None`, and it is safe
-    # to catch only because these three blocks are the whole of the try: nothing that
-    # could raise one from a defect is inside it.
-    try:
-        params = {
-            slide_id: BlobParams(
-                area_um2_min=area_um2_min,
-                area_um2_max=area_um2_max,
-                circularity_min=circularity_min,
-                gray_threshold=_slide_gray_threshold(
-                    [float(row["tissue_gray"]) for row in slide_rows], percentile
-                ),
-                morph_kernel_size=morph_kernel_size,
-                morph_iterations=morph_iterations,
-            )
-            for slide_id, slide_rows in grouped.items()
-        }
-        per_slide_gray_threshold = {
-            slide_id: item.gray_threshold for slide_id, item in params.items()
-        }
-        per_slide_mpp = {
-            slide_id: float(np.mean([float(row["mpp"]) for row in slide_rows]))
-            for slide_id, slide_rows in grouped.items()
-        }
-    except (TypeError, ValueError) as error:
-        raise LabelingInputError(
-            f"the patch index carries a cell that is not the number its column records: "
-            f"{error}"
-        ) from error
+    # The `BlobParams` below, the `np.percentile` it calls and the `np.mean` beside it
+    # are outside every `try`, and that is the point: `blobs.gray_percentile` is a
+    # configured value this project range-checks nowhere, and `np.percentile` is the only
+    # thing that refuses one outside [0, 100]. Wrapped, that refusal would reach the
+    # caller as a statement about the index, which is a file with nothing wrong with it.
+    # It leaves as the `ValueError` it is.
+    params = {
+        slide_id: BlobParams(
+            area_um2_min=area_um2_min,
+            area_um2_max=area_um2_max,
+            circularity_min=circularity_min,
+            gray_threshold=_slide_gray_threshold(
+                [numbers[position].tissue_gray for position in slide_rows], percentile
+            ),
+            morph_kernel_size=morph_kernel_size,
+            morph_iterations=morph_iterations,
+        )
+        for slide_id, slide_rows in grouped.items()
+    }
+    per_slide_gray_threshold = {
+        slide_id: item.gray_threshold for slide_id, item in params.items()
+    }
+    per_slide_mpp = {
+        slide_id: float(np.mean([numbers[position].mpp for position in slide_rows]))
+        for slide_id, slide_rows in grouped.items()
+    }
     per_slide = {
         slide_id: {name: 0 for name in CLASS_NAMES} | {"n": 0}
         for slide_id in grouped
@@ -442,7 +504,7 @@ def label_patches(index_path: Path, out_dir: Path, cfg: Config) -> LabelingStats
 
     labelled: dict[str, Path] = {}
     label_rows: list[dict] = []
-    for row in rows:
+    for position, row in enumerate(rows):
         patch_id = str(row["patch_id"])
         name = _patch_file_name(patch_id)
         if name in labelled:
@@ -453,11 +515,14 @@ def label_patches(index_path: Path, out_dir: Path, cfg: Config) -> LabelingStats
             )
             continue
         slide_id = str(row["slide_id"])
-        # The two reads and nothing else: `prepare_patch` and `count_blobs` sit outside
-        # the try on purpose, so a defect in either of them is not reported as a patch
-        # the index named wrongly.
+        mpp = numbers[position].mpp
+        # The read of the file the index names, and nothing else. `prepare_patch` and
+        # `count_blobs` sit outside the try on purpose, so a defect in either of them is
+        # not reported as a patch the index named wrongly. The `TypeError` is here for a
+        # reader raising off-contract on a corrupt file, and the `ValueError` is
+        # `load_patch`'s own: a patch array that is not the `uint8` `(patch_size,
+        # patch_size, 3)` one the count needs.
         try:
-            mpp = float(row["mpp"])
             source = load_patch(index.parent / name, patch_size)
         except (OSError, TypeError, ValueError) as error:
             raise LabelingInputError(

@@ -13,9 +13,10 @@ Without `--force` a non-empty output directory is refused rather than cleared, b
 the patches in it are a previous run's and destroying them is not this command's
 decision to make. `--force` deletes and recreates it through
 `blobcount.extract.prepare_output`, which refuses a target that is the project root,
-that holds the slides or the manifest, or that is not below the project root at all;
-`paths.patches` is a hand-edited string and `--force` deletes what it names, so the
-refusal is reported and exits 2 rather than raised as a traceback.
+that holds the slides or the manifest, that is not below the project root at all, or that
+is a file rather than a directory; `paths.patches` is a hand-edited string and `--force`
+deletes what it names, so the refusal is reported and exits 2 rather than raised as a
+traceback.
 
 A slide that contradicts its manifest row stops the run, and the index for the slides
 already extracted is written before it returns. Otherwise the tree would hold

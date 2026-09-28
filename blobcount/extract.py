@@ -135,7 +135,7 @@ TISSUE_PERCENTILE = 5
 
 
 class OutputPathError(Exception):
-    """Raised when a directory `prepare_output` was asked to delete is not one to delete."""
+    """Raised when a target `prepare_output` was asked to clear is not one it may clear."""
 
 
 @dataclass(frozen=True)
@@ -460,7 +460,13 @@ def prepare_output(
     - `paths.slides` and `paths.manifest` themselves, and
     - any directory that contains `paths.slides` or `paths.manifest`, and
     - anything not strictly below the project root, which covers a target outside the
-      project and one reached through a `..` that climbs out of it.
+      project and one reached through a `..` that climbs out of it, and
+    - a target that exists and is not a directory, which `shutil.rmtree` would refuse to
+      remove. A file named by `--out` or by `paths.patches` is a typo rather than a
+      previous run, and refusing it here is what stops a `NotADirectoryError` from
+      reaching a command line that has no answer for one. The check is last so that the
+      four above keep their precedence: a file at the project root is the project root
+      first, and the name it would be refused under says so.
 
     A protected path is refused on equality as well as on containment. `_is_below` is
     strict, so a target that *is* `paths.slides` is not below it and the ancestor clause
@@ -503,6 +509,17 @@ def prepare_output(
             f"{boundary}, so the target is not one this project owns"
         )
     if target.exists():
+        if not target.is_dir():
+            # A file is not a previous run's output tree, so there is nothing to clear
+            # and `shutil.rmtree` would raise `NotADirectoryError` rather than delete it.
+            # Refusing here protects every caller of this guard instead of one command
+            # line, and it keeps the rule in one place: the target this project owns and
+            # may clear is a directory below the root, or no path at all.
+            raise OutputPathError(
+                f"refusing to delete {resolved}: it is a file, not a directory, so it is "
+                f"not an output tree this run writes into and clearing it is not a thing "
+                f"this project does"
+            )
         shutil.rmtree(target)
     target.mkdir(parents=True)
 

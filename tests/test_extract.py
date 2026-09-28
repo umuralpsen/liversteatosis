@@ -337,6 +337,20 @@ def test_prepare_output_refuses_a_target_reached_through_a_dot_dot(project_scrat
     assert PROJECT_ROOT.is_dir()
 
 
+def test_prepare_output_refuses_a_target_that_is_a_file(project_scratch):
+    # A `--out` or a `paths.patches` naming a regular file. `shutil.rmtree` raises
+    # `NotADirectoryError` on one, and every caller of this guard is a command line whose
+    # only answer for that is a traceback — the same class of misreport as a value the
+    # configuration refuses. The file is inside the project and `protected` is empty, so
+    # the refusal under test is this one and not the containment rule above it.
+    target = project_scratch / "patches"
+    target.write_text("not a directory\n", encoding="utf-8")
+    with pytest.raises(OutputPathError, match="not a directory") as refused:
+        prepare_output(target, protected=[])
+    assert "file, not a directory" in str(refused.value)
+    assert target.read_text(encoding="utf-8") == "not a directory\n"
+
+
 def test_index_header_is_pinned(tmp_path):
     out = tmp_path / "patches.csv"
     write_index([], out)
