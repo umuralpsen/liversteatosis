@@ -320,6 +320,10 @@ Turkish data sources identified but not yet actionable:
   whole-slide cases including liver, bilingual Turkish and English. A teaching
   atlas rather than a research dataset, but a WSI source and a contact.
 
+Ordinal labels must be explicitly declared. Phase B produces a binary label and
+Phase B's artifacts say so. Phase A produces an ordinal label, and no Phase A
+artifact may reuse a Phase B number as if it measured the same thing.
+
 ### 3.9 Modelling direction
 
 - **Unit of prediction** moves from the patch to the slide. Patch predictions
@@ -483,11 +487,52 @@ working pipeline and a collaborator exist.
   only manifest entries and download, not new annotation. GTEx liver (109) and
   DLiPath (304 donors) remain the priority sources for Phase A because they
   carry steatosis-relevant labels, which TCGA-LIHC does not.
-- **O3.** Is the target clinical question steatosis detection (binary) or
-  steatosis grading (ordinal, Kleiner 0-3)? The literature is largely graded,
-  and grading is the more useful and more defensible target, but it requires
-  ordinal labels rather than a binary split. This should be settled before
-  Phase A model work begins.
+- **O3.** ~~Is the target clinical question steatosis detection (binary) or
+  steatosis grading (ordinal, Kleiner 0-3)?~~
+  **Resolved, 2026-09-27: both, in that order. Phase B is binary; Phase A is
+  ordinal, and the binary result is derived from the ordinal one.**
+
+  The reasoning. Ordinal is the clinically meaningful target and the field
+  standard: Kleiner steatosis is graded 0 to 3 by SPA bands (<5%, 5-33%, 33-66%,
+  >66%), every comparable study reports quadratic weighted Cohen's kappa against
+  a pathologist grade, and the decision that actually matters is a threshold, not
+  a yes/no. Donor liver assessment discards a graft at 30% steatosis, so a system
+  that only answers "steatosis present" has thrown away the number the clinician
+  acts on.
+
+  Phase B nonetheless stays binary, and this is not a compromise. Six specimens
+  cannot support an ordinal model: ordinal learning is substantially more
+  data-hungry than binary, and a four-class problem over six slides has two
+  members per class at best. A binary number over six specimens is a pipeline
+  verification; an ordinal number over six specimens would be an arithmetic
+  accident wearing a four-class label.
+
+  Phase A is ordinal, and the binary figure is then derived by thresholding the
+  ordinal prediction at the clinical cut. This is what the field does rather
+  than what we would invent: Koga et al. train a five-category model and report
+  the <30% versus >=30% split as the headline, reaching 96.4% accuracy and
+  statistical indistinguishability from surgical pathologists. One training run
+  yields both reports, and the ordinal information is never discarded.
+
+  Three consequences for Phase A planning, which is not yet written:
+
+  1. Ordinal changes the label representation, the loss, and the metric.
+     Accuracy becomes misleading, because predicting 2 when the truth is 3 is not
+     the same error as predicting 0 when the truth is 3. The reporting set is
+     quadratic weighted Cohen's kappa, mean absolute error in grade units, mean
+     expected distance, adjacent agreement within one grade, and ICC.
+  2. Ordinal changes the labeling strategy, not just the model head. A blob
+     threshold cannot produce a grade: five blobs is not grade 1, it is five
+     blobs. Ordinal labels must come from a pathologist grade, from an
+     expert-graded public dataset, or from a specimen-level steatosis
+     proportionate area measurement binned to the Kleiner bands. The third route
+     is measurable without an annotation budget, and `liverquant` demonstrates
+     it, reporting Spearman rho 0.75 against Kleiner on 109 GTEx livers.
+  3. Class imbalance will be severe in the upper grades. Any published
+     distribution is heavily weighted toward grade 0, and the 5% to 10% and 10%
+     to 20% bands are where Koga reports misclassification concentrating. The
+     Phase A plan must state its imbalance strategy explicitly rather than
+     discover it.
 - **O4.** Which TÜBİTAK programme is targeted (2244 industrial doctorate, 1501,
   1505, or LİGE)? The programme determines the required deliverables, the
   industry partner arrangement, and the reporting cadence, which affects how
