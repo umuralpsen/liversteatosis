@@ -317,9 +317,9 @@ def params_from_config(patch: np.ndarray, cfg: Config | None = None) -> BlobPara
     second live way to set one.** No task in the plan calls this function:
     `label_patches` reads the `tissue_gray` column of the patch index and derives one
     threshold per slide at `blobs.gray_percentile`, and the Task 7 ablation reads the
-    same column. The two boundaries disagree — a percentile of the patch in hand
-    against a percentile of the slide's own background levels — and the per-slide one
-    is the one the study uses, because a patch's own percentile moves with the patch
+    same column. The two boundaries disagree: a percentile of the patch in hand
+    against a percentile of the slide's own background levels. The per-slide one is
+    the one the study uses, because a patch's own percentile moves with the patch
     and a slide's does not. This function is kept for its other five keys, and a later
     reader should not treat both thresholds as live.
     """
