@@ -95,6 +95,15 @@ def _find_project_root(start: Path | None = None) -> Path:
 PROJECT_ROOT: Path = _find_project_root()
 DEFAULT_CONFIG_PATH: Path = PROJECT_ROOT / "configs" / "default.yaml"
 
+# What a run cannot be trusted to substitute a default for. A key read with a bare
+# `cfg.get` on a path that has already deleted something belongs here, because this is the
+# only place its absence is refused *before* that delete: `extraction.tissue_percentile`
+# and `extraction.tissue_gray_max` are read by `extract_slide` after a `--force` run has
+# emptied the patch tree, and `blobs.morph_kernel_size`, `blobs.morph_iterations` and
+# `blobs.stain_normalization` are read by `label_patches` and `prepare_patch` after
+# `prepare_output` has emptied the label tree. A configuration that omitted one used to
+# pass `load`, take the previous run's artifacts with it, and then raise past a command
+# line that had no answer for it.
 REQUIRED_KEYS: frozenset[str] = frozenset(
     {
         "project.seed",
@@ -107,10 +116,15 @@ REQUIRED_KEYS: frozenset[str] = frozenset(
         "extraction.target_mpp",
         "extraction.patch_size",
         "extraction.step_size",
+        "extraction.tissue_percentile",
+        "extraction.tissue_gray_max",
         "blobs.area_um2_min",
         "blobs.area_um2_max",
         "blobs.circularity_min",
         "blobs.gray_percentile",
+        "blobs.morph_kernel_size",
+        "blobs.morph_iterations",
+        "blobs.stain_normalization",
         "labeling.blob_threshold",
         "training.architecture",
         "training.num_classes",

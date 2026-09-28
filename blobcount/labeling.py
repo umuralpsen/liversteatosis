@@ -518,13 +518,19 @@ def label_patches(index_path: Path, out_dir: Path, cfg: Config) -> LabelingStats
         mpp = numbers[position].mpp
         # The read of the file the index names, and nothing else. `prepare_patch` and
         # `count_blobs` sit outside the try on purpose, so a defect in either of them is
-        # not reported as a patch the index named wrongly. The `TypeError` is here for a
-        # reader raising off-contract on a corrupt file, and the `ValueError` is
-        # `load_patch`'s own: a patch array that is not the `uint8` `(patch_size,
-        # patch_size, 3)` one the count needs.
+        # not reported as a patch the index named wrongly. The two exceptions here are
+        # the two a corrupt patch file produces: an `OSError` for a path that is not a
+        # readable image — `UnidentifiedImageError` for a text file, an empty one, a bad
+        # chunk CRC and absurd dimensions, plain `OSError` for a truncated one and a
+        # corrupt IDAT, `PermissionError` for a directory — and the `ValueError`
+        # `load_patch` raises itself for an array that is not the `uint8` `(patch_size,
+        # patch_size, 3)` one the count needs. A `TypeError` is deliberately not in the
+        # tuple: no corrupt-file shape produces one, so it can only be a defect in this
+        # project, and reporting that as "the patch the index names could not be used"
+        # would send the caller to fix a file that is fine and exit 2 on it.
         try:
             source = load_patch(index.parent / name, patch_size)
-        except (OSError, TypeError, ValueError) as error:
+        except (OSError, ValueError) as error:
             raise LabelingInputError(
                 f"the patch the index names could not be used: {error}"
             ) from error

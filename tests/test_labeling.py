@@ -427,6 +427,34 @@ def test_a_configured_percentile_numpy_refuses_is_not_an_input_error(tmp_output_
     assert "Percentiles must be in the range" in str(escaped.value)
 
 
+def test_a_type_error_from_the_patch_reader_is_not_reported_as_a_bad_index(
+    tmp_output_tree, monkeypatch
+):
+    # The narrowed tuple around the read of a patch file. `load_patch` raises a
+    # `ValueError` of its own for an array of the wrong shape and lets `OSError` out for
+    # a path that is not there; it raises no `TypeError` for any corrupt file, so a
+    # `TypeError` can only be a defect in this project. Catching it reported that defect
+    # as "your patch file is wrong" and exited 2, which sends the caller to fix a file
+    # that is fine. It leaves as itself instead.
+    from blobcount import labeling
+
+    def _boom(path, size):
+        raise TypeError("injected from the reader")
+
+    monkeypatch.setattr(labeling, "load_patch", _boom)
+    idx = tmp_output_tree / "patches.csv"
+    idx.write_text(
+        "patch_id,slide_id,x,y,mpp,tissue_gray\nA_0_0,A,0,0,0.5010,181.0\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(TypeError, match="injected from the reader") as escaped:
+        labeling.label_patches(idx, tmp_output_tree / "labels", _cfg_with_threshold(5))
+    # Stated rather than left to the `raises`: `LabelingInputError` derives from
+    # `Exception`, so a narrowing back to a `LabelingInputError` would fail the line
+    # above already. This one says which exclusion the test is about.
+    assert not isinstance(escaped.value, labeling.LabelingInputError)
+
+
 def _load_cli(monkeypatch):
     path = PROJECT_ROOT / "bin" / "label_patches.py"
     spec = importlib.util.spec_from_file_location("blobcount_cli_label_patches", path)
@@ -645,6 +673,35 @@ def test_cli_refuses_a_labels_path_config_path_refuses(
     err = capsys.readouterr().err
     assert "paths.labels" in err
     assert "Traceback" not in err
+
+
+def test_cli_refuses_before_clearing_anything_when_a_key_it_reads_is_missing(
+    cli, project_scratch, monkeypatch, capsys
+):
+    # A configuration that omits a key `label_patches` reads *after* `prepare_output` has
+    # cleared `out`. `load` accepts it while the key is not required, the tree is emptied,
+    # and the `cfg.get` then raises `ConfigError` past `main` — so the previous run's
+    # labels are gone and the process exits 1, which this program defines as
+    # `EXIT_CONTRADICTORY`, on a configuration nothing contradicts. Required keys are the
+    # fix and the reason it is the only fix: the key has to fail at load, before the
+    # delete, rather than be caught after it.
+    module, index, out = cli
+    (out / "normal").mkdir(parents=True)
+    (out / "normal" / "previous_run.png").write_bytes(b"the previous run")
+    data = yaml.safe_load(DEFAULT_CONFIG_PATH.read_text(encoding="utf-8"))
+    data["paths"]["labels"] = str(out)
+    del data["blobs"]["morph_kernel_size"]
+    config = project_scratch / "config-missing-morph.yaml"
+    config.write_text(yaml.safe_dump(data), encoding="utf-8")
+    monkeypatch.setattr("blobcount.config.DEFAULT_CONFIG_PATH", config)
+
+    assert module.main(["--index", str(index)]) == module.EXIT_REFUSED
+    err = capsys.readouterr().err
+    assert "missing required keys" in err
+    assert "blobs.morph_kernel_size" in err
+    assert "Traceback" not in err
+    # The point of the whole finding: the previous run is still on disk.
+    assert (out / "normal" / "previous_run.png").read_bytes() == b"the previous run"
 
 
 def test_cli_refuses_an_out_that_is_an_existing_file(cli, project_scratch, capsys):

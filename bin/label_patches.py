@@ -32,9 +32,10 @@ always an answer about what the caller pointed at. Six of them can reach it, in 
 groups, and nothing else does:
 
 - **A configuration.** One that cannot be loaded — missing, unreadable, not a mapping, a
-  key the code does not declare — and a `paths.labels` that `load` accepted because it
-  validates nothing past the key's presence but `Config.path` refuses, because it is not
-  a path string or is empty. Both arrive as a `ConfigError`.
+  key the code does not declare, a required key the file does not declare — and a
+  `paths.labels` that `load` accepted because it validates nothing past the key's
+  presence but `Config.path` refuses, because it is not a path string or is empty. Both
+  arrive as a `ConfigError`.
 - **An output target.** An `--out` or a `paths.labels` that `prepare_output` will not
   clear: the project root, `paths.slides` or `paths.manifest` themselves, a directory
   holding either, anything not strictly below the project root, and an existing path that
@@ -182,11 +183,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         # contradicted themselves over a hand-edited configuration string.
         out_dir: Path = args.out if args.out is not None else cfg.path("paths.labels")
     except ConfigError as error:
-        # A configuration that is missing, unreadable or not a mapping, and a
-        # `paths.labels` `load` accepted because it validates nothing past the key's
-        # presence but `Config.path` refused. The override the threshold produces cannot
-        # be the cause: the parser has already typed it as the `int` the key is configured
-        # as, and `--out` has already been typed as a `Path`.
+        # A configuration that is missing, unreadable or not a mapping, one that does not
+        # declare a key the run reads, and a `paths.labels` `load` accepted because it
+        # validates nothing past the key's presence but `Config.path` refused. The
+        # override the threshold produces cannot be the cause: the parser has already
+        # typed it as the `int` the key is configured as, and `--out` has already been
+        # typed as a `Path`.
         print(f"label_patches: {error}", file=sys.stderr)
         return EXIT_REFUSED
 
@@ -201,7 +203,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"label_patches: {error}", file=sys.stderr)
         return EXIT_REFUSED
     except LabelingInputError as error:
-        # The four things the caller pointed at and got wrong: an index that is not there,
+        # The six things the caller pointed at and got wrong: an index that is not there,
         # cannot be opened, carries a cell longer than `csv.field_size_limit`, or is not
         # the `patches.csv` header; a cell of it that is not the number its column
         # records; and a patch file that is not the `uint8` `(patch_size, patch_size, 3)`

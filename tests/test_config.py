@@ -101,6 +101,37 @@ def test_missing_required_key_raises(tmp_path):
         load(partial)
 
 
+@pytest.mark.parametrize(
+    "key",
+    [
+        "blobs.morph_kernel_size",
+        "blobs.morph_iterations",
+        "blobs.stain_normalization",
+        "extraction.tissue_percentile",
+        "extraction.tissue_gray_max",
+    ],
+)
+def test_every_key_a_run_reads_after_it_deletes_something_is_required(tmp_path, key):
+    # `REQUIRED_KEYS` is the only place a missing key can be refused *before* a run
+    # deletes anything, so a key read with a bare `cfg.get` on such a path has to be in
+    # it. The three `blobs` keys are read by `label_patches` and `prepare_patch` after
+    # `prepare_output` has emptied the label tree, and the two `extraction` keys by
+    # `extract_slide` after a `--force` run has emptied the patch tree; without them a
+    # configuration that omits one took the previous run's artifacts with it and then
+    # raised past a command line that had no answer for it.
+    data = yaml.safe_load(
+        (PROJECT_ROOT / "configs" / "default.yaml").read_text(encoding="utf-8")
+    )
+    section, name = key.split(".")
+    del data[section][name]
+    partial = tmp_path / "partial.yaml"
+    partial.write_text(yaml.safe_dump(data), encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="missing required keys") as refused:
+        load(partial)
+    assert key in str(refused.value)
+
+
 def test_known_keys_match_default_yaml():
     declared = _default_yaml_keys()
     assert set(KNOWN_KEYS) - declared == set()

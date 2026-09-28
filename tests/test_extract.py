@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 import yaml
 
-from blobcount.config import DEFAULT_CONFIG_PATH, PROJECT_ROOT, load
+from blobcount.config import DEFAULT_CONFIG_PATH, PROJECT_ROOT, ConfigError, load
 from blobcount.extract import (
     INDEX_COLUMNS,
     TISSUE_PERCENTILE,
@@ -841,6 +841,66 @@ def test_cli_refuses_to_delete_a_target_outside_the_project(cli, tmp_path, capsy
     assert module.main(["--force"]) == 2
     assert "refusing" in capsys.readouterr().err
     assert (outside / "keep.png").read_bytes() == b"x"
+
+
+def test_cli_force_refuses_a_paths_patches_that_is_a_file(cli, project_scratch, monkeypatch, capsys):
+    # A **pin**, not red evidence: `prepare_output` refused a file before this file's
+    # `--force` arm was driven, so this is green as it stands. It is here because the
+    # refusal changed this caller's exit code from 1 (`EXIT_BLANK_SLIDE`) to 2 silently,
+    # and the only other test of it drove the `label_patches` CLI: a guard that one caller
+    # covers is a guard whose second caller is untested. The file is inside the project on
+    # purpose, so a target outside it would be refused by "not strictly below the project
+    # root" and this would go green for the wrong reason.
+    module, _ = cli
+    as_file = project_scratch / "patches-as-file"
+    as_file.write_text("not a directory\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "blobcount.config.DEFAULT_CONFIG_PATH", _config_pointing_patches_at(as_file)
+    )
+    assert module.main(["--force"]) == module.EXIT_REFUSED
+    err = capsys.readouterr().err
+    assert "refusing" in err
+    # The file clause, not the containment one: the "not strictly below the project root"
+    # refusal is a different sentence and would not contain this phrase.
+    assert "file, not a directory" in err
+    assert as_file.read_text(encoding="utf-8") == "not a directory\n"
+
+
+def test_cli_force_refuses_before_clearing_when_a_key_extract_slide_reads_is_missing(
+    cli, project_scratch, monkeypatch
+):
+    # The same shape as the labeling side, one file over, and found by the check R4-3
+    # asked for: `extract_slide` reads `extraction.tissue_percentile` and
+    # `extraction.tissue_gray_max` with a bare `cfg.get`, and it runs *after* `--force`
+    # has cleared the patch tree. While they were not required, a configuration omitting
+    # one passed `load`, the previous run's patches were deleted, and the `ConfigError`
+    # left `main` — which catches only `OutputPathError` and `SlideError` — so the
+    # process exited 1, which this program defines as `EXIT_BLANK_SLIDE`. Required keys
+    # are the fix and the only one: the key has to fail at load, before the delete, not
+    # be caught after it.
+    #
+    # The exception is asserted rather than an exit code because this entry point does
+    # not wrap `load()`: an unloadable configuration — a missing file, a top level that
+    # is not a mapping, an undeclared key — has always left `main` as the `ConfigError`
+    # it is, and this test records that the change adds no new handling and no new
+    # delete. `bin/label_patches.py` does wrap `load()`, which is why the labeling
+    # counterpart in `tests/test_labeling.py` asserts `EXIT_REFUSED` instead.
+    module, out = cli
+    stale = out / "2_0_0.png"
+    stale.parent.mkdir(parents=True)
+    stale.write_bytes(b"the previous run")
+    data = yaml.safe_load(DEFAULT_CONFIG_PATH.read_text(encoding="utf-8"))
+    data["paths"]["patches"] = str(out)
+    del data["extraction"]["tissue_percentile"]
+    config = project_scratch / "config-missing-percentile.yaml"
+    config.write_text(yaml.safe_dump(data), encoding="utf-8")
+    monkeypatch.setattr("blobcount.config.DEFAULT_CONFIG_PATH", config)
+
+    with pytest.raises(ConfigError, match="missing required keys") as refused:
+        module.main(["--force"])
+    assert "extraction.tissue_percentile" in str(refused.value)
+    # The point of the finding: the previous run is still on disk.
+    assert stale.read_bytes() == b"the previous run"
 
 
 def test_cli_exits_non_zero_when_a_slide_yields_no_tissue(cli, monkeypatch):
