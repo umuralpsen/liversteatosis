@@ -233,6 +233,7 @@ extraction:
   step_size: 256
   tissue_percentile: 5
   tissue_gray_max: 235
+  tissue_min_std: 10
 
 blobs:
   area_um2_min: 3.1
