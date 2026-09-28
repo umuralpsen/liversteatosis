@@ -144,6 +144,16 @@ class LabelingStats:
     fills it finds nothing. It counts the copies deleted from the class directories after
     the write, and a non-zero value means the tree held a file under a name this run
     labelled somewhere else, which is the state the clearing exists to prevent.
+
+    **A non-zero value is a regression sentinel and not a reachable outcome of this
+    function.** The clearing is unguarded — `shutil.rmtree` raises rather than returning
+    a tree it could not empty — and the row loop writes each name into exactly one class
+    directory exactly once, so there is no path through `label_patches` that produces a
+    name under two of them. The field exists to report the one regression that would:
+    a second write path into a tree this run did not clear, whether by removing the
+    `prepare_output` call, by making the clearing conditional, or by having something
+    other than this function write into `out`. `bin/label_patches.py` turns a non-zero
+    value into exit 1 for that reason and says so in its own docstring.
     """
 
     blob_threshold: int
@@ -263,6 +273,18 @@ def _remove_duplicates(out: Path, labelled: Mapping[str, Path]) -> int:
     keep describing the same thing. A name under exactly one class directory is left
     alone: it is a patch whose label did not change, and there is nothing to reconcile.
 
+    **That keeping holds only because `labelled` is keyed by the resolved file name, the
+    same string this scan groups on.** The `patch_id` column carries the name
+    `extract_slide` wrote, which for an index this pipeline produced already ends in
+    `.png`, so the two keys coincide there; for the extension-absent form `A_0_0` they do
+    not, and a `labelled` keyed by `patch_id` looks `A_0_0.png` up in a map holding
+    `A_0_0`, gets `None`, and deletes **both** copies — including the one `labels.csv`
+    names, so the CSV goes on describing a file that is no longer there. `label_patches`
+    therefore keys it by `name`, and the scan's guarantee is stated for every form of the
+    column rather than for the one that happens to be written today. A name this run
+    never labelled has no entry, so every copy under it is foreign and every one is
+    deleted; the scan never has to decide between two copies it did not write.
+
     Returns the number of files deleted, which is 0 on a run whose clearing worked.
     """
     by_name: dict[str, list[Path]] = {}
@@ -311,7 +333,9 @@ def label_patches(index_path: Path, out_dir: Path, cfg: Config) -> LabelingStats
     `patch_id` is taken as the name of the file to read and to write, so a label follows
     its file. An index that names the same patch twice is labeled once and the repeat is
     logged: the second row would be a second file for one patch, and one `labels.csv` row
-    per patch is what the three downstream tasks read.
+    per patch is what the three downstream tasks read. The comparison is on the *resolved*
+    name, so `2_1016_0` and `2_1016_0.png` in one index are the same patch and the second
+    is the repeat, not a second file.
 
     Nothing per patch is caught. A patch file that is not the shape the count needs raises
     in `load_patch`, and a write that fails raises, and either one stopping the run is
@@ -374,16 +398,16 @@ def label_patches(index_path: Path, out_dir: Path, cfg: Config) -> LabelingStats
     label_rows: list[dict] = []
     for row in rows:
         patch_id = str(row["patch_id"])
-        if patch_id in labelled:
+        name = _patch_file_name(patch_id)
+        if name in labelled:
             LOGGER.warning(
                 "index %s names patch %s more than once; the first row keeps the label "
                 "and the repeat is not counted again",
-                index, patch_id,
+                index, name,
             )
             continue
         slide_id = str(row["slide_id"])
         mpp = float(row["mpp"])
-        name = _patch_file_name(patch_id)
         patch = prepare_patch(load_patch(index.parent / name, patch_size), cfg)
         count = count_blobs(patch, params[slide_id], mpp)
         class_name = CLASS_STEATOSIS if count >= threshold else CLASS_NORMAL
@@ -391,7 +415,10 @@ def label_patches(index_path: Path, out_dir: Path, cfg: Config) -> LabelingStats
         target = out / class_name / name
         target.parent.mkdir(parents=True, exist_ok=True)
         Image.fromarray(patch).save(target)
-        labelled[patch_id] = target
+        # Keyed by `name`, not by `patch_id`, for the reason `_remove_duplicates` gives:
+        # the map is looked up by the file name the scan groups on, and the two coincide
+        # only for the extension-present form of the column.
+        labelled[name] = target
 
         per_slide[slide_id][class_name] += 1
         per_slide[slide_id]["n"] += 1

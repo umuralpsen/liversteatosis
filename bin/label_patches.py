@@ -26,10 +26,25 @@ a per-slide class count means nothing on its own: a slide labelled 90% steatotic
 resolution and one labelled 20% at another is a magnification difference before it is a
 disease difference, and the resolution is what tells the two apart.
 
-Three outcomes, three codes. A run that completed is 0. A run that found a patch in both
-class directories is 1: the tree contradicts itself, and a caller that reads it anyway
-would train on a dataset whose own guard says it is unsound. A refusal, from
-`prepare_output` or from an unparseable threshold, is 2.
+Two outcomes, two codes. A run that completed is 0. A refusal is 2: an `--out` that
+`prepare_output` will not delete, a `--threshold` that is not a configuration value, an
+`--index` that is not there or whose header is not the one this pipeline writes, and a
+patch file the index names that is not the `uint8` `(patch_size, patch_size, 3)` array
+`count_blobs` needs. The first three are answers about the arguments; the fourth is an
+answer about a file one of those arguments named. All four are reported on stderr and
+none of them is a traceback.
+
+**There is a third constant, `EXIT_CONTRADICTORY = 1`, and it is a regression sentinel
+rather than a reachable outcome.** `label_patches` empties `out` before it writes and then
+writes each patch name into exactly one class directory exactly once, so a name under two
+of them is not a state this program can reach. The code exists to report the regression
+that would make it reachable — a second write path into a tree the run did not clear, from
+removing the clearing, from making it conditional, or from anything else writing into
+`out` — and to fail the run rather than hand a caller a dataset whose own guard says it is
+unsound. Naming it here is deliberate: a code in the module's exit contract that no path
+produces has to be declared as a sentinel, or a caller reading the header cannot tell it
+apart from a contradiction it should have been told about. `LabelingStats`'s
+`duplicates_removed` field is the input to it and its own docstring says the same thing.
 """
 
 from __future__ import annotations
@@ -138,6 +153,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         # user passed, and a traceback is not an answer.
         print(f"label_patches: {error}", file=sys.stderr)
         return EXIT_REFUSED
+    except (OSError, ValueError) as error:
+        # An `--index` that is not there (`OSError`), one whose header is not the
+        # `patches.csv` header this pipeline writes (`ValueError` from `read_index`), and
+        # a patch file that is not the `uint8` `(patch_size, patch_size, 3)` array
+        # `count_blobs` needs (`ValueError` from `load_patch`). All three name something
+        # the caller pointed at, and all three are caught for the reason
+        # `EXIT_REFUSED` exists at all: uncaught, the process exits 1, which this module
+        # defines as `EXIT_CONTRADICTORY`, so a mistyped path would report to any caller
+        # reading the exit code that the labels contradicted themselves. What is *not*
+        # caught is a defect in `label_patches` itself, and a write that fails still
+        # raises, because a tree that `labels.csv` does not describe is not something to
+        # report and continue past.
+        print(f"label_patches: {error}", file=sys.stderr)
+        return EXIT_REFUSED
 
     _print_table(_COUNT_COLUMNS, _count_rows(stats.per_slide))
     print()
@@ -149,6 +178,9 @@ def main(argv: Sequence[str] | None = None) -> int:
           f"{stats.blob_threshold}")
 
     if stats.duplicates_removed:
+        # The sentinel the module docstring describes. Unreachable while `label_patches`
+        # empties `out` before writing, and kept as the report for the regression that
+        # would make it reachable.
         print(
             f"label_patches: {stats.duplicates_removed} patch file(s) were present in "
             f"more than one class directory and were deleted; the labels in {out_dir} "
