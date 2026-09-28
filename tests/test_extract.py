@@ -15,6 +15,7 @@ from blobcount.extract import (
     TISSUE_PERCENTILE,
     ExtractionStats,
     OutputPathError,
+    _protected_paths,
     extract_slide,
     is_tissue,
     patches_dir,
@@ -272,7 +273,14 @@ def test_prepare_output_refuses_the_configured_slides_directory():
     # guard reads, so a caller and the guard cannot agree by accident.
     slides = load().path("paths.slides")
     staged = sorted(path.name for path in slides.glob("*.svs"))
-    assert staged, "no staged slides, so the refusal would not be exercised against anything"
+    if not staged:
+        # Not an assert: `data/` and `*.svs` are git-ignored, so a fresh clone carries
+        # the manifest and no images and this test would be red for a reason that has
+        # nothing to do with the code. The default protected set is pinned to
+        # `paths.slides` by `test_the_default_percentile_constant_is_the_configured_key`,
+        # which needs no data, so what this test adds here is the end-to-end pass on a
+        # fully staged checkout rather than the wiring itself.
+        pytest.skip("no staged slides, so the configured-path equality cannot be exercised here")
     with pytest.raises(OutputPathError, match="paths.slides") as refused:
         prepare_output(slides)
     assert "destroy the source data" in str(refused.value)
@@ -299,13 +307,21 @@ def test_prepare_output_refuses_a_sibling_that_shares_the_root_prefix():
     # regresses, `prepare_output` reaches `mkdir` and the test removes what it made
     # rather than leaving a `Proje-backup` behind and reporting only a bare failure.
     created = not sibling.exists()
+    # Asserted here rather than left implicit in the `finally`: a user who has a real
+    # `Proje-backup` beside the checkout gets this message and stops, instead of a bare
+    # "not exists" failure at the bottom and a cleanup that has nothing to do. Nothing
+    # is deleted on this path, and the `finally` below still only removes what the test
+    # made.
+    assert created, (
+        f"{sibling} already exists, so this test would be refusing and then deleting a "
+        f"directory the user made; move it aside to run the suite"
+    )
     try:
         with pytest.raises(OutputPathError, match="not strictly below"):
             prepare_output(sibling)
     finally:
         if created:
             shutil.rmtree(sibling, ignore_errors=True)
-    assert not sibling.exists()
 
 
 def test_prepare_output_refuses_a_target_reached_through_a_dot_dot(project_scratch):
@@ -368,6 +384,17 @@ def test_the_default_percentile_constant_is_the_configured_key():
     # it is asserted here rather than left to the reader: change the key and this
     # fails until the constant follows it.
     assert TISSUE_PERCENTILE == float(load().get("extraction.tissue_percentile"))
+
+    # The same shape of claim, about the paths `prepare_output` refuses to delete when
+    # it is given no `protected` argument: they are read from the configuration rather
+    # than pinned as constants, so a run whose configuration moves them is guarded
+    # against the paths it actually uses. Asserted from a separate `load()` than the
+    # one `_protected_paths` reads, so the guard and the caller cannot agree by
+    # accident. The equality refusal itself is covered by
+    # `test_prepare_output_refuses_a_target_that_is_the_slides_directory`, which passes
+    # `protected` explicitly and so bypasses this default; this assertion is what keeps
+    # the default tied to the configuration, and it needs no slide on disk.
+    assert dict(_protected_paths())["paths.slides"] == load().path("paths.slides")
 
 
 def test_is_tissue_rejects_a_field_above_gray_max():
