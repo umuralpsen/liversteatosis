@@ -41,7 +41,6 @@ _KEYS_WITHOUT_READER: frozenset[str] = frozenset(
         "evaluation.confidence_level",
         "gradcam.alpha",
         "gradcam.colormap",
-        "labeling.blob_threshold",
         "paths.labels",
         "paths.results",
         "project.name",
