@@ -53,11 +53,13 @@ dataset, never about this program:
   `blobcount.ablation._thresholds` returns, and not the configured list read raw, so that
   the check and the sweep cannot come to different answers about what is being swept.
 - **The configured range itself**, as `blobcount.ablation._thresholds`'s own refusal: a
-  `ValueError` or `TypeError` out of that one call, caught here, and a `TypeError` is in
-  the tuple because a configured entry that is not a number at all produces one and is
-  the same hand-edit. The catch is around that call and not around `ablate`, so it is
-  wide enough to hold a mistyped configuration value and too narrow to hold a defect in
-  the counting.
+  `ValueError` or `TypeError` out of that one call, caught here. A quoted digit, a
+  fraction and a YAML `true` are all refused as `ValueError`s and the message names the
+  rule — a plain number, `3`, and not `'3'` and not `true` — so a user hand-editing
+  `configs/default.yaml` reads a decision and not an accident; a key that is not a
+  sequence at all is the `TypeError`. All four are the same hand-edit of the same key, and
+  the catch is around that one call and not around `ablate`, so it is wide enough to hold
+  a mistyped configuration value and too narrow to hold a defect in the counting.
 - **The index and the patches it names**, as a `LabelingInputError`: the six shapes
   `blobcount.labeling.LabelingInputError` enumerates, an index carrying no rows, and
   those raised by `ablate` around the two reads that can fail that way, around the
@@ -103,13 +105,16 @@ above and reported as a refusal.
 **A summary line, the range coverage, then two tables.** The count distribution comes
 first, because the ratios are ratios of it and a reader who has seen a pooled ratio of 0.9
 and no mean count has been told the wrong thing by the ratio alone. Under it, the
-comparison of the swept range against that distribution with the flag saying whether the
-range brackets it, because a reader of `blob_count_summary` and `per_threshold` together
-would otherwise conclude the sweep covered the distribution whatever it covers. Then the
-sweep, one row per threshold, and then the per-slide table at the selected threshold: the
-deliverable the plan names, and the table that says whether the magnification artifact is
-gone. It carries each slide's gray threshold and achieved resolution beside its ratio,
-because a per-slide ratio means nothing without the scale its counts were made at.
+comparison of the swept range against that distribution: how many of the patches the
+range leaves outside itself, and the flag saying whether it brackets the distribution,
+because a reader of `blob_count_summary` and `per_threshold` together would otherwise
+conclude the sweep covered the distribution whatever it covers. The count is printed
+before the flag and not after it, so the line reads as a measurement with a verdict
+attached rather than as a verdict with a decoration. Then the sweep, one row per
+threshold, and then the per-slide table at the selected threshold: the deliverable the
+plan names, and the table that says whether the magnification artifact is gone. It carries
+each slide's gray threshold and achieved resolution beside its ratio, because a per-slide
+ratio means nothing without the scale its counts were made at.
 """
 
 from __future__ import annotations
@@ -281,10 +286,15 @@ def _document(stats: AblationStats) -> dict:
     **`threshold_range_coverage` is beside `blob_count_summary` and not below the file,
     because those two are read together.** A reader who has the distribution and the
     sweep and not the comparison between them concludes the sweep covered the
-    distribution, whatever it covers. The block carries `brackets_distribution` as a
-    boolean so it can be checked rather than taken on trust, and so a test can fail if it
-    goes away. `n_slides` counts the slides a patch was counted for, for the reason
-    `_n_slides` gives.
+    distribution, whatever it covers. The block carries `n_unswept` — how many patches the
+    swept range leaves outside itself — beside `brackets_distribution`, the boolean
+    derived from it, because a count of patches is a number a reader cannot misread the
+    way a verdict can, and it carries `criterion`, the comparison the boolean is, so the
+    two are checked against each other inside the file rather than in a docstring. The
+    criterion string is evaluated against this block's own numbers by
+    `tests/test_ablation.py`, so the string, the boolean and the predicate cannot come to
+    different answers. `n_slides` counts the slides a patch was counted for, for the
+    reason `_n_slides` gives.
     """
     return {
         "selected_threshold": stats.selected,
@@ -380,17 +390,27 @@ def main(argv: Sequence[str] | None = None) -> int:
     # passed the guard and raised past it inside `ablate`, and `["3", 5]` produced
     # `--selected 3 is not one of the ablation.thresholds this run sweeps (3, 5)` — a
     # message that names a range containing 3 and refuses 3.
+    #
+    # **This arm is above the output-target guard, and neither check depends on the
+    # other.** The cost of the order is that a bad `paths.results` is reported after one
+    # conversion of a list of a handful of numbers, which is nothing against a patch read;
+    # the cost of the other order is that the selection guard below has to read the
+    # configured list raw again, which is the two-answers-one-question state the call
+    # above exists to end. So the conversion is the one that comes first, and it comes
+    # first because it is the only one of the two the next check consumes.
     try:
         swept = list(_thresholds(cfg))
     except (TypeError, ValueError) as error:
-        # `ValueError` for a configured entry that is not a whole number of blobs, and
-        # `TypeError` for one that is not a number at all; both are the same hand-edit of
-        # the same key, and the catch is around this one call rather than around `ablate`,
-        # so it is too narrow to hold a defect in the counting. This refusal is a
-        # statement about the configuration, which is why it is not the `ConfigError` arm
-        # above: `load` accepted the file, because it validates that a key is declared
-        # and nothing about its value, and `ablation.thresholds` is a key this project
-        # wrote a validator for.
+        # `ValueError` for a configured entry that is not a plain whole number of blobs —
+        # a fraction, a quoted digit, a `true` — and `TypeError` from the key itself not
+        # being a sequence, which `load` accepts because it validates that a key is
+        # declared and nothing about its value. Both are the same hand-edit of the same
+        # key, and the catch is around this one call rather than around `ablate`, so it is
+        # too narrow to hold a defect in the counting. This refusal is a statement about
+        # the configuration, which is why it is not the `ConfigError` arm above: `load`
+        # accepted the file, and `ablation.thresholds` is a key this project wrote a
+        # validator for. The message names the rule the entry broke, so a user hand-editing
+        # the YAML sees that a quoted digit is refused by choice.
         print(f"ablate_threshold: {error}", file=sys.stderr)
         return EXIT_REFUSED
 
@@ -450,7 +470,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     # summary and above the tables because it is the answer to "was this sweep wide
     # enough to place the knee", and a reader of the summary and the sweep table together
     # would otherwise have to do the comparison themselves and would assume it came out
-    # favourably. The word is the flag, not a phrase chosen per run.
+    # favourably. The count comes before the flag: how many patches the range left outside
+    # itself is the number, and the flag is that number being zero, so a reader who trusts
+    # neither the flag nor this program can still read the answer off the line.
     coverage = stats.range_coverage()
     brackets = (
         "brackets the distribution" if coverage["brackets_distribution"]
@@ -458,9 +480,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     print(
         f"swept range {coverage['swept_min']} to {coverage['swept_max']} against a count "
-        f"distribution with p50 {coverage['count_p50']:.2f}, "
-        f"mean {coverage['count_mean']:.2f}, max {coverage['count_max']}: the swept range "
-        f"{brackets}\n"
+        f"distribution with min {coverage['count_min']}, "
+        f"p50 {coverage['count_p50']:.2f}, "
+        f"mean {coverage['count_mean']:.2f}, max {coverage['count_max']}: "
+        f"{coverage['n_unswept']} of {summary['count']} patches outside the swept range, "
+        f"so the swept range {brackets}\n"
     )
     _print_table(_SWEEP_COLUMNS, _sweep_rows(stats))
     print()

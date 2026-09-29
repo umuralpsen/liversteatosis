@@ -56,17 +56,20 @@ a sample is a guess, and guessing a range is the mechanism that produced every w
 number in the original thesis.
 
 What ships instead is the check the run performs, in `AblationStats.range_coverage`: the
-swept min and max against the count distribution's own p50, mean and max, and a boolean
-saying whether the range brackets it. `bin/ablate_threshold.py` writes that under
+swept min and max against the count distribution's own min, p50, mean and max, a **count
+of the patches the swept range leaves outside itself**, a boolean derived from that count,
+and a `criterion` string naming the comparison so the boolean is not a claim the reader has
+to take on trust. `bin/ablate_threshold.py` writes that under
 `threshold_range_coverage` and prints it under the count summary, so a reader of either
 learns whether the sweep reached the distribution instead of inferring it from a pooled
 ratio printed beside a `blob_count_summary`. Where the range does bracket, the flag says
 so and the sweep was adequate without the reader doing the arithmetic; where it does not,
-the artifact says which end of the range stops short and by how much. `ablation.thresholds`
-is a configured value this module reads, and the run hands the survival curve to whoever
-selects the threshold. `blobcount.extract.summarise_tissue_gray` reports a *different*
-distribution — the `tissue_gray` background levels themselves — and the two must not be
-read as one.
+the artifact says which end of the range stops short, by how much, and how many patches
+that leaves carrying the same label at every threshold in the sweep.
+`ablation.thresholds` is a configured value this module reads, and the run hands the
+survival curve to whoever selects the threshold. `blobcount.extract.summarise_tissue_gray`
+reports a *different* distribution — the `tissue_gray` background levels themselves — and
+the two must not be read as one.
 
 **`ablate` counts the patches again, and reads nothing that a threshold produced.**
 `labels.csv` carries a `blob_count` per patch, and reading it would make the sweep a
@@ -140,7 +143,7 @@ Declared interface, in `__all__` order:
 
     AblationStats
         AblationStats.count_summary(self) -> dict[str, float | int]
-        AblationStats.range_coverage(self) -> dict[str, float | int | bool]
+        AblationStats.range_coverage(self) -> dict[str, float | int | bool | str]
         counts: dict[str, int]
         slide_of: dict[str, str]
         per_slide_mpp: dict[str, float]
@@ -204,6 +207,21 @@ _SWEEP_FIELDS = (
     "pooled_steatosis_ratio",
     "per_slide_ratio",
     "per_slide_ratio_spread",
+)
+
+# What `brackets_distribution` means, written into every artifact beside the boolean
+# itself, so a reader of `threshold_range_coverage` does not have to have this module
+# open to know what `true` claims. It names **both** ends and the statistic each is held
+# against, and it is one definition: the code below computes the same two comparisons and
+# a test evaluates this string over the numbers the block carries, so the string, the
+# boolean and the predicate cannot come to different answers about the same run.
+#
+# The form is deliberate. Everything after ` iff ` is a comparison over sibling keys, and
+# `tests/test_ablation.py` evaluates it in a namespace holding those keys and nothing
+# else, which is what makes "the string and the boolean agree" a check rather than a
+# promise. A prose criterion would satisfy a reader and fail that test.
+_RANGE_CRITERION = (
+    "brackets_distribution is true iff swept_min <= count_min and swept_max >= count_max"
 )
 
 # The two rules Task 6 measured on the same 60 accepted patches of `data/2.svs` at
@@ -289,11 +307,12 @@ class AblationStats:
             "max": int(values.max()),
         }
 
-    def range_coverage(self) -> dict[str, float | int | bool]:
+    def range_coverage(self) -> dict[str, float | int | bool | str]:
         """Return the swept range against the count distribution it is a sweep of.
 
-        The keys are `swept_min`, `swept_max`, `count_p50`, `count_mean`, `count_max` and
-        `brackets_distribution`. The three `count_` keys are read from `count_summary`
+        The keys are `criterion`, `swept_min`, `swept_max`, `count_min`, `count_p50`,
+        `count_mean`, `count_max`, `unswept_below`, `unswept_above`, `n_unswept` and
+        `brackets_distribution`. The four `count_` keys are read from `count_summary`
         rather than computed again, so the comparison is between the distribution the run
         printed and the range the run swept and not between a number here and a number
         there that can come to disagree.
@@ -305,14 +324,39 @@ class AblationStats:
         A caller that hands this dataclass an empty one gets a refusal rather than a
         `ValueError` out of `min()` over nothing.
 
-        `brackets_distribution` is `swept_min <= count_p50 and swept_max >= count_max`:
-        the low end of the sweep reaches into the bulk of the distribution and the high
-        end reaches past its largest count, so the whole distribution was cut at and the
-        knee it asks about is inside the swept region. It is a boolean rather than a
-        sentence because a reader can check it and a test can fail if it goes away, and
-        that is the whole of what this method is for: the module docstring's claim that
-        the configured range may not place the knee is a claim about this run's data, so
-        it is a check this run performs rather than a sentence anyone has to trust.
+        **`criterion` is the comparison, in the artifact, and the boolean is read from it.**
+        It is `_RANGE_CRITERION`, a module constant rather than a phrase built here, and it
+        is the answer to "what does `true` mean here" for a reader holding only
+        `threshold_ablation.json` and not this module. A file carrying a verdict and no
+        criterion admits two readings of that verdict, and only one of them is the one
+        this code implements. A test evaluates the string against the numbers in the same
+        block and fails if it disagrees with the boolean, so a predicate that moves
+        without the string moving is a red test rather than a silent change of meaning.
+
+        **The low end is held against the distribution's `min` and not against its `p50`.**
+        A median is the wrong end to hold a range against: a range whose bottom sits above
+        the distribution's smallest count but below its median then reports that the sweep
+        covered the distribution while the patches below that bottom sit under every
+        threshold in the sweep. Counts of 1, 50, 51 and 52 swept at `[40, 60]` are the
+        shape of it — `p50` is 50.5, so a bottom of 40 clears a median, and the patch at
+        1 is under the whole swept range. **The high end is held against `max`:** a range
+        that stops below the largest count leaves the tail above every threshold in it,
+        which is the same defect at the other end, and the same argument that rules the
+        median out rules anything but the maximum in on the top.
+
+        **`unswept_below`, `unswept_above` and `n_unswept` are counts, and they are the
+        reason the boolean is trustworthy rather than a second way of saying it.**
+        `unswept_below` is the number of patches counted **below** `swept_min` and
+        `unswept_above` the number counted **above** `swept_max`; `n_unswept` is their sum,
+        and `brackets_distribution` is `n_unswept == 0`. The count is the primary number
+        because a proportion of the cohort is a statement a reader cannot misread the way
+        a verdict can: `1 of 4 patches outside the swept range` needs no prose to
+        interpret, and `brackets_distribution: false` needs this docstring. The two ends
+        are counted separately so the artifact says *which* end stopped short without a
+        reader subtracting the two ranges by hand — the arithmetic that produces the
+        verdict, done in the code and reported as a number. Nothing here counts a patch
+        the sweep did not label: every patch is `normal` or `steatosis` at every threshold
+        in the range, and these are the patches whose label is the same at all of them.
 
         **A `False` here is a finding about the configuration and not a defect.** The
         controller decision is that `ablation.thresholds` is not widened on the strength
@@ -327,15 +371,21 @@ class AblationStats:
             )
         summary = self.count_summary()
         low, high = min(swept), max(swept)
+        values = list(self.counts.values())
+        below = sum(1 for value in values if value < low)
+        above = sum(1 for value in values if value > high)
         return {
+            "criterion": _RANGE_CRITERION,
             "swept_min": int(low),
             "swept_max": int(high),
+            "count_min": summary["min"],
             "count_p50": summary["p50"],
             "count_mean": summary["mean"],
             "count_max": summary["max"],
-            "brackets_distribution": bool(
-                low <= summary["p50"] and high >= summary["max"]
-            ),
+            "unswept_below": below,
+            "unswept_above": above,
+            "n_unswept": below + above,
+            "brackets_distribution": bool(below == 0 and above == 0),
         }
 
 
@@ -606,6 +656,20 @@ def _thresholds(cfg: Config) -> tuple[int, ...]:
     nobody configured, and one nobody configured is the same class of number as the
     constant this project keeps refusing to substitute for a measurement.
 
+    **A quoted digit is refused, a YAML boolean is refused, and the refusal message says
+    which.** An entry has to be a number: `["3", 5]` fails the test below because `3` and
+    `"3"` are not the same value, and the message says so in those words rather than
+    leaving a user hand-editing `configs/default.yaml` to infer the rule from which
+    exception it produced. **A `true` is refused by a type test rather than by the
+    comparison beside it, and that is not pedantry:** `bool` subclasses `int`, so
+    `int(True) == 1` and `1 != True` is False, and a `true` in the range would pass the
+    whole-number test and be swept as the threshold 1 with nothing said about it. The
+    alternative — accepting a quoted digit and converting it — was available and was not
+    taken: this key is read by a caller that prints the range it swept, and a range
+    printed as `(3, 5)` beside a configuration that says `["3", 5]` is a second thing for
+    a reader to reconcile, in an artifact whose whole argument is that two numbers
+    disagreeing should be visible rather than reconciled silently.
+
     **The refusal is a `ValueError` and not a `LabelingInputError`.** It is a statement
     about the configuration and not about the index the caller pointed at, and the
     `LabelingInputError` this module reuses enumerates six shapes that are all about the
@@ -619,20 +683,34 @@ def _thresholds(cfg: Config) -> tuple[int, ...]:
     validator that validates and then reports by traceback looks like a check and is not
     one. `bin/ablate_threshold.py` therefore calls this function itself, before it reads a
     patch, and returns `EXIT_REFUSED` on its answer. The catch there is around that one
-    call and not around `ablate`, so a `TypeError` from a value that is not a number at
-    all is caught beside the `ValueError` without any catch being wide enough to hold a
-    defect in the counting.
+    call and not around `ablate`, so it is too narrow to hold a defect in the counting.
+    The `TypeError` it also catches comes from the key itself not being a sequence —
+    `load` accepts that, having validated that the key is declared and nothing about its
+    value — and not from an entry, because every entry is type-checked here before it is
+    converted.
     """
     out: list[int] = []
     for value in cfg.get("ablation.thresholds"):
-        number = int(value)
-        if number != value:
+        # One type test covers the quoted digit, the boolean and the `None`, and it runs
+        # before the `int()` rather than after it, because `int(True) == 1` and
+        # `1 != True` is False: a comparison alone would sweep a `true` as the threshold 1
+        # in silence. `whole` is `None` for a value that is not a number at all, so the
+        # single raise below covers the type refusal and the fraction together, and
+        # `whole != value` is the fraction test alone.
+        whole = (
+            int(value)
+            if isinstance(value, (int, float)) and not isinstance(value, bool)
+            else None
+        )
+        if whole is None or whole != value:
             raise ValueError(
                 f"ablation.thresholds holds {value!r}, which is not a whole number of "
-                f"blobs; a sweep is cut at the count a threshold states and rounding one "
-                f"would measure a threshold nobody configured"
+                f"blobs: every entry has to be a plain number, 3 and not '3' and not "
+                f"true, because a sweep is cut at the count a threshold states and a "
+                f"quoted digit or a rounded fraction would measure a threshold nobody "
+                f"configured"
             )
-        out.append(number)
+        out.append(whole)
     return tuple(out)
 
 

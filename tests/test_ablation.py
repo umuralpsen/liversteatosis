@@ -31,6 +31,15 @@ _SUPERSEDED_RULE = {
     "max_per_patch": 19,
 }
 
+# The criterion `range_coverage` states in its own artifact, as a pin. It names the two
+# comparisons and the statistic each end is held against, and it is written so that
+# `_criterion_holds` can evaluate it over the numbers in the same block: the test that
+# checks the string and the boolean agree is the check that would have caught a predicate
+# comparing the low end against the median.
+_CRITERION = (
+    "brackets_distribution is true iff swept_min <= count_min and swept_max >= count_max"
+)
+
 
 def _pil():
     """Return the PIL `Image` module, skipping the test when it will not import.
@@ -521,8 +530,11 @@ def _straddling_index(project_scratch, synthetic_patch):
     """Return an index over four patches, two slides, counts to be stubbed in.
 
     The distribution is deliberately lopsided once the counts are stubbed — 0, 2, 10 and
-    20, so the median is 6.0, the mean is 8.0 and the maximum is 20 — which lets a swept
-    range stop short of it at either end and tells the two failures apart.
+    20, so the median is 6.0, the mean is 8.0, the minimum is 0 and the maximum is 20 —
+    which lets a swept range stop short of it at either end and tells the two failures
+    apart. **The minimum is 0, so a range covering this distribution has to start at or
+    below 0**; the two tests below that sweep it at 1 do not, and that is the point of
+    them rather than a slip in their fixture.
     """
     return _write_index(
         project_scratch / "patches",
@@ -551,27 +563,56 @@ def _stub_counts(monkeypatch, values):
     )
 
 
+def _criterion_holds(coverage):
+    """Return what `coverage["criterion"]` says, evaluated over the block's own numbers.
+
+    The criterion the artifact carries is *evaluated* here rather than restated in the
+    test. A test that re-typed the comparison would be a second definition of the
+    predicate, and a second definition is what `brackets_distribution` was in round 1:
+    the comparison lived in a docstring, where a reader of the JSON could not check it
+    and a test that did would only have checked itself. `eval` runs over a namespace
+    holding this block's own scalars and no builtins, so the expression can only
+    compare what the artifact reports, and the string and the boolean either agree or
+    this fails.
+    """
+    assert " iff " in coverage["criterion"], (
+        f"the criterion has to name its comparison in the form this test evaluates, and "
+        f"it reads {coverage['criterion']!r}"
+    )
+    values = {name: value for name, value in coverage.items() if name != "criterion"}
+    return bool(eval(coverage["criterion"].split(" iff ")[-1], {"__builtins__": {}}, values))
+
+
 def test_range_coverage_compares_the_swept_range_against_the_distribution(
     project_scratch, synthetic_patch, monkeypatch
 ):
     # **Red before the fix**: `range_coverage` did not exist, so a reader of
     # `blob_count_summary` and `per_threshold` saw the distribution and the sweep and no
     # statement about whether the sweep reached the distribution. The module docstring
-    # claimed the run says so and the run did not.
+    # claimed the run says so and the run did not. **Red again after round 1**, for the
+    # second half of the same defect: the range swept here now starts at 0 and not at 1,
+    # because the distribution's minimum is 0 and a range starting at 1 leaves that patch
+    # below the lowest threshold. Round 1's predicate called that covered, because it
+    # compared the low end against the median.
     from blobcount import ablation
 
     _stub_counts(monkeypatch, [0, 2, 10, 20])
     stats = ablation.ablate(
         _straddling_index(project_scratch, synthetic_patch),
-        load(overrides=["ablation.thresholds=[1, 30]"]),
-        selected=1,
+        load(overrides=["ablation.thresholds=[0, 30]"]),
+        selected=0,
     )
     assert stats.range_coverage() == {
-        "swept_min": 1,
+        "criterion": _CRITERION,
+        "swept_min": 0,
         "swept_max": 30,
+        "count_min": 0,
         "count_p50": 6.0,
         "count_mean": 8.0,
         "count_max": 20,
+        "unswept_below": 0,
+        "unswept_above": 0,
+        "n_unswept": 0,
         "brackets_distribution": True,
     }
     # The flag is a boolean and not an `int`, because `brackets_distribution` is the whole
@@ -579,27 +620,130 @@ def test_range_coverage_compares_the_swept_range_against_the_distribution(
     assert isinstance(stats.range_coverage()["brackets_distribution"], bool)
 
 
+def test_range_coverage_counts_the_patches_the_swept_range_never_cuts(
+    project_scratch, synthetic_patch, monkeypatch
+):
+    # **Red before the fix**, in the direction the reviewer's case takes. Round 1 compared
+    # the low end of the swept range against the distribution's *median*, so a range whose
+    # bottom sits above the minimum but below the median reported that the sweep covered
+    # the distribution. Counts of 1, 50, 51 and 52 swept at [40, 60] gave
+    # `brackets_distribution: true` with 1 of the 4 patches below the lowest threshold and
+    # therefore never cut at any threshold in the sweep — the exact misreading R7-1 exists
+    # to prevent, produced by the fix for R7-1.
+    #
+    # The second half is the same distribution swept at a range that does cover it, so
+    # this test cannot be satisfied by a predicate that answers False to everything. A
+    # flag that is always False is not a fix either.
+    from blobcount import ablation
+
+    index = _straddling_index(project_scratch, synthetic_patch)
+    _stub_counts(monkeypatch, [1, 50, 51, 52])
+    short_below = ablation.ablate(
+        index, load(overrides=["ablation.thresholds=[40, 60]"]), selected=40
+    ).range_coverage()
+    assert short_below == {
+        "criterion": _CRITERION,
+        "swept_min": 40,
+        "swept_max": 60,
+        "count_min": 1,
+        "count_p50": 50.5,
+        "count_mean": 38.5,
+        "count_max": 52,
+        # The one patch at 1, and nothing at the top: the range's top of 60 does clear the
+        # maximum of 52, so this failure is at the low end alone.
+        "unswept_below": 1,
+        "unswept_above": 0,
+        "n_unswept": 1,
+        "brackets_distribution": False,
+    }
+    # The count, not the verdict, is what a reader cannot get wrong: a quarter of this
+    # cohort was never swept, and the artifact says so in a number.
+    assert short_below["n_unswept"] == 1 and short_below["unswept_below"] == 1
+    _stub_counts(monkeypatch, [1, 50, 51, 52])
+    covering = ablation.ablate(
+        index, load(overrides=["ablation.thresholds=[1, 60]"]), selected=1
+    ).range_coverage()
+    assert covering["count_min"] == 1 and covering["count_max"] == 52
+    assert covering["unswept_below"] == 0 and covering["unswept_above"] == 0
+    assert covering["n_unswept"] == 0
+    assert covering["brackets_distribution"] is True
+
+
+def test_the_range_coverage_criterion_string_and_its_boolean_agree(
+    project_scratch, synthetic_patch, monkeypatch
+):
+    # **Red before the fix**: the criterion was in a docstring and nowhere else, so a
+    # reader of `threshold_range_coverage` saw `brackets_distribution: true` with no key
+    # naming what true means, and two readers could derive different answers from the same
+    # file. One of them was round 1's, and it was wrong. The agreement is checked by
+    # evaluating the artifact's own criterion string, so a predicate that moves without
+    # the string moving fails here rather than being taken on trust.
+    from blobcount import ablation
+
+    index = _straddling_index(project_scratch, synthetic_patch)
+    cases = [
+        # The reviewer's case: the bottom is above the minimum and below the median, which
+        # is the state round 1 read as covered.
+        ([1, 50, 51, 52], [40, 60]),
+        # The same distribution with a range that does cover it.
+        ([1, 50, 51, 52], [1, 60]),
+        # The bottom above the minimum *and* above the median.
+        ([1, 50, 51, 52], [52, 60]),
+        ([0, 2, 10, 20], [1, 15]),
+        ([0, 2, 10, 20], [10, 30]),
+        # Covering exactly, at both ends.
+        ([0, 2, 10, 20], [0, 20]),
+    ]
+    for counts, thresholds in cases:
+        _stub_counts(monkeypatch, counts)
+        coverage = ablation.ablate(
+            index,
+            load(overrides=[f"ablation.thresholds={thresholds}"]),
+            selected=thresholds[0],
+        ).range_coverage()
+        assert _criterion_holds(coverage) is coverage["brackets_distribution"], (
+            f"counts {counts} swept at {thresholds}: the criterion string says "
+            f"{_criterion_holds(coverage)} and the flag says "
+            f"{coverage['brackets_distribution']}"
+        )
+        # And the boolean is a statement about the counts rather than about the range
+        # alone: it is true exactly when every count lies inside the swept range, which is
+        # the definition a reader of the artifact would apply to it.
+        assert coverage["brackets_distribution"] is all(
+            coverage["swept_min"] <= value <= coverage["swept_max"] for value in counts
+        ), f"counts {counts} swept at {thresholds} are not all inside the swept range"
+
+
 def test_range_coverage_is_false_at_either_end_of_a_range_that_stops_short(
     project_scratch, synthetic_patch, monkeypatch
 ):
     # **Red before the fix**, for the same reason as the pair above. Both directions are
     # here because they are different failures: a range whose top stops below the largest
-    # count never sees the tail, and a range whose bottom sits above the median never
-    # enters the bulk. The controller's decision is that neither is a reason to widen the
-    # configured range from a 60-patch sample, so both are reported and neither is fixed.
+    # count never sees the tail, and a range whose bottom sits above the distribution's
+    # smallest count never enters the bulk — the *minimum*, which is what round 1
+    # compared against the median instead. The controller's decision is that neither is a
+    # reason to widen the configured range from a 60-patch sample, so both are reported
+    # and neither is fixed.
     from blobcount import ablation
 
     index = _straddling_index(project_scratch, synthetic_patch)
     _stub_counts(monkeypatch, [0, 2, 10, 20])
     short_above = ablation.ablate(
-        index, load(overrides=["ablation.thresholds=[1, 15]"]), selected=1
+        index, load(overrides=["ablation.thresholds=[0, 15]"]), selected=0
     ).range_coverage()
     assert short_above == {
-        "swept_min": 1,
+        "criterion": _CRITERION,
+        "swept_min": 0,
         "swept_max": 15,
+        "count_min": 0,
         "count_p50": 6.0,
         "count_mean": 8.0,
         "count_max": 20,
+        # The one patch at 20, and none below: the range's bottom of 0 does reach the
+        # distribution's minimum of 0, so this failure is at the top alone.
+        "unswept_above": 1,
+        "unswept_below": 0,
+        "n_unswept": 1,
         "brackets_distribution": False,
     }
     _stub_counts(monkeypatch, [0, 2, 10, 20])
@@ -607,11 +751,17 @@ def test_range_coverage_is_false_at_either_end_of_a_range_that_stops_short(
         index, load(overrides=["ablation.thresholds=[10, 30]"]), selected=10
     ).range_coverage()
     assert short_below == {
+        "criterion": _CRITERION,
         "swept_min": 10,
         "swept_max": 30,
+        "count_min": 0,
         "count_p50": 6.0,
         "count_mean": 8.0,
         "count_max": 20,
+        # The two patches at 0 and at 2, and none above: 30 clears the maximum of 20.
+        "unswept_below": 2,
+        "unswept_above": 0,
+        "n_unswept": 2,
         "brackets_distribution": False,
     }
     # The reported range is the keys `sweep` was given, not the configured list read a
@@ -699,6 +849,35 @@ def test_ablate_raises_a_value_error_for_a_range_that_is_not_whole_numbers(
             index, load(overrides=["ablation.thresholds=[2, 5.5]"]), selected=2
         )
     assert not isinstance(escaped.value, LabelingInputError)
+
+
+def test_thresholds_refuses_a_quoted_digit_and_says_that_is_the_rule():
+    # **Red before the fix**: `int("3") != "3"`, so `["3", 5]` was refused — which is
+    # defensible — but the choice was documented in a test comment and nowhere a user
+    # hand-editing `configs/default.yaml` would read it. Refusing without saying so is the
+    # finding. The message now names the rule: a plain number, and not a quoted digit.
+    from blobcount import ablation
+
+    with pytest.raises(ValueError) as refused:
+        ablation._thresholds(load(overrides=["ablation.thresholds=['3', 5]"]))
+    message = str(refused.value)
+    # The offending value, as the YAML wrote it, so the reader knows which entry to fix.
+    assert "'3'" in message
+    assert "whole number of blobs" in message
+    assert "a plain number" in message and "not '3'" in message
+
+
+def test_thresholds_refuses_a_yaml_boolean():
+    # **Red before the fix**: `bool` subclasses `int`, so `int(True) == 1` and
+    # `1 != True` is False — a `true` in the configured range was accepted and swept as
+    # the threshold 1, with no message anywhere. The same rule as the quoted digit: an
+    # entry has to be a number and not a flag, and a flag that becomes a threshold
+    # silently is a measurement of a threshold nobody configured.
+    from blobcount import ablation
+
+    with pytest.raises(ValueError) as refused:
+        ablation._thresholds(load(overrides=["ablation.thresholds=[true]"]))
+    assert "True" in str(refused.value)
 
 
 def test_ablate_counts_a_patch_the_index_names_twice_once(project_scratch, synthetic_patch):
@@ -816,18 +995,27 @@ def test_cli_writes_and_prints_the_range_coverage(cli, capsys):
     # **Red before the fix**: the JSON carried `blob_count_summary` and `per_threshold`
     # and nothing comparing them, and nothing on stdout did either. A reader of the two
     # side by side concludes the sweep covered the distribution whatever it covers, and
-    # that is the misreading this task exists to prevent.
+    # that is the misreading this task exists to prevent. **Red again after round 1**: the
+    # block carried a verdict and no criterion, so the verdict was a claim about the
+    # distribution that only a docstring supported.
     module, index, results = cli
     assert module.main(["--index", str(index)]) == 0
     written = json.loads(
         (results / "label_analysis" / "threshold_ablation.json").read_text(encoding="utf-8")
     )
+    # Both patches count three blobs and the range is [2, 5], so the distribution is
+    # 3 to 3, the range reaches both ends of it, and nothing is left unswept.
     assert written["threshold_range_coverage"] == {
+        "criterion": _CRITERION,
         "swept_min": 2,
         "swept_max": 5,
+        "count_min": 3,
         "count_p50": 3.0,
         "count_mean": 3.0,
         "count_max": 3,
+        "unswept_below": 0,
+        "unswept_above": 0,
+        "n_unswept": 0,
         "brackets_distribution": True,
     }
     printed = capsys.readouterr().out
@@ -835,6 +1023,9 @@ def test_cli_writes_and_prints_the_range_coverage(cli, capsys):
     # The word is the flag and not a phrase chosen per run, so it can be read by a person
     # and matched by a test.
     assert "the swept range brackets the distribution" in printed
+    # And the number behind the word, on stdout as well as in the JSON, because a flag a
+    # reader has to take on trust is the shape this block was corrected away from.
+    assert "0 of 2 patches outside the swept range" in printed
 
 
 def test_cli_says_so_when_the_swept_range_does_not_reach_the_distribution(
@@ -863,8 +1054,18 @@ def test_cli_says_so_when_the_swept_range_does_not_reach_the_distribution(
     assert written["threshold_range_coverage"]["brackets_distribution"] is False
     assert written["threshold_range_coverage"]["swept_max"] == 2
     assert written["threshold_range_coverage"]["count_max"] == 3
+    # Both patches are above the top of the range, so the artifact says which end failed
+    # and how many patches it left out, rather than only that the range was short.
+    assert written["threshold_range_coverage"]["unswept_above"] == 2
+    assert written["threshold_range_coverage"]["unswept_below"] == 0
+    assert written["threshold_range_coverage"]["n_unswept"] == 2
+    # The criterion in the artifact, and the flag agreeing with it: what a reader of the
+    # JSON has to work with, with nothing outside the file.
+    coverage = written["threshold_range_coverage"]
+    assert _criterion_holds(coverage) is coverage["brackets_distribution"]
     printed = capsys.readouterr().out
     assert "the swept range does not bracket the distribution" in printed
+    assert "2 of 2 patches outside the swept range" in printed
     # The run still wrote everything a run writes: a narrow range is a finding about the
     # configuration, not a reason to refuse.
     assert (results / "label_analysis" / "threshold_ablation.png").is_file()
@@ -1020,6 +1221,10 @@ def test_cli_converts_the_configured_range_once_for_its_selection_guard(
     err = capsys.readouterr().err
     # The validator's answer, not the guard's, and not a traceback.
     assert "whole number of blobs" in err
+    # **Red before the fix**: the message did not say that a quoted digit is the thing
+    # being refused, so a user hand-editing the YAML could not tell a deliberate rule from
+    # a parse accident. `_thresholds`' own refusal now states it.
+    assert "a plain number" in err and "not '3'" in err
     assert "is not one of the ablation.thresholds" not in err
     assert "Traceback" not in err
     assert not (results / "label_analysis").exists()
