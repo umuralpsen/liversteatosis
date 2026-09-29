@@ -162,6 +162,14 @@ class LabelingInputError(Exception):
     contradicting themselves. The original exception is the `__cause__` of every
     instance, because the message alone says the run refused and the traceback behind it
     says which read refused.
+
+    **`blobcount.ablation.ablate` raises it for a seventh shape: an index that carries no
+    rows.** That one is not produced by wrapping — an index with a header and no rows is
+    refused before the conversion and before `sweep`, because the sweep's pooled ratio is
+    a division by a count of nothing and the same `ValueError` would have left a command
+    line with a traceback. It is named here so that the list above is not read as closed
+    to every caller of the type, and it is raised there rather than here because this
+    module's own contract is about labelling.
     """
 
 
@@ -316,6 +324,18 @@ def _row_numbers(row: Mapping[str, str | None]) -> _RowNumbers:
     try:
         return _RowNumbers(float(row["tissue_gray"]), float(row["mpp"]))
     except (TypeError, ValueError) as error:
+        # Logged with the specimen, the coordinates this index row records for the patch
+        # and the exception object, before the refusal is raised: the rule every caught
+        # exception in this project is held to, and a cell that is text where its column
+        # records a number is exactly the case where the line is wanted and is most often
+        # missing. `row.get` rather than `row[...]` because the row may be the short one
+        # that made this fire, where the trailing columns are `None` rather than absent —
+        # a handler that raised here would replace the cell's own error with one of its
+        # own, which is the one thing a log line must not do.
+        LOGGER.error(
+            "slide %s: reading the cell for patch %s at (%s, %s) raised %r",
+            row.get("slide_id"), row.get("patch_id"), row.get("x"), row.get("y"), error,
+        )
         raise LabelingInputError(
             f"the patch index carries a cell that is not the number its column records: "
             f"{error}"

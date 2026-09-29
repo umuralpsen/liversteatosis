@@ -32,9 +32,9 @@ is a **5th** percentile in the shipped configuration, so the column ranges 69.3 
 on real tissue, and the 95th percentile of that column is **134.4** — below the mean
 grayscale of 51 of those 60 patches. At `labeling.blob_threshold: 5` that is 36.1 blobs
 per patch. The rule is not degenerate; it is inflated, by `2166 / 377` = **5.75** between
-the two totals. (The plan calls this "about 5.5x"; the two totals are the measurement
-and the ratio above is what dividing them gives, so the ratio is what is written into
-the artifact and the discrepancy is left visible rather than rounded away.
+the two totals. (The controller note calls this "about 5.5x"; the two totals are the
+measurement and the ratio above is what dividing them gives, so the ratio is what is
+written into the artifact and the discrepancy is left visible rather than rounded away.
 `RULE_COMPARISON` carries all of it into the JSON, and `bin/ablate_threshold.py` writes
 it into every run.)
 
@@ -45,17 +45,28 @@ turns; a per-specimen ratio is that curve for one specimen. A threshold that bal
 the pooled ratio while the per-specimen spread is wide reproduces the defect above with
 a different mechanism, and it is available to anyone who reads only the pooled column.
 
-**`ablation.thresholds` as configured cannot place that knee, and the run says so.**
-`configs/default.yaml` sweeps `[3, 5, 7, 10, 15, 20, 25, 30]`, and the largest of those
-is below the mean count of 36.1 and well below the maximum of 86 that the rule in use
-produced. Every threshold in the range therefore sits under the bulk of a distribution
-that is itself inflated, so the sweep reports ratios in a region where the answer is
-decided by the tail rather than by a bend. That is a finding about the configured range
-and not a reason to widen it here: `ablation.thresholds` is a configured value and this
-module reads it. Widening it until the knee is inside the range is a decision for
-whoever selects the threshold, and the run hands them the survival curve to make it on.
-`blobcount.extract.summarise_tissue_gray` reports a *different* distribution — the
-`tissue_gray` background levels themselves — and the two must not be read as one.
+**Whether the configured range reaches the distribution is reported, not assumed.**
+`configs/default.yaml` sweeps `[3, 5, 7, 10, 15, 20, 25, 30]`, and against the 60 patches
+Task 6 measured, the largest of those is below the mean count of 36.1 and well below the
+maximum of 86. **Those two figures are 60 patches of one of six slides, not a property of
+the index this sweep runs over**, and that index does not exist on disk yet: Task 4's
+extraction has never been run, so there is no `patches.csv` for a sweep to have cut. The
+range is therefore not widened on the strength of a 60-patch sample. Widening a range from
+a sample is a guess, and guessing a range is the mechanism that produced every wrong
+number in the original thesis.
+
+What ships instead is the check the run performs, in `AblationStats.range_coverage`: the
+swept min and max against the count distribution's own p50, mean and max, and a boolean
+saying whether the range brackets it. `bin/ablate_threshold.py` writes that under
+`threshold_range_coverage` and prints it under the count summary, so a reader of either
+learns whether the sweep reached the distribution instead of inferring it from a pooled
+ratio printed beside a `blob_count_summary`. Where the range does bracket, the flag says
+so and the sweep was adequate without the reader doing the arithmetic; where it does not,
+the artifact says which end of the range stops short and by how much. `ablation.thresholds`
+is a configured value this module reads, and the run hands the survival curve to whoever
+selects the threshold. `blobcount.extract.summarise_tissue_gray` reports a *different*
+distribution — the `tissue_gray` background levels themselves — and the two must not be
+read as one.
 
 **`ablate` counts the patches again, and reads nothing that a threshold produced.**
 `labels.csv` carries a `blob_count` per patch, and reading it would make the sweep a
@@ -85,33 +96,51 @@ one exception the plan makes, and it writes the figure it is handed and nothing 
 shapes that module already enumerates — an index that is not there, cannot be opened,
 carries a cell over `csv.field_size_limit`, or is not the `patches.csv` header; a cell
 that is not the number its column records; and a patch file that is not the `uint8`
-`(patch_size, patch_size, 3)` array the count needs — and they arrive through the same
-two seams, so a second type would have to re-enumerate six refusals or subclass an
-empty one. Only the read of the index and the read of each patch are wrapped, with the
-original as the `__cause__`. A `ValueError` from `count_blobs`, from
+`(patch_size, patch_size, 3)` array the count needs — plus **an index that carries no
+rows**, which that type's docstring names as this module's seventh shape. They arrive
+through the same three wrapped operations and not through a fourth, so a second type would
+have to re-enumerate six refusals or subclass an empty one. Those three are the three
+`LabelingInputError` documents: the read of the index and the read of each patch here, and
+the per-row `float()` conversion in `blobcount.labeling._row_numbers`, every one of them
+with the original as the `__cause__`. A `ValueError` from `count_blobs`, from
 `np.percentile` on a `blobs.gray_percentile` outside [0, 100] — a value this project
-range-checks nowhere — or from `sweep` and `summarise` above is a defect in this
-project and is not wrapped, so the command line can tell a refusal from a traceback.
-Every caught exception is logged with the specimen, the coordinates the index records
-for that patch and the exception object, before the refusal is raised.
+range-checks nowhere — or from the arithmetic of `sweep` and `summarise` is a defect in
+this project and is not wrapped, so the command line can tell a refusal from a traceback.
+
+**Every caught exception is logged, and all three catches do it.** The patch read names
+the specimen, the coordinates the index records for that patch and the exception object,
+which are the three the plan's Global Constraints require. The cell conversion names the
+same three, because it has the row they come from. The index read names the index and the
+exception object and cannot name coordinates: no row was read, so there are none, and the
+specimen the run has is the file. That one is logged in this module because
+`blobcount.labeling.read_index` is public and raises what it raises — it is the boundary
+here that has the specimen, and an index that cannot be read is the case where a log line
+matters most and is most often missing.
 
 **A patch the index names twice is counted once**, as in `label_patches`, and the
 repeat is logged: two rows are one file, and reading it twice would read every patch
 twice.
 
 **A configured threshold that is not a whole number of blobs is refused** rather than
-rounded, because a sweep over 3.5 run as a sweep over 3 is a measurement of a
-threshold nobody configured. It is a `ValueError` out of `ablate` and not a
-`LabelingInputError`: it is a statement about the configuration, not about the index,
-and it is the limit `bin/extract_patches.py` records for a hand-edited scalar — a
-`TypeError` or `ValueError` out of a conversion this project does not wrap reaches the
-interpreter, which reports it as a traceback. The command line checks the selection it
-was given for the same reason and reports it as a refusal before it reads a patch.
+rounded, because a sweep over 3.5 run as a sweep over 3 is a measurement of a threshold
+nobody configured. It is a `ValueError` out of `ablate` and not a
+`LabelingInputError`: it is a statement about the configuration, not about the index the
+caller pointed at. **It is not a traceback either.** The standing ruling that a
+hand-edited `extraction.patch_size` reaches the interpreter unvalidated does not transfer
+to a function that exists to reject the value: `extraction.patch_size` is a value this
+project chose not to validate, and `_thresholds` is code that was written to validate, and
+a validator that validates and then reports by traceback looks like a check without being
+one. `bin/ablate_threshold.py` calls `_thresholds` itself before it reads a patch and
+returns `EXIT_REFUSED` on its answer; the call inside `ablate` is the same pure conversion
+of the same configuration and cannot come to a different one. The command line checks the
+selection it was given for the same reason, against the same converted range, and reports
+it as a refusal before it reads a patch.
 
 Declared interface, in `__all__` order:
 
     AblationStats
         AblationStats.count_summary(self) -> dict[str, float | int]
+        AblationStats.range_coverage(self) -> dict[str, float | int | bool]
         counts: dict[str, int]
         slide_of: dict[str, str]
         per_slide_mpp: dict[str, float]
@@ -248,8 +277,8 @@ class AblationStats:
         not a ratio that hides it.
 
         There is no percentile over an empty array here to return a `NaN` for, because
-        `ablate` refuses an index with no rows before it can build one: `sweep` raises
-        on an empty count map rather than dividing by a length of nothing.
+        `ablate` refuses an index with no rows at the index boundary, as a
+        `LabelingInputError` and not as a `ValueError` out of `sweep` below.
         """
         values = np.asarray(list(self.counts.values()), dtype=np.float64)
         return {
@@ -258,6 +287,55 @@ class AblationStats:
             "p50": float(np.percentile(values, 50)),
             "mean": float(values.mean()),
             "max": int(values.max()),
+        }
+
+    def range_coverage(self) -> dict[str, float | int | bool]:
+        """Return the swept range against the count distribution it is a sweep of.
+
+        The keys are `swept_min`, `swept_max`, `count_p50`, `count_mean`, `count_max` and
+        `brackets_distribution`. The three `count_` keys are read from `count_summary`
+        rather than computed again, so the comparison is between the distribution the run
+        printed and the range the run swept and not between a number here and a number
+        there that can come to disagree.
+
+        **The range swept is the keys of `per_threshold`, not a configured value read a
+        second time.** Those keys are what `sweep` was given and `summarise` marked, so
+        this cannot report a range the run did not cut at; and `ablate` cannot produce an
+        empty `per_threshold`, because `summarise` refuses a selection that is not in it.
+        A caller that hands this dataclass an empty one gets a refusal rather than a
+        `ValueError` out of `min()` over nothing.
+
+        `brackets_distribution` is `swept_min <= count_p50 and swept_max >= count_max`:
+        the low end of the sweep reaches into the bulk of the distribution and the high
+        end reaches past its largest count, so the whole distribution was cut at and the
+        knee it asks about is inside the swept region. It is a boolean rather than a
+        sentence because a reader can check it and a test can fail if it goes away, and
+        that is the whole of what this method is for: the module docstring's claim that
+        the configured range may not place the knee is a claim about this run's data, so
+        it is a check this run performs rather than a sentence anyone has to trust.
+
+        **A `False` here is a finding about the configuration and not a defect.** The
+        controller decision is that `ablation.thresholds` is not widened on the strength
+        of a 60-patch sample, because the real distribution does not exist yet. So the
+        flag reports what the run found and the reader decides what to do about it.
+        """
+        swept = list(self.per_threshold)
+        if not swept:
+            raise ValueError(
+                "there is no swept threshold to compare a range against; the keys of "
+                "`per_threshold` are the range this run swept, and there are none"
+            )
+        summary = self.count_summary()
+        low, high = min(swept), max(swept)
+        return {
+            "swept_min": int(low),
+            "swept_max": int(high),
+            "count_p50": summary["p50"],
+            "count_mean": summary["mean"],
+            "count_max": summary["max"],
+            "brackets_distribution": bool(
+                low <= summary["p50"] and high >= summary["max"]
+            ),
         }
 
 
@@ -302,6 +380,10 @@ def sweep(
     An empty `counts_by_patch` is refused too: `pooled_steatosis_ratio` is
     `n_steatosis / n` and there is no `n` in an empty map, so a sweep over an index with
     no rows would divide by nothing and leave a command line with a `ZeroDivisionError`.
+    `ablate` never reaches this with an empty map — an index with no rows is refused at
+    the index boundary, as a `LabelingInputError` a command line has a message for — so
+    this is the guard a direct caller of `sweep` meets, and it stays a `ValueError` because
+    the two mappings disagree about the study's data rather than about the index file.
     """
     if not counts_by_patch:
         raise ValueError(
@@ -525,12 +607,21 @@ def _thresholds(cfg: Config) -> tuple[int, ...]:
     constant this project keeps refusing to substitute for a measurement.
 
     **The refusal is a `ValueError` and not a `LabelingInputError`.** It is a statement
-    about the configuration and not about the index the caller pointed at, and it is
-    the limit `bin/extract_patches.py` records for a hand-edited scalar: `load` checks
-    that a key is declared and nothing about its value, so a conversion this project
-    does not wrap reaches the interpreter, which reports it as a traceback. A `TypeError`
-    from a value that is not a number at all is left the same way, and for the same
-    reason — a catch wide enough to hold it would also hold a defect in this arithmetic.
+    about the configuration and not about the index the caller pointed at, and the
+    `LabelingInputError` this module reuses enumerates six shapes that are all about the
+    file. A seventh about a configuration value would make that type mean two things.
+
+    **The caller reports it, and it does not reach the interpreter.** The standing limit
+    `bin/extract_patches.py` records is that `load` checks that a key is declared and
+    nothing about its value, so a conversion this project does not wrap is reported as a
+    traceback. That limit covers `extraction.patch_size`, a value this project chose not
+    to validate, and it does not transfer to a function written to reject a value: a
+    validator that validates and then reports by traceback looks like a check and is not
+    one. `bin/ablate_threshold.py` therefore calls this function itself, before it reads a
+    patch, and returns `EXIT_REFUSED` on its answer. The catch there is around that one
+    call and not around `ablate`, so a `TypeError` from a value that is not a number at
+    all is caught beside the `ValueError` without any catch being wide enough to hold a
+    defect in the counting.
     """
     out: list[int] = []
     for value in cfg.get("ablation.thresholds"):
@@ -571,19 +662,37 @@ def ablate(index_path: Path, cfg: Config, selected: int | None = None) -> Ablati
     the per-patch gray threshold it derives is superseded.
 
     The index is read before anything is counted, so an index that cannot be read costs
-    no patch read. **Only the read of the index and the read of each patch are caught**,
-    and both are re-raised as a `LabelingInputError` with the original as the
-    `__cause__`: the six shapes are the ones that type already enumerates, and they are
-    statements about what the caller pointed at. A `ValueError` from `count_blobs`, from
-    the normalization, from `np.percentile` on a `blobs.gray_percentile` outside
-    [0, 100] or from the arithmetic of `sweep` and `summarise` is a defect in this
-    project and is left to raise, so a command line can tell a refusal from a traceback.
+    no patch read. **An index that carries no rows is refused there, as a
+    `LabelingInputError`**, before `_thresholds` is read and before a single cell is
+    converted. It is a legitimate state a caller can hit — extraction produced nothing, or
+    the wrong index was named — and it deserves the same answer a missing file already
+    gets. Refused as a `ValueError` out of `sweep` instead, which is what this function
+    used to let happen, it reached a command line that catches only `LabelingInputError`
+    and left a traceback, and a status of 1 is what this CLI's own contract defines as
+    "a fact about this project's code rather than about the study". The message it produced
+    named an empty index, which is a fact about the study's data and not about our code.
+
+    **Only the read of the index and the read of each patch are caught here**, and both
+    are re-raised as a `LabelingInputError` with the original as the `__cause__`: the six
+    shapes are the ones that type already enumerates, and they are statements about what
+    the caller pointed at. The third wrapped operation, the conversion of the two numeric
+    cells, is caught in `blobcount.labeling._row_numbers` and reaches here as the same
+    type, so the three catches between the index file and this return value are the three
+    that type documents. A `ValueError` from `count_blobs`, from the normalization, from
+    `np.percentile` on a `blobs.gray_percentile` outside [0, 100] or from the arithmetic
+    of `sweep` and `summarise` is a defect in this project and is left to raise, so a
+    command line can tell a refusal from a traceback.
+
     A `ValueError` out of `_thresholds` above is not wrapped either, for a different
-    reason: it is a statement about the configuration and not about the index, and
-    `bin/ablate_threshold.py` records that limit for the same reason
-    `bin/extract_patches.py` does. Every caught exception is logged first, with the
-    specimen id, the coordinates the index records for that patch and the exception
-    object.
+    reason: it is a statement about the configuration and not about the index, so
+    `LabelingInputError` would be the wrong type for it. It is a `ValueError` and not a
+    traceback because `bin/ablate_threshold.py` calls `_thresholds` on the same
+    configuration before it reads a patch and reports the refusal as `EXIT_REFUSED`, so
+    the call here is a second answer to a question already answered and cannot produce a
+    third. Every caught exception is logged first, with the specimen id, the coordinates
+    the index records for that patch and the exception object; the index read names the
+    index and the exception object, because no row was read and so there are no
+    coordinates to name.
 
     A patch the index names twice is counted once and the repeat is logged, so a
     doubled row does not double a run.
@@ -600,7 +709,26 @@ def ablate(index_path: Path, cfg: Config, selected: int | None = None) -> Ablati
         # not this pipeline's, which `read_index` raises `ValueError` for. All four are
         # about the file the caller pointed at, and the original is the `__cause__` of
         # every one because the message names the index and the traceback names the read.
+        # Logged first, with the index and the exception object. There are no coordinates
+        # to name and no specimen but the file itself: the read failed before a row
+        # existed, and inventing a row to name would be a log line about a patch the index
+        # never carried.
+        LOGGER.error("reading the patch index %s raised %r", index, error)
         raise LabelingInputError(f"the patch index could not be read: {error}") from error
+
+    if not rows:
+        # Refused here rather than left to `sweep` below, which raises a `ValueError` over
+        # an empty count map. Both would report the same fact, and only one of them is a
+        # type the command line has an answer for: a `LabelingInputError` is printed with
+        # what it refused and returns `EXIT_REFUSED`, and a `ValueError` is a status of 1,
+        # which this CLI defines as a fact about this project's code. An index with a
+        # header and no rows is a legitimate state — extraction produced nothing, or the
+        # wrong index was named — and it gets the same answer as a missing file.
+        raise LabelingInputError(
+            f"the patch index {index} carries a header and no rows, so there is no patch "
+            f"to count and the pooled ratio would be a division by nothing; extraction "
+            f"produced nothing, or this is not the index the run was meant to sweep"
+        )
 
     thresholds = _thresholds(cfg)
     if selected is None:
@@ -650,6 +778,16 @@ def ablate(index_path: Path, cfg: Config, selected: int | None = None) -> Ablati
         # is appended: an index that names no file names no patch, and completing the
         # name would count a file this index did not name and file it under a patch id
         # the index never carried.
+        #
+        # **The two stages resolve one index row to different files, deliberately, and
+        # that is stated here rather than left for a reader to discover.**
+        # `label_patches` completes a missing `.png` through `labeling._patch_file_name`,
+        # so a row of `A_0_0` labels `A_0_0.png`; this module refuses the same row.
+        # Both are right for their own question: a labelling run has to name the file it
+        # writes beside the index row it read, and a sweep that guessed a file name would
+        # be counting a file this index did not name, under an id it never carried. The
+        # divergence only shows on an index this pipeline did not write, because
+        # `extract_slide` puts the extension in the column.
         patch_id = str(row["patch_id"])
         slide_id = str(row["slide_id"])
         if patch_id in counts:

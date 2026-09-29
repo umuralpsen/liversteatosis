@@ -190,10 +190,22 @@ def test_the_spread_is_a_separate_number_at_every_threshold():
 
 def test_summarise_marks_the_selected_threshold():
     from blobcount.ablation import sweep, summarise
-    counts, slide_of = _balanced_pair()
+    # Counts that straddle 3 and 5, so the two pooled ratios are different numbers rather
+    # than the same one twice. `_balanced_pair` is 20 and 0, and a patch at 20 clears every
+    # threshold this sweeps, so an equality between the ratios at 3 and 5 was true for a
+    # structural reason and asserted nothing at all.
+    counts = {
+        "A0": 0, "A1": 0, "A2": 4, "A3": 4, "A4": 6,
+        "B0": 0, "B1": 0, "B2": 0, "B3": 4, "B4": 6,
+    }
+    slide_of = {patch: patch[0] for patch in counts}
     s = summarise(sweep(counts, slide_of, [3, 5, 7]), 5)
     assert [t for t in (3, 5, 7) if s[t]["selected"]] == [5]
-    assert s[3]["pooled_steatosis_ratio"] == s[5]["pooled_steatosis_ratio"]
+    # Three clears five of the ten, five clears two of them, seven none.
+    assert s[3]["pooled_steatosis_ratio"] == pytest.approx(0.5)
+    assert s[5]["pooled_steatosis_ratio"] == pytest.approx(0.2)
+    assert s[7]["pooled_steatosis_ratio"] == pytest.approx(0.0)
+    assert s[3]["pooled_steatosis_ratio"] != s[5]["pooled_steatosis_ratio"]
     assert s[3]["selected"] is False and s[5]["selected"] is True
 
 
@@ -230,12 +242,35 @@ def test_sweep_refuses_an_empty_count_map():
         sweep({}, {}, [5])
 
 
-def test_plot_writes_a_figure(tmp_path):
+def test_plot_writes_a_two_panel_figure(tmp_path, monkeypatch):
+    # A **pin**, strengthened: it was green before this change, and it is strengthened
+    # because a PNG magic number is satisfied by a figure of any shape, while the
+    # two-panel layout — the per-slide curves beside the per-slide bars at the selected
+    # threshold — is what the plan asked for and nothing else in the file pinned it.
+    # `plot` imports `pyplot` inside the function and looks `subplots` up on the module
+    # at call time, so replacing the one attribute here records the call without changing
+    # what is drawn.
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
     from blobcount.ablation import plot, summarise, sweep
+
+    calls = []
+    real = plt.subplots
+
+    def _record(*args, **kwargs):
+        calls.append((args, kwargs))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(plt, "subplots", _record)
     counts, slide_of = _balanced_pair()
     s = summarise(sweep(counts, slide_of, [3, 5, 7]), 5)
     out = tmp_path / "ablation.png"
     plot(s, out)
+    assert calls[0][0] == (1, 2)
+    assert calls[0][1]["figsize"] == (11.0, 4.5)
     assert out.is_file()
     assert out.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
 
@@ -451,22 +486,219 @@ def test_ablate_does_not_report_our_own_defect_as_a_bad_patch(
 
 
 def test_a_count_summary_reports_the_distribution_the_sweep_is_over(
-    project_scratch, synthetic_patch
+    project_scratch, synthetic_patch, monkeypatch
 ):
     # The knee question is a question about this distribution, so the run reports its
     # shape. A mean of 36.1 blobs per patch against a swept threshold of 30 is the state
     # the ablation has to show rather than one it may hide behind a ratio, and the
     # summary is over the counts themselves rather than over a ratio of them.
+    #
+    # A **pin**, strengthened: it was green before this change, and it is strengthened
+    # because four identical counts make `min`, `max`, `p50` and `mean` the same number,
+    # so any one of the four could have been the wrong field and the test would not have
+    # known. The counts are stubbed apart for that reason; the real `count_blobs` is
+    # pinned by `test_ablate_recomputes_the_counts_and_ignores_the_labels`, which asserts
+    # three discs counted as three.
     from blobcount import ablation
 
+    counts = iter([0, 3, 20, 86])
+    monkeypatch.setattr(
+        ablation, "count_blobs", lambda patch, params, mpp: next(counts)
+    )
     rows = [_row(f"A_{index * 256}_0.png", "A", x=index * 256) for index in range(4)]
     index = _write_index(project_scratch / "patches", rows, synthetic_patch.array)
     summary = ablation.ablate(index, load()).count_summary()
-    assert summary == {"count": 4, "min": 3, "max": 3, "mean": 3.0, "p50": 3.0}
-    # A dict comparison cannot see `3` against `3.0`, so the types are stated: a count of
+    # p50 of 0, 3, 20 and 86 is the mean of the middle two, and the mean of the four is
+    # 109 / 4: neither is any of the other three numbers.
+    assert summary == {"count": 4, "min": 0, "p50": 11.5, "mean": 27.25, "max": 86}
+    # A dict comparison cannot see `0` against `0.0`, so the types are stated: a count of
     # blobs is a whole number and a mean of counts is not.
     assert isinstance(summary["min"], int) and isinstance(summary["max"], int)
     assert isinstance(summary["mean"], float) and isinstance(summary["p50"], float)
+
+
+def _straddling_index(project_scratch, synthetic_patch):
+    """Return an index over four patches, two slides, counts to be stubbed in.
+
+    The distribution is deliberately lopsided once the counts are stubbed — 0, 2, 10 and
+    20, so the median is 6.0, the mean is 8.0 and the maximum is 20 — which lets a swept
+    range stop short of it at either end and tells the two failures apart.
+    """
+    return _write_index(
+        project_scratch / "patches",
+        [
+            _row("A_0_0.png", "A"),
+            _row("A_256_0.png", "A", x=256),
+            _row("B_0_0.png", "B"),
+            _row("B_256_0.png", "B", x=256),
+        ],
+        synthetic_patch.array,
+    )
+
+
+def _stub_counts(monkeypatch, values):
+    """Make `count_blobs` hand out `values` in call order, for one `ablate` run.
+
+    A fresh closure per call rather than one iterator for the test, because two `ablate`
+    runs over the same index each need all four counts and a shared iterator would be
+    empty for the second.
+    """
+    from blobcount import ablation
+
+    remaining = list(values)
+    monkeypatch.setattr(
+        ablation, "count_blobs", lambda patch, params, mpp: remaining.pop(0)
+    )
+
+
+def test_range_coverage_compares_the_swept_range_against_the_distribution(
+    project_scratch, synthetic_patch, monkeypatch
+):
+    # **Red before the fix**: `range_coverage` did not exist, so a reader of
+    # `blob_count_summary` and `per_threshold` saw the distribution and the sweep and no
+    # statement about whether the sweep reached the distribution. The module docstring
+    # claimed the run says so and the run did not.
+    from blobcount import ablation
+
+    _stub_counts(monkeypatch, [0, 2, 10, 20])
+    stats = ablation.ablate(
+        _straddling_index(project_scratch, synthetic_patch),
+        load(overrides=["ablation.thresholds=[1, 30]"]),
+        selected=1,
+    )
+    assert stats.range_coverage() == {
+        "swept_min": 1,
+        "swept_max": 30,
+        "count_p50": 6.0,
+        "count_mean": 8.0,
+        "count_max": 20,
+        "brackets_distribution": True,
+    }
+    # The flag is a boolean and not an `int`, because `brackets_distribution` is the whole
+    # of what a reader and a test need from it and a `1` reads as a count of something.
+    assert isinstance(stats.range_coverage()["brackets_distribution"], bool)
+
+
+def test_range_coverage_is_false_at_either_end_of_a_range_that_stops_short(
+    project_scratch, synthetic_patch, monkeypatch
+):
+    # **Red before the fix**, for the same reason as the pair above. Both directions are
+    # here because they are different failures: a range whose top stops below the largest
+    # count never sees the tail, and a range whose bottom sits above the median never
+    # enters the bulk. The controller's decision is that neither is a reason to widen the
+    # configured range from a 60-patch sample, so both are reported and neither is fixed.
+    from blobcount import ablation
+
+    index = _straddling_index(project_scratch, synthetic_patch)
+    _stub_counts(monkeypatch, [0, 2, 10, 20])
+    short_above = ablation.ablate(
+        index, load(overrides=["ablation.thresholds=[1, 15]"]), selected=1
+    ).range_coverage()
+    assert short_above == {
+        "swept_min": 1,
+        "swept_max": 15,
+        "count_p50": 6.0,
+        "count_mean": 8.0,
+        "count_max": 20,
+        "brackets_distribution": False,
+    }
+    _stub_counts(monkeypatch, [0, 2, 10, 20])
+    short_below = ablation.ablate(
+        index, load(overrides=["ablation.thresholds=[10, 30]"]), selected=10
+    ).range_coverage()
+    assert short_below == {
+        "swept_min": 10,
+        "swept_max": 30,
+        "count_p50": 6.0,
+        "count_mean": 8.0,
+        "count_max": 20,
+        "brackets_distribution": False,
+    }
+    # The reported range is the keys `sweep` was given, not the configured list read a
+    # second time: the configured `labeling.blob_threshold` here is 5 and neither range
+    # contains it, and both runs still report the range they were actually swept at.
+    assert short_below["swept_min"] == 10 and short_above["swept_max"] == 15
+
+
+def test_ablate_logs_the_index_it_could_not_read(project_scratch, caplog):
+    # **Red before the fix**: the index read was caught and re-raised with no `LOGGER`
+    # call, and the module docstring claimed every caught exception was logged. An index
+    # that cannot be read is the case where a log line matters most, and there are no
+    # coordinates to name because no row was read — so the specimen here is the file.
+    from blobcount import ablation
+    from blobcount.labeling import LabelingInputError
+
+    missing = project_scratch / "patches" / "patches.csv"
+    with caplog.at_level(logging.ERROR, logger="blobcount.ablation"):
+        with pytest.raises(LabelingInputError):
+            ablation.ablate(missing, load())
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+    assert f"reading the patch index {missing} raised" in logged
+    assert "patches.csv" in logged
+
+
+def test_ablate_logs_the_row_whose_cell_is_not_a_number(project_scratch, caplog):
+    # **Red before the fix**: the conversion behind `_row_numbers` was caught and re-raised
+    # with no `LOGGER` call, for the same reason. This is the one catch that has the row,
+    # so all three of the specimen, the coordinates and the exception object are there to
+    # be named.
+    from blobcount import ablation
+    from blobcount.labeling import LabelingInputError
+
+    directory = project_scratch / "patches"
+    directory.mkdir(parents=True, exist_ok=True)
+    bad_cell = directory / "bad-cell.csv"
+    bad_cell.write_text(
+        "patch_id,slide_id,x,y,mpp,tissue_gray\n"
+        "A_0_0.png,A,512,256,0.5010,not-a-number\n",
+        encoding="utf-8",
+    )
+    with caplog.at_level(logging.ERROR, logger="blobcount.labeling"):
+        with pytest.raises(LabelingInputError, match="not-a-number"):
+            ablation.ablate(bad_cell, load())
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+    assert "slide A: reading the cell for patch A_0_0.png at (512, 256) raised" in logged
+    assert "not-a-number" in logged
+
+
+def test_ablate_refuses_an_index_with_no_rows(project_scratch):
+    # **Red before the fix**: the empty index fell through to `sweep`, which raises a
+    # `ValueError` over an empty count map. `ablate` did not wrap it, and
+    # `bin/ablate_threshold.py` catches only `LabelingInputError`, so the run printed a
+    # traceback and exited 1 — the status this CLI's own contract defines as a fact about
+    # this project's code. The message named an empty index, which is a fact about the
+    # study's data. An index with a header and no rows is a legitimate state, and it gets
+    # the same answer a missing file already gets.
+    from blobcount import ablation
+    from blobcount.labeling import LabelingInputError
+
+    index = _write_index(project_scratch / "patches", [])
+    with pytest.raises(LabelingInputError, match="no rows") as refused:
+        ablation.ablate(index, load())
+    # Refused before the first cell was converted, so a bad configuration value is
+    # reported as the index rather than the other way round.
+    assert str(index) in str(refused.value)
+
+
+def test_ablate_raises_a_value_error_for_a_range_that_is_not_whole_numbers(
+    project_scratch, synthetic_patch
+):
+    # A **pin**, and the other half of the exit-code contract. The command line reports
+    # this refusal as `EXIT_REFUSED`; the library boundary keeps the `ValueError`, because
+    # it is a statement about the configuration and not about the index, and a
+    # `LabelingInputError` would make that type mean two things. It is not a defect either
+    # way: `_thresholds` was written to reject this value and it does.
+    from blobcount import ablation
+    from blobcount.labeling import LabelingInputError
+
+    index = _write_index(
+        project_scratch / "patches", [_row("A_0_0.png", "A")], synthetic_patch.array
+    )
+    with pytest.raises(ValueError, match="5.5") as escaped:
+        ablation.ablate(
+            index, load(overrides=["ablation.thresholds=[2, 5.5]"]), selected=2
+        )
+    assert not isinstance(escaped.value, LabelingInputError)
 
 
 def test_ablate_counts_a_patch_the_index_names_twice_once(project_scratch, synthetic_patch):
@@ -567,6 +799,9 @@ def test_cli_writes_the_json_the_png_and_the_per_slide_table(cli, capsys):
     assert printed.index("threshold  n_steatosis") < printed.index("slide_id")
     assert "2 patches" in printed
     assert "at threshold 3" in printed
+    # The per-slide spread is a column of the printed sweep table, and nothing else in
+    # this file would notice its absence. A **pin**: the header carries it today.
+    assert "spread" in printed
     # The deliverable itself, read back: one row per slide, the two integers behind the
     # ratio, and the scale the counts were made at beside it. Taken from everything after
     # the header, because the sweep table above has a row beginning "2" as well.
@@ -575,6 +810,64 @@ def test_cli_writes_the_json_the_png_and_the_per_slide_table(cli, capsys):
         ["2", "1", "1", "1.000"],
         ["3", "1", "1", "1.000"],
     ]
+
+
+def test_cli_writes_and_prints_the_range_coverage(cli, capsys):
+    # **Red before the fix**: the JSON carried `blob_count_summary` and `per_threshold`
+    # and nothing comparing them, and nothing on stdout did either. A reader of the two
+    # side by side concludes the sweep covered the distribution whatever it covers, and
+    # that is the misreading this task exists to prevent.
+    module, index, results = cli
+    assert module.main(["--index", str(index)]) == 0
+    written = json.loads(
+        (results / "label_analysis" / "threshold_ablation.json").read_text(encoding="utf-8")
+    )
+    assert written["threshold_range_coverage"] == {
+        "swept_min": 2,
+        "swept_max": 5,
+        "count_p50": 3.0,
+        "count_mean": 3.0,
+        "count_max": 3,
+        "brackets_distribution": True,
+    }
+    printed = capsys.readouterr().out
+    assert "swept range 2 to 5" in printed
+    # The word is the flag and not a phrase chosen per run, so it can be read by a person
+    # and matched by a test.
+    assert "the swept range brackets the distribution" in printed
+
+
+def test_cli_says_so_when_the_swept_range_does_not_reach_the_distribution(
+    cli, project_scratch, monkeypatch, capsys
+):
+    # **Red before the fix**, for the same reason as the pair above, and on the branch the
+    # controller's decision is about: a range that stops below the distribution is
+    # reported, and `ablation.thresholds` is not widened on the strength of a 60-patch
+    # sample. The fixture's two patches each count three blobs, so a range of `[2]` has a
+    # top of 2 against a maximum of 3 and does not reach the distribution.
+    module, index, results = cli
+    monkeypatch.setattr(
+        "blobcount.config.DEFAULT_CONFIG_PATH",
+        _cfg(
+            project_scratch,
+            "narrow.yaml",
+            results=results,
+            ablation={"thresholds": [2]},
+            labeling={"blob_threshold": 2},
+        ),
+    )
+    assert module.main(["--index", str(index)]) == 0
+    written = json.loads(
+        (results / "label_analysis" / "threshold_ablation.json").read_text(encoding="utf-8")
+    )
+    assert written["threshold_range_coverage"]["brackets_distribution"] is False
+    assert written["threshold_range_coverage"]["swept_max"] == 2
+    assert written["threshold_range_coverage"]["count_max"] == 3
+    printed = capsys.readouterr().out
+    assert "the swept range does not bracket the distribution" in printed
+    # The run still wrote everything a run writes: a narrow range is a finding about the
+    # configuration, not a reason to refuse.
+    assert (results / "label_analysis" / "threshold_ablation.png").is_file()
 
 
 def test_cli_selected_reaches_the_sweep(cli, capsys):
@@ -607,6 +900,14 @@ def test_cli_json_carries_the_two_rule_measurement(cli):
     # 2166 / 377 is 5.75 and a reader who divides the two totals above must not find a
     # different number in the file.
     assert comparison["total_blob_ratio"] == pytest.approx(2166 / 377)
+    # **A pin, strengthened**: the line above is green whether or not the constant carries
+    # it, and `comparison == RULE_COMPARISON` above compares the artifact to a copy of
+    # itself, so neither of them can see a ratio that disagrees with the two totals the
+    # same file carries. This one derives the ratio from the artifact's own numbers, so a
+    # `total_blob_ratio` that is not 2166 / 377 fails here whatever `RULE_COMPARISON` says.
+    assert comparison["total_blob_ratio"] == pytest.approx(
+        comparison["rule_in_use"]["total_blobs"] / comparison["superseded_rule"]["total_blobs"]
+    )
 
 
 def test_cli_json_round_trips_a_non_ascii_slide_id(
@@ -647,6 +948,139 @@ def test_cli_refuses_a_missing_index_with_the_refusal_code(cli, tmp_path, capsys
     assert "nope.csv" in err
     assert "Traceback" not in err
     assert not (results / "label_analysis").exists()
+
+
+def test_cli_refuses_an_empty_index_with_the_refusal_code(cli, tmp_path, capsys):
+    # **Red before the fix**: an index with a header and no rows reached `sweep`, raised a
+    # `ValueError`, and left `main` by exception — a traceback and a status of 1, which
+    # this CLI defines as a fact about this project's code rather than about the study.
+    module, _, results = cli
+    empty = _write_index(tmp_path / "empty", [])
+    assert module.main(["--index", str(empty)]) == module.EXIT_REFUSED
+    err = capsys.readouterr().err
+    assert "no rows" in err
+    assert "Traceback" not in err
+    assert not (results / "label_analysis").exists()
+
+
+def test_cli_refuses_a_configured_range_that_is_not_whole_numbers(
+    cli, project_scratch, monkeypatch, capsys
+):
+    # **Red before the fix**: `[2, 5.5]` passed the selection guard, because the guard
+    # compared against the configured list read raw, and the refusal came from `_thresholds`
+    # inside `ablate` as a `ValueError` that escaped `main` — a traceback and a status of
+    # 1. `_thresholds` was written to reject this value; a validator that validates and then
+    # reports by traceback looks like a check and is not one.
+    from blobcount import ablation
+
+    module, index, results = cli
+    monkeypatch.setattr(
+        "blobcount.config.DEFAULT_CONFIG_PATH",
+        _cfg(
+            project_scratch,
+            "half.yaml",
+            results=results,
+            ablation={"thresholds": [2, 5.5]},
+            labeling={"blob_threshold": 2},
+        ),
+    )
+
+    def _boom(path, size):
+        raise AssertionError("a patch was read before the configured range was refused")
+
+    monkeypatch.setattr(ablation, "load_patch", _boom)
+    assert module.main(["--index", str(index)]) == module.EXIT_REFUSED
+    err = capsys.readouterr().err
+    assert "5.5" in err and "whole number of blobs" in err
+    assert "Traceback" not in err
+    assert not (results / "label_analysis").exists()
+
+
+def test_cli_converts_the_configured_range_once_for_its_selection_guard(
+    cli, project_scratch, monkeypatch, capsys
+):
+    # **Red before the fix**, in the direction the guard's own message shows. `["3", 5]`
+    # was compared as a raw list, so `3 in ["3", 5]` was False and the guard answered
+    # `--selected 3 is not one of the ablation.thresholds this run sweeps (3, 5)` — a
+    # message naming a range that contains 3 while refusing 3. The point of a validator is
+    # one answer and this file had two; what is left is the validator's, and the question
+    # of whether a quoted number is a whole number of blobs is the validator's to answer.
+    module, index, results = cli
+    monkeypatch.setattr(
+        "blobcount.config.DEFAULT_CONFIG_PATH",
+        _cfg(
+            project_scratch,
+            "quoted.yaml",
+            results=results,
+            ablation={"thresholds": ["3", 5]},
+            labeling={"blob_threshold": 3},
+        ),
+    )
+    assert module.main(["--index", str(index)]) == module.EXIT_REFUSED
+    err = capsys.readouterr().err
+    # The validator's answer, not the guard's, and not a traceback.
+    assert "whole number of blobs" in err
+    assert "is not one of the ablation.thresholds" not in err
+    assert "Traceback" not in err
+    assert not (results / "label_analysis").exists()
+
+
+def test_cli_counts_the_slides_it_counted_patches_for(
+    cli, project_scratch, synthetic_patch, capsys
+):
+    # **Red before the fix**: `n_slides` counted every index row's slide, and this index
+    # names one `patch_id` under two `slide_id`s. `ablate` counts the patch once and skips
+    # the repeat, so slide 3 is in `per_slide_gray_threshold` — a gray threshold derived
+    # over a group nothing was counted for — and in no `per_slide_ratio` at all. Reporting
+    # it would say the run measured two specimens and the artifact beside it has ratios
+    # for one.
+    module, _, results = cli
+    index = _write_index(
+        project_scratch / "patches",
+        [_row("2_1016_0.png", "2", x=1016), _row("2_1016_0.png", "3")],
+        synthetic_patch.array,
+    )
+    assert module.main(["--index", str(index)]) == 0
+    written = json.loads(
+        (results / "label_analysis" / "threshold_ablation.json").read_text(encoding="utf-8")
+    )
+    assert written["n_patches"] == 1
+    assert written["n_slides"] == 1
+    assert list(written["per_threshold"]["3"]["per_slide_ratio"]) == ["2"]
+    assert "1 patches counted over 1 slides" in capsys.readouterr().out
+
+
+def test_cli_refuses_a_results_path_that_is_the_project_root(
+    cli, project_scratch, monkeypatch, capsys
+):
+    # **Red before the fix**: the guard tested `results_dir / "label_analysis"`, and a
+    # `paths.results: .` makes the results directory itself the project root while leaving
+    # the subdirectory below it. The run passed the guard and would have written
+    # `threshold_ablation.json` and `threshold_ablation.png` into the repository. The
+    # docstring claimed the project root is refused; the test now says which path.
+    from blobcount import ablation
+
+    module, index, _ = cli
+    monkeypatch.setattr(
+        "blobcount.config.DEFAULT_CONFIG_PATH",
+        _cfg(
+            project_scratch,
+            "root.yaml",
+            results=".",
+            ablation={"thresholds": [2, 3]},
+            labeling={"blob_threshold": 3},
+        ),
+    )
+
+    def _boom(path, size):
+        raise AssertionError("a patch was read before the output target was refused")
+
+    monkeypatch.setattr(ablation, "load_patch", _boom)
+    assert module.main(["--index", str(index)]) == module.EXIT_REFUSED
+    err = capsys.readouterr().err
+    assert str(PROJECT_ROOT) in err
+    assert "not strictly below the project root" in err
+    assert not (PROJECT_ROOT / "label_analysis").exists()
 
 
 def test_cli_refuses_a_selected_threshold_outside_the_sweep(cli, monkeypatch, capsys):
