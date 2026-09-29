@@ -126,7 +126,10 @@ twice.
 
 **A configured threshold that is not a whole number of blobs is refused** rather than
 rounded, because a sweep over 3.5 run as a sweep over 3 is a measurement of a threshold
-nobody configured. It is a `ValueError` out of `ablate` and not a
+nobody configured — and a threshold that is not finite is not a count of blobs either, a
+question `_thresholds` answers on its own rather than leaving to `int()`, which refuses
+a `NaN` and an `inf` by raising two different exceptions. It is a `ValueError` out of
+`ablate` and not a
 `LabelingInputError`: it is a statement about the configuration, not about the index the
 caller pointed at. **It is not a traceback either.** The standing ruling that a
 hand-edited `extraction.patch_size` reaches the interpreter unvalidated does not transfer
@@ -168,6 +171,7 @@ from __future__ import annotations
 
 import csv
 import logging
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -675,6 +679,34 @@ def _thresholds(cfg: Config) -> tuple[int, ...]:
     `LabelingInputError` this module reuses enumerates six shapes that are all about the
     file. A seventh about a configuration value would make that type mean two things.
 
+    **A non-finite float is refused by the same predicate, and not by the standard
+    library's refusal reaching through it.** `isinstance(float("inf"), float)` is `True`,
+    so a `.inf` passed the type test and arrived at `int()`. The two non-finite values do
+    not fail the same way, and the difference is recorded here rather than relied upon:
+    `int(float("nan"))` raises `ValueError` and `int(float("inf"))` raises
+    `OverflowError`. So NaN was refused and infinity was not, each for a reason that has
+    nothing to do with the rule above — NaN's refusal carried CPython's
+    `cannot convert float NaN to integer`, which names no rule, and infinity escaped to
+    `bin/ablate_threshold.py`, whose catch is `(TypeError, ValueError)`, and left a
+    traceback on the status that command line documents as a defect in this project's own
+    code, from a hand-edited YAML value. **A value that is not a finite whole number is
+    not a whole number, and that is a statement this predicate can make on its own, so it
+    makes it** — which is also why fixing it in the command line's catch was not enough:
+    a library caller of this function got the traceback either way.
+
+    **`OverflowError` is deliberately *not* added to the command line's catch tuple.** With
+    the finiteness test above, this function cannot raise it from this call: `int()` is
+    reached only for a value the predicate has already accepted as a finite number. An
+    `OverflowError` out of the one call that command line wraps would be a defect in this
+    validator rather than a mistyped `configs/default.yaml`, and that file documents a
+    defect in its own code as a traceback on purpose, because a traceback names a file and
+    a line and a refusal names neither. Catching it would dress a validator bug as a
+    refusal on stderr, which is the "looks validated and is not" state this function
+    exists to end, and it would contradict the sentence in that file's docstring that its
+    catch is wide enough for a hand-edit and too narrow for a defect. The catch holds
+    mistyped configuration values, and the finiteness test is what makes that true of every
+    one of them.
+
     **The caller reports it, and it does not reach the interpreter.** The standing limit
     `bin/extract_patches.py` records is that `load` checks that a key is declared and
     nothing about its value, so a conversion this project does not wrap is reported as a
@@ -686,29 +718,39 @@ def _thresholds(cfg: Config) -> tuple[int, ...]:
     call and not around `ablate`, so it is too narrow to hold a defect in the counting.
     The `TypeError` it also catches comes from the key itself not being a sequence —
     `load` accepts that, having validated that the key is declared and nothing about its
-    value — and not from an entry, because every entry is type-checked here before it is
-    converted.
+    value — and not from an entry, because every entry is checked here, for its type and
+    then for its finiteness, before it is converted.
     """
     out: list[int] = []
     for value in cfg.get("ablation.thresholds"):
-        # One type test covers the quoted digit, the boolean and the `None`, and it runs
-        # before the `int()` rather than after it, because `int(True) == 1` and
-        # `1 != True` is False: a comparison alone would sweep a `true` as the threshold 1
-        # in silence. `whole` is `None` for a value that is not a number at all, so the
-        # single raise below covers the type refusal and the fraction together, and
+        # One predicate decides what a whole number of blobs is, and it runs to completion
+        # before the `int()` rather than after it, so the conversion below is only ever
+        # handed a value that already has an answer and cannot raise on its own.
+        #
+        # The type test covers the quoted digit, the boolean and the `None`. It cannot be
+        # a comparison alone, because `int(True) == 1` and `1 != True` is False: a
+        # comparison would sweep a `true` as the threshold 1 in silence.
+        is_number = isinstance(value, (int, float)) and not isinstance(value, bool)
+        # The finiteness test, and it is scoped to floats on purpose in both directions.
+        # `math.isfinite` converts its argument to a float, so `math.isfinite(10 ** 400)`
+        # raises an `OverflowError` of its own and testing every entry would trade the bug
+        # this predicate was written for a second one a layer below it; and there is no
+        # such thing as an infinite `int`, so not asking costs nothing. `3.0` stays on the
+        # accepted side because the test is `isfinite` and not `is_integer` — a range a
+        # user computed arrives as floats, and refusing those would be the same mistake as
+        # refusing a quoted digit.
+        is_finite = not isinstance(value, float) or math.isfinite(value)
+        # `whole` is `None` for anything the two tests above refused, so the single raise
+        # below covers the type, the non-finite value and the fraction together, and
         # `whole != value` is the fraction test alone.
-        whole = (
-            int(value)
-            if isinstance(value, (int, float)) and not isinstance(value, bool)
-            else None
-        )
+        whole = int(value) if is_number and is_finite else None
         if whole is None or whole != value:
             raise ValueError(
                 f"ablation.thresholds holds {value!r}, which is not a whole number of "
-                f"blobs: every entry has to be a plain number, 3 and not '3' and not "
-                f"true, because a sweep is cut at the count a threshold states and a "
-                f"quoted digit or a rounded fraction would measure a threshold nobody "
-                f"configured"
+                f"blobs: every entry has to be a plain number that is finite, 3 and not "
+                f"'3' and not true and not .inf or .nan, because a sweep is cut at the "
+                f"count a threshold states and a quoted digit, a rounded fraction or a "
+                f"non-finite one would measure a threshold nobody configured"
             )
         out.append(whole)
     return tuple(out)

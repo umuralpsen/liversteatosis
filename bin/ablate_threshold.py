@@ -54,12 +54,28 @@ dataset, never about this program:
   the check and the sweep cannot come to different answers about what is being swept.
 - **The configured range itself**, as `blobcount.ablation._thresholds`'s own refusal: a
   `ValueError` or `TypeError` out of that one call, caught here. A quoted digit, a
-  fraction and a YAML `true` are all refused as `ValueError`s and the message names the
-  rule — a plain number, `3`, and not `'3'` and not `true` — so a user hand-editing
-  `configs/default.yaml` reads a decision and not an accident; a key that is not a
-  sequence at all is the `TypeError`. All four are the same hand-edit of the same key, and
-  the catch is around that one call and not around `ablate`, so it is wide enough to hold
-  a mistyped configuration value and too narrow to hold a defect in the counting.
+  fraction, a YAML `true` and a non-finite float are all refused as `ValueError`s and the
+  message names the rule — a plain number that is finite, `3`, and not `'3'`, not `true`
+  and not `.inf` or `.nan` — so a user hand-editing `configs/default.yaml` reads a
+  decision and not an accident; a key that is not a sequence at all is the `TypeError`.
+  All five are the same hand-edit of the same key, and the catch is around that one call
+  and not around `ablate`, so it is wide enough to hold a mistyped configuration value
+  and too narrow to hold a defect in the counting. **`OverflowError` is not in the tuple
+  and adding it would be a mistake rather than caution.** `isinstance(float("inf"),
+  float)` is `True`, so a `.inf` reached the validator's `int()` and raised
+  `OverflowError`, which this tuple did not hold: a hand-edited `.inf` left a traceback
+  and exited 1, the status the `EXIT_CONTRADICTORY` paragraph below reserves for a defect
+  in this project's own code. The fix is in the validator, where a non-finite value is
+  now refused by the same predicate that refuses a quoted digit, and the predicate is why
+  this tuple is still two types: `int()` is reached only for a value already accepted as a
+  finite number, so an
+  `OverflowError` out of this call would be a bug in the validator, and this file reports
+  a bug in this file with a traceback on purpose. Catching it here would print a
+  validator defect as a refusal on stderr, which is a defect in this project wearing the
+  one costume that reads as a decision. The same reasoning retired the NaN arm's accident:
+  `int(float("nan"))` raised `ValueError`, so NaN reached this catch by luck rather than
+  by decision, and the message it carried was CPython's `cannot convert float NaN to
+  integer`, which names no rule at all.
 - **The index and the patches it names**, as a `LabelingInputError`: the six shapes
   `blobcount.labeling.LabelingInputError` enumerates, an index carrying no rows, and
   those raised by `ablate` around the two reads that can fail that way, around the
@@ -402,15 +418,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         swept = list(_thresholds(cfg))
     except (TypeError, ValueError) as error:
         # `ValueError` for a configured entry that is not a plain whole number of blobs —
-        # a fraction, a quoted digit, a `true` — and `TypeError` from the key itself not
-        # being a sequence, which `load` accepts because it validates that a key is
-        # declared and nothing about its value. Both are the same hand-edit of the same
-        # key, and the catch is around this one call rather than around `ablate`, so it is
-        # too narrow to hold a defect in the counting. This refusal is a statement about
-        # the configuration, which is why it is not the `ConfigError` arm above: `load`
-        # accepted the file, and `ablation.thresholds` is a key this project wrote a
-        # validator for. The message names the rule the entry broke, so a user hand-editing
-        # the YAML sees that a quoted digit is refused by choice.
+        # a fraction, a quoted digit, a `true`, a `.inf` or a `.nan` — and `TypeError` from
+        # the key itself not being a sequence, which `load` accepts because it validates
+        # that a key is declared and nothing about its value. Both are the same hand-edit
+        # of the same key, and the catch is around this one call rather than around
+        # `ablate`, so it is too narrow to hold a defect in the counting. This refusal is
+        # a statement about the configuration, which is why it is not the `ConfigError` arm
+        # above: `load` accepted the file, and `ablation.thresholds` is a key this project
+        # wrote a validator for. The message names the rule the entry broke, so a user
+        # hand-editing the YAML sees that a quoted digit is refused by choice.
+        #
+        # `OverflowError` is not in this tuple on purpose, and the module docstring gives
+        # the argument. The short form: `_thresholds` refuses a non-finite value before it
+        # converts, so nothing a hand-edit can write reaches `int()` and raises one, and an
+        # `OverflowError` arriving here would be a bug in that validator rather than a
+        # mistyped YAML value — which is a defect in this project, and this file's ruling
+        # is that a defect in this project prints a traceback.
         print(f"ablate_threshold: {error}", file=sys.stderr)
         return EXIT_REFUSED
 

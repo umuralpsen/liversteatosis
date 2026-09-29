@@ -567,13 +567,25 @@ def _criterion_holds(coverage):
     """Return what `coverage["criterion"]` says, evaluated over the block's own numbers.
 
     The criterion the artifact carries is *evaluated* here rather than restated in the
-    test. A test that re-typed the comparison would be a second definition of the
-    predicate, and a second definition is what `brackets_distribution` was in round 1:
-    the comparison lived in a docstring, where a reader of the JSON could not check it
-    and a test that did would only have checked itself. `eval` runs over a namespace
-    holding this block's own scalars and no builtins, so the expression can only
-    compare what the artifact reports, and the string and the boolean either agree or
-    this fails.
+    test. A test that re-typed it would be a second definition of the predicate, and a
+    second definition is what `brackets_distribution` was in round 1: the comparison lived
+    in a docstring, where a reader of the JSON could not check it and a test that did would
+    only have checked itself. `eval` runs over a namespace holding this block's own scalars
+    and no builtins, so the expression can only compare what the artifact reports, and the
+    string and the boolean either agree or this fails.
+
+    **What this checks is the artifact against itself, and it is not the only check on the
+    block — the one that is not this one is the stronger.** The string and the boolean come
+    from the same run over the same numbers, so they can agree while both are wrong: a run
+    that held the low end against `count_p50` and wrote a criterion string naming
+    `count_p50` is perfectly self-consistent and still hands a reader of the JSON the wrong
+    answer, and so does one whose `count_min` key holds the median. Only an input the
+    artifact did not carry can catch either, and the caller of this function supplies one —
+    it re-types the comparison over the raw per-patch counts it stubbed into `count_blobs`,
+    which the block does not report and cannot be derived from. So the rule against
+    re-typing is a rule about the *criterion string*, which this function exists to keep
+    honest, and not about the *predicate*, where a second independent reading is the only
+    thing that checks anything.
     """
     assert " iff " in coverage["criterion"], (
         f"the criterion has to name its comparison in the form this test evaluates, and "
@@ -709,6 +721,18 @@ def test_the_range_coverage_criterion_string_and_its_boolean_agree(
         # And the boolean is a statement about the counts rather than about the range
         # alone: it is true exactly when every count lies inside the swept range, which is
         # the definition a reader of the artifact would apply to it.
+        #
+        # **Re-typing here is the point, where `_criterion_holds` treats it as the defect
+        # it was in round 1.** That function checks the criterion *string* against the
+        # boolean, over numbers the block reports, so what it catches is a string that
+        # drifted away from the code. This checks the *boolean* against `counts` — the
+        # values `_stub_counts` handed to `count_blobs`, which the block does not carry and
+        # which no field in it reproduces — so what it catches is a flag computed from the
+        # wrong statistic, or a `count_min` that is not the minimum. Re-typing an
+        # expression over the numbers it came from would only be a second copy of it;
+        # re-typing it over numbers the artifact never carried is a second, independent
+        # reading of the same claim, and the two checks fail on different bugs, which is
+        # the reason both are here rather than one.
         assert coverage["brackets_distribution"] is all(
             coverage["swept_min"] <= value <= coverage["swept_max"] for value in counts
         ), f"counts {counts} swept at {thresholds} are not all inside the swept range"
@@ -878,6 +902,59 @@ def test_thresholds_refuses_a_yaml_boolean():
     with pytest.raises(ValueError) as refused:
         ablation._thresholds(load(overrides=["ablation.thresholds=[true]"]))
     assert "True" in str(refused.value)
+
+
+@pytest.mark.parametrize(
+    ("literal", "as_repr"),
+    [
+        (".inf", "inf"),
+        ("-.inf", "-inf"),
+        (".nan", "nan"),
+    ],
+)
+def test_thresholds_refuses_a_non_finite_float_and_says_that_is_the_rule(literal, as_repr):
+    # **Red before the fix**, on the two `inf` rows. `isinstance(inf, float)` is True, so
+    # the type test admitted all three of these, and `int()` then refused them from
+    # inside the standard library instead of from this predicate. The two refuse
+    # differently and neither difference is a decision: `int(float("nan"))` raises
+    # `ValueError` and `int(float("inf"))` raises `OverflowError`, and only the first is
+    # in the `(TypeError, ValueError)` tuple `bin/ablate_threshold.py:403` catches, so
+    # `ablation.thresholds: [.inf]` left a traceback and exited 1 — the status that CLI
+    # documents as a defect in this project's own code, produced by a hand-edited YAML
+    # value. The `.nan` row was already refused, but by that accident: what reached the
+    # user was CPython's `cannot convert float NaN to integer`, which names no rule, and
+    # a refusal that names no rule is a crash the user has to interpret. All three are
+    # refused here by one predicate, so what counts as a whole number of blobs does not
+    # depend on which exception a library happens to raise. The three are one parametrised
+    # test on purpose: `literal` is the YAML a hand-edit produces and `as_repr` is what
+    # this module prints for the same number, so a reader can match the two, and pinning
+    # the two families together is what stops the second being discovered later.
+    from blobcount import ablation
+
+    with pytest.raises(ValueError) as refused:
+        ablation._thresholds(load(overrides=[f"ablation.thresholds=[3, {literal}]"]))
+    message = str(refused.value)
+    # The offending entry, as this module names it, so the reader knows which one to fix.
+    assert as_repr in message
+    # And the rule, in the same words as the quoted digit and the boolean, because a
+    # `.inf` is as hand-writable as a `'3'` and gets as little reason to guess at it.
+    assert "whole number of blobs" in message
+    assert "a plain number" in message and "not '3'" in message
+    assert ".inf" in message and ".nan" in message
+
+
+def test_thresholds_still_accepts_a_whole_number_written_as_a_float():
+    # The other side of the same predicate, and the reason the finiteness test is not a
+    # refusal of every float. `3.0` is a whole number of blobs and YAML writes it for a
+    # user who computed the range; refusing it would be the same class of mistake as
+    # refusing a quoted digit, and `isfinite` rather than `is_integer` is what keeps `3.0`
+    # on the accepted side. This one is green before the fix and stays green after it,
+    # which is the point: it is here to catch a fix that went one predicate too far.
+    from blobcount import ablation
+
+    assert ablation._thresholds(
+        load(overrides=["ablation.thresholds=[3.0, 5.0]"])
+    ) == (3, 5)
 
 
 def test_ablate_counts_a_patch_the_index_names_twice_once(project_scratch, synthetic_patch):
@@ -1300,6 +1377,42 @@ def test_cli_refuses_a_selected_threshold_outside_the_sweep(cli, monkeypatch, ca
     assert module.main(["--index", str(index), "--selected", "9"]) == module.EXIT_REFUSED
     err = capsys.readouterr().err
     assert "9" in err and "2, 3, 5" in err
+    assert not (results / "label_analysis").exists()
+
+
+def test_cli_refuses_a_non_finite_configured_threshold(cli, monkeypatch, capsys):
+    # **Red before the fix**: `_thresholds` raised `OverflowError` on a `.inf`, and that is
+    # not in the tuple at `bin/ablate_threshold.py:403`, so the run left a traceback and
+    # the interpreter exited 1 — this CLI's documented code for a defect in its own code,
+    # produced by a hand-edited YAML value. The validator is where that is fixed; this
+    # test is here so the *exit code* is pinned as well as the exception type, because a
+    # CLI that raises the right exception and returns the wrong status is still a
+    # traceback to whoever ran it. The `.nan` half of the pair is covered by the
+    # validator test; this one is about the code, and one config is enough to reach it.
+    from blobcount import ablation
+
+    module, index, results = cli
+    monkeypatch.setattr(
+        "blobcount.config.DEFAULT_CONFIG_PATH",
+        _cfg(
+            results.parent,
+            "non_finite.yaml",
+            results=results,
+            ablation={"thresholds": [2, float("inf"), 5]},
+            labeling={"blob_threshold": 2},
+        ),
+    )
+
+    def _boom(path, size):
+        raise AssertionError("a patch was read before the configured range was refused")
+
+    monkeypatch.setattr(ablation, "load_patch", _boom)
+    assert module.main(["--index", str(index)]) == module.EXIT_REFUSED
+    err = capsys.readouterr().err
+    # The project's rule, not the standard library's sentence about infinity: this arm's
+    # whole argument is that a user hand-editing `configs/default.yaml` reads a decision.
+    assert "whole number of blobs" in err
+    assert "inf" in err
     assert not (results / "label_analysis").exists()
 
 
