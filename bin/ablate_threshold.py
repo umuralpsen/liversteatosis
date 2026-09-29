@@ -23,7 +23,7 @@ then finds no record to report a threshold on has wasted the run.
 `blobcount.ablation.summarise` refuses the same selection, and that refusal is the
 invariant behind this check rather than a second rule.
 
-**Seven refusals, in five groups.** A run that completed is `EXIT_OK = 0`. A refusal is
+**Eight refusals, in six groups.** A run that completed is `EXIT_OK = 0`. A refusal is
 `EXIT_REFUSED = 2`, and a refusal is always an answer about the configuration or the
 dataset, never about this program:
 
@@ -78,12 +78,30 @@ dataset, never about this program:
   `int(float("nan"))` raised `ValueError`, so NaN reached this catch by luck rather than
   by decision, and the message it carried was CPython's `cannot convert float NaN to
   integer`, which names no rule at all.
+- **The figure**, as a `PlotError` out of the `plot` call, caught here and nowhere else.
+  A swept threshold too large for a `float` — `ablation.thresholds: [3, 10 ** 320]` — is a
+  whole number of blobs, so `_thresholds` accepts it by design, `sweep` compares counts
+  against it exactly and is total over it, and the JSON this run writes is a real record of
+  that row. It is the *figure* that cannot hold the value: every threshold on a matplotlib
+  axis is a float coordinate, and the transform raises `OverflowError: int too large to
+  convert to float` on one that has no float representation. **The validator does not
+  refuse it, and the reason is the point.** Counting and drawing ask different questions —
+  "is this a number of blobs?" and "is this a coordinate?" — and the first one has an exact
+  answer at any magnitude while the second does not, so the limit is the renderer's and
+  `plot` holds it. A validator that refused a count to accommodate a plotting library would
+  be deciding a question that is not its own, on behalf of a caller that asked for a sweep
+  and may never draw anything. The catch is `PlotError` and not `ValueError` so that a
+  `ValueError` out of matplotlib itself still reaches the interpreter as a traceback: this
+  arm is wide enough for a hand-edited `ablation.thresholds` and no wider.
+  **The JSON is already on disk when this fires, and it stays.** The run finished the
+  measurement and stopped at the drawing, so the state is a number a reader can use, no
+  figure, and a message on stderr naming the threshold that could not be placed.
 - **The index and the patches it names**, as a `LabelingInputError`: the six shapes
   `blobcount.labeling.LabelingInputError` enumerates, an index carrying no rows, and
   those raised by `ablate` around the two reads that can fail that way, around the
   numeric-cell conversion `labeling._row_numbers` wraps, and around nothing else.
 
-All seven are printed on stderr behind this program's name, and none of them is a
+All eight are printed on stderr behind this program's name, and none of them is a
 traceback.
 
 **There is no `EXIT_CONTRADICTORY` here, and that is a decision rather than an
@@ -96,29 +114,38 @@ of 1 means the interpreter reported a traceback, which is a fact about this proj
 code rather than about the study. `main`'s *return value* is the contract, and an
 exception never returns one.
 
-**A bad argument is not one of the seven, and not one of this program's outcomes at
+**A bad argument is not one of the eight, and not one of this program's outcomes at
 all.** `argparse` refuses an option this program does not declare, one given no value, and
 a `--selected` that is not an integer, by printing its own message and calling
 `sys.exit(2)` inside `parse_args`, before the first statement of `main` runs. Nothing
 else reaches it: `--index` is typed `Path` and no string fails that conversion. The
 parser's status is the same number as `EXIT_REFUSED` and no code can tell the two
 apart, so the separation is on stderr, where the parser names the argument and its
-usage and none of the seven names either.
+usage and none of the eight names either.
 
-**A defect inside `ablate` is never a refusal.** A `ValueError` from the counting, from
+**A defect inside `ablate` or inside `plot` is never a refusal.** A `ValueError` from the
+counting, from
 `np.percentile` on a `blobs.gray_percentile` outside [0, 100] that this project
-range-checks nowhere, from the arithmetic of `sweep` and `summarise`, or from a write is
-not caught here and leaves the interpreter to print a traceback, which is the honest
+range-checks nowhere, from the arithmetic of `sweep` and `summarise`, from a write, or from
+anything matplotlib raises while it draws is not caught here and leaves the interpreter to
+print a traceback, which is the honest
 report of a defect in this project. The status it exits with is 1, which the paragraph
 above says is a traceback and not a study-level failure, and a caller that has to tell
 the two apart reads stderr: a refusal names what it refused, and a traceback names a file
-and a line. **A mistyped configured value is a limit for a value this project chose not
+and a line. The `plot` arm is the one place where a project-raised type is what keeps that
+true: `PlotError` is raised by this project and by nothing in a figure library, so catching
+it says "this value cannot be drawn" and says nothing else. **A mistyped configured value
+is a limit for a value this project chose not
 to validate, and not for one that chose to be validated.** `extraction.patch_size` is
 read and used, never checked, so a hand-edit of it reaches the interpreter as a traceback
 and that is the recorded limit. `ablation.thresholds` is read by a function written to
 reject a value that is not a whole number of blobs, and a validator that validates and
 then reports by traceback looks like a check without being one, so its refusal is caught
-above and reported as a refusal.
+above and reported as a refusal. **The same ruling reaches the drawing path one layer on,
+and stops at the same line:** a threshold the validator is right to accept and a renderer
+is not able to place is a fact about the run's configuration, so it is caught and reported
+as a refusal — while a threshold the validator would have accepted and that a *defect* made
+impossible to place is still a traceback.
 
 **A summary line, the range coverage, then two tables.** The count distribution comes
 first, because the ratios are ratios of it and a reader who has seen a pooled ratio of 0.9
@@ -155,6 +182,7 @@ from pathlib import Path
 from blobcount.ablation import (
     RULE_COMPARISON,
     AblationStats,
+    PlotError,
     _thresholds,
     ablate,
     plot,
@@ -484,7 +512,37 @@ def main(argv: Sequence[str] | None = None) -> int:
         json.dumps(_document(stats), indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
-    plot(stats.per_threshold, target / _FIGURE_NAME)
+    try:
+        plot(stats.per_threshold, target / _FIGURE_NAME)
+    except PlotError as error:
+        # **The arm is around this one call, and it holds this one type.** A swept
+        # threshold too large for a `float` is a whole number of blobs, so it was counted
+        # and swept exactly and the JSON above is a real record of it; it is the *figure*
+        # that cannot hold the value, because every threshold on a matplotlib axis is a
+        # float coordinate. Before this arm existed, `float(10 ** 320)` raised
+        # `OverflowError: int too large to convert to float` out of `Axes.add_line` ->
+        # `_update_line_limits`, uncaught, out of `main`, on the status the paragraph below
+        # reserves for a defect in this project's own code — from a caller who had edited
+        # one line of `configs/default.yaml`. That is a caller-reachable traceback in a
+        # shipped entry point, which is what rounds 3 to 6 of Task 6 existed to eliminate,
+        # and it did not ride to the gate.
+        #
+        # `PlotError` and not `ValueError` is what makes the arm narrow enough. `plot`
+        # raises `ValueError` for two other reasons and those are deliberately not caught
+        # here, and neither is a `ValueError` raised anywhere inside matplotlib: a real
+        # defect in the drawing has to keep reaching the interpreter as a traceback, because
+        # the paragraph below is explicit that a defect in this project is reported with a
+        # file and a line and not as a decision about the caller's YAML. The same reasoning
+        # that keeps `OverflowError` out of the tuple around `_thresholds` above, read from
+        # the other side.
+        #
+        # **The JSON stays and the figure does not**, because the run finished the
+        # measurement and stopped at the drawing. That is the state a refusal leaves here: a
+        # number a reader can use, no figure, and a message on stderr naming the threshold
+        # that could not be placed. Nothing in this file removes an artifact it did not
+        # decide to write, and the directory was created by this run.
+        print(f"ablate_threshold: {error}", file=sys.stderr)
+        return EXIT_REFUSED
 
     summary = stats.count_summary()
     print(

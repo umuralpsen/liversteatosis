@@ -145,6 +145,20 @@ of the same configuration and cannot come to a different one. The command line c
 selection it was given for the same reason, against the same converted range, and reports
 it as a refusal before it reads a patch.
 
+**The one limit this validator does not hold is the renderer's, and `plot` holds it as a
+`PlotError`.** A threshold too large for a `float` is refused by neither the type test nor
+the finiteness test nor the whole-number test, and that is not an oversight left open: it
+is a whole number of blobs, and the count comparison behind the sweep is exact at any
+magnitude, so the sweep is total over it. What a value that size cannot be is a *position
+on the figure's x axis*, and matplotlib's transform converts every data coordinate to a
+float and raises `OverflowError` on one that has no float representation. So the value is
+accepted here, the sweep row is written to the JSON, and `plot` — the only function that
+puts a threshold on an axis — refuses the figure with a message naming the rule, which
+`bin/ablate_threshold.py` reports as `EXIT_REFUSED`. The two are separate questions, "is
+this a number of blobs?" and "is this a coordinate?", and one predicate cannot answer both
+without either refusing a count the arithmetic handles or accepting a coordinate the
+renderer cannot.
+
 Declared interface, in `__all__` order:
 
     AblationStats
@@ -156,6 +170,7 @@ Declared interface, in `__all__` order:
         per_slide_gray_threshold: dict[str, float]
         per_threshold: dict[int, dict]
         selected: int
+    PlotError: type[Exception]
     RULE_COMPARISON: dict[str, Any]
     ablate(index_path: Path, cfg: Config, selected: int | None = None) -> AblationStats
     plot(summarised: Mapping[int, Mapping[str, Any]], out_path: Path) -> None
@@ -194,6 +209,7 @@ from blobcount.labeling import (
 
 __all__ = [
     "AblationStats",
+    "PlotError",
     "RULE_COMPARISON",
     "ablate",
     "plot",
@@ -262,6 +278,33 @@ RULE_COMPARISON: dict[str, Any] = {
     },
     "total_blob_ratio": 2166 / 377,
 }
+
+
+class PlotError(Exception):
+    """A value `plot` cannot draw, raised with the rule it broke.
+
+    **A type of this project's own, and not a `ValueError` and not a
+    `LabelingInputError`.** `plot` raises `ValueError` for its two other refusals — an
+    empty sweep, and a summary that does not mark exactly one selected threshold — and
+    both of those are mistakes in the *mapping it was handed*, about which a caller can be
+    told. A value too large for the figure's x axis is a different thing: it is a whole
+    number of blobs that `sweep` handled exactly, so nothing about the record is wrong and
+    the run's measurement stands. It is refused anyway, on the way to the renderer.
+
+    **Why a new type and not `ValueError`**, which is the decision the whole rest of this
+    project turns on: `bin/ablate_threshold.py` catches a refusal around the `plot` call,
+    and a `ValueError` raised anywhere inside matplotlib would arrive at that arm
+    indistinguishable from one raised here. A project-raised type makes the arm as narrow
+    as the defect — this function raises it, a figure library does not — so a genuine
+    `ValueError` out of a `subplots` call still reaches the interpreter as a traceback,
+    which is the status that command line documents for a defect in its own code. The same
+    argument that keeps `OverflowError` out of the catch around `_thresholds`, read from
+    the other side.
+
+    **Not a `LabelingInputError` either**, for the reason this module reuses that type at
+    all: it means the index or the patch array a caller pointed at, six shapes plus the
+    empty one, and a threshold no renderer can place is a statement about neither.
+    """
 
 
 @dataclass(frozen=True)
@@ -552,6 +595,44 @@ def summarise(
     return out
 
 
+def _refuse_a_threshold_the_axis_cannot_hold(thresholds: Sequence[int]) -> None:
+    """Refuse a swept threshold too large to be a position on the figure's x axis.
+
+    **The predicate is `float()` itself and not a written-down limit.** matplotlib
+    converts every data coordinate to a float in `Axes.add_line` ->
+    `_update_line_limits`, and `float(10 ** 320)` raises `OverflowError: int too large to
+    convert to float` there. Asking the same question in the same way is what keeps the
+    boundary here and the boundary in the renderer from drifting apart: a comparison
+    against `sys.float_info.max` would be a second definition of a number this project
+    would then have to keep true, and a run whose counts sit a factor of two below the
+    limit would draw, and then stop drawing, with nothing in the code having changed.
+
+    **It runs before the first `plt.subplots` and before the `selected` check in `plot`,**
+    so a refusal costs no open figure and no half-written file, and the harder failure is
+    reported first: the size of a coordinate is a property of the mapping's keys, and the
+    marking is a property of its records.
+
+    **`OverflowError` is caught and re-raised, not propagated,** for the reason `PlotError`
+    gives: the escape this closes was a caller-reachable traceback out of a shipped entry
+    point, and the exception the library raised names no rule, no value and no remedy. The
+    original is kept as the `__cause__` so the refusal and the traceback agree about where
+    the boundary is.
+    """
+    for threshold in thresholds:
+        try:
+            float(threshold)
+        except OverflowError as error:
+            raise PlotError(
+                f"the swept threshold {threshold} is too large to be a position on this "
+                f"figure's threshold axis, so it cannot be drawn: every threshold on a "
+                f"matplotlib axis is a float coordinate and this one has no float "
+                f"representation at all. It is still a whole number of blobs, and the "
+                f"sweep over it was exact — the row is in the JSON, with every patch "
+                f"normal at that threshold — so this is the drawing's limit and not the "
+                f"counting's. Draw a sweep whose thresholds fit a float"
+            ) from error
+
+
 def plot(summarised: Mapping[int, Mapping[str, Any]], out_path: Path) -> None:
     """Write the two-panel ablation figure to `out_path` and close it.
 
@@ -573,6 +654,37 @@ def plot(summarised: Mapping[int, Mapping[str, Any]], out_path: Path) -> None:
     two callers disagree about, and drawing the first of them would pick a winner
     silently, so it is refused too.
 
+    **A threshold too large for a `float` is refused here, and not in `_thresholds`, and
+    the two are separate questions.** Every swept threshold becomes a coordinate on the
+    left panel's x axis, and matplotlib converts a data coordinate to a float in
+    `Axes.add_line` -> `_update_line_limits`, where `float(10 ** 320)` raises
+    `OverflowError: int too large to convert to float`. That is CPython's sentence, out of
+    a library, naming no rule — and it used to leave here uncaught, through
+    `bin/ablate_threshold.py`, out of a shipped entry point, on a status that file
+    reserves for a defect in its own code and on a value a caller reached by editing one
+    line of `configs/default.yaml`. So it is refused, as a `PlotError`, from the only
+    place that can see the question.
+
+    **The limit belongs to the renderer's transform and not to the counting, which is why
+    it is not this module's validator refusing it.** A threshold is a cut point on a count
+    of blobs, and `10 ** 320` is a whole number of blobs however large it is: Python
+    compares two integers exactly at any magnitude, `sweep` only ever asks
+    `count >= threshold`, and the run is total over the value — every patch is `normal` at
+    that row, the row's ratio is 0.0, and the row is a row. **Counting, dividing and
+    writing a record is not degraded by a value a figure cannot place**, so a predicate
+    upstream that refused it would trade a working measurement for a missing one, and
+    would answer "can this be drawn?" inside the one function whose question is "is this a
+    number of blobs?" — for a caller that asked for a sweep and may never draw anything.
+    `tests/test_ablation.py` pins both halves: that `_thresholds` accepts the value and
+    that `sweep` is total over it, and that this function refuses it with a message naming
+    the rule.
+
+    **The ratios are not part of the rule.** `summarise` builds every one of them with
+    `float()` and each is a quotient of two counts, so the only numbers on this figure that
+    are not already floats are the thresholds — and those are what the rule is about. The
+    predicate is the `float()` conversion itself rather than a written-down limit, so the
+    boundary is the one the renderer uses; see `_refuse_a_threshold_the_axis_cannot_hold`.
+
     `matplotlib.use("Agg")` is called before `pyplot` is imported, and `pyplot` is
     imported inside the function: a run writes a file and never shows a window, and a
     module-scope import of a native wheel turns an absent one into a collection error
@@ -587,6 +699,20 @@ def plot(summarised: Mapping[int, Mapping[str, Any]], out_path: Path) -> None:
     of the same measurement is not something to refuse. Nothing else is written, and
     the guard on what this project may write into is the command line's, not this
     function's.
+
+    **The tests that hold this contract**, so a reader does not have to take the
+    paragraphs above on trust. Three are about this function:
+    `test_thresholds_accepts_a_count_too_large_to_be_a_float` pins the other half of the
+    split — the validator accepts the value and `sweep` is total over it — and is green,
+    deliberately, after this refusal was added;
+    `test_plot_refuses_a_threshold_too_large_to_be_a_float` pins the refusal, the
+    `OverflowError` it re-raises as its `__cause__`, and that no file was written; and
+    `test_plot_still_draws_a_threshold_that_is_large_but_is_a_float` pins the other side
+    of the boundary, so a predicate that refused "a big number" instead of "a number with
+    no float representation" would fail on it. Two more carry the contract to the command
+    line: `test_cli_refuses_a_threshold_too_large_to_be_a_float` for the status and the
+    artifact left behind, and `test_cli_does_not_swallow_a_defect_from_inside_plot` for the
+    arm being narrow enough that a `ValueError` out of matplotlib is still a traceback.
     """
     import matplotlib
 
@@ -596,6 +722,7 @@ def plot(summarised: Mapping[int, Mapping[str, Any]], out_path: Path) -> None:
     thresholds = sorted(summarised)
     if not thresholds:
         raise ValueError("there is no threshold to plot, so the sweep is empty")
+    _refuse_a_threshold_the_axis_cannot_hold(thresholds)
     marked = [threshold for threshold in thresholds if summarised[threshold]["selected"]]
     if len(marked) != 1:
         raise ValueError(
@@ -751,16 +878,18 @@ def _thresholds(cfg: Config) -> tuple[int, ...]:
     mistyped configuration values, and the finiteness test is what makes that true of
     every one of them.
 
-    **The one limit that scope leaves, stated here rather than relied upon.** A threshold
-    too large for a `float()` is *accepted*, which is the same reasoning read from the
-    other side: it is a whole number of blobs, Python compares two integers exactly at
-    any size, and `sweep` only asks `count >= threshold`, so the sweep is total over it
-    and every patch is `normal` at that row. `plot` is where a value that size stops being
-    usable — the thresholds become x-axis positions — and a value too large for a float
-    raises `OverflowError` out of matplotlib's transform there, which no command line
-    catches. That is a gap in the drawing path rather than in this predicate, and it is
-    the controller's to rule on: refusing the count here would be this function answering
-    a question about a figure, which is the other half of what it was written not to do.
+**The one limit this predicate does not hold is the figure's, and `plot` holds it.** A
+threshold too large for a `float` is a whole number of blobs and is *accepted* here, which
+is the same reasoning read from the other side: Python compares two integers exactly at
+any size, and `sweep` only asks `count >= threshold`, so the sweep is total over such a
+value and every patch is `normal` at that row. What cannot hold it is a position on a
+float x axis, so `plot` refuses it as a `PlotError` and `bin/ablate_threshold.py` reports
+that as `EXIT_REFUSED` rather than letting the interpreter print a traceback. Refusing it
+here instead would be this function answering a question about a figure — the other half
+of what it was written not to do — and the counting does not stop working at the value the
+drawing does, so one predicate covering both would throw away a threshold the sweep handles
+exactly. The two tests that pin the split are named at the end of `plot`'s docstring.
+
 
     **The caller reports it, and it does not reach the interpreter.** The standing limit
     `bin/extract_patches.py` records is that `load` checks that a key is declared and
@@ -780,14 +909,29 @@ def _thresholds(cfg: Config) -> tuple[int, ...]:
     # until the key says what a range is. `load` validated that the key is declared and
     # nothing about its value, so anything iterable arrived here and was swept: `b"35"`
     # is a `Sequence` and iterated as the two thresholds 51 and 53, and a `!!set`
-    # iterated in an order YAML did not choose. `str` and `bytes` are excluded by name
-    # because they *are* sequences — of characters, and of each other — so a
-    # `Sequence` test alone would sweep `'35'` the way it sweeps `b"35"`. A `TypeError`
+    # iterated in an order YAML did not choose. `str` and the three buffer types are
+    # excluded by name because they *are* sequences — of characters, and of each other — so
+    # a `Sequence` test alone would sweep `'35'` the way it sweeps `b"35"`. A `TypeError`
     # rather than a `ValueError`, because this is the key and not an entry, and
     # `bin/ablate_threshold.py` attributes the `TypeError` arm of its catch to exactly
     # this shape.
+    #
+    # **`memoryview` is in that tuple, and it was the class the exclusion had left out.**
+    # It is registered as a `Sequence` like `bytearray` is, and `memoryview(b"35")` swept
+    # as `(51, 53)` — the same failure the key check was written to end, one class over.
+    # Naming `bytearray` while leaving its sibling out made the tuple read as coverage it
+    # did not have. It is unreachable from a YAML file, since PyYAML emits `bytes` for
+    # `!!binary` and refuses `!!python` tags, and it is here anyway: the tuple states what
+    # it excludes, and a reader of it is entitled to that statement being true.
+    #
+    # The four named types are the standard library's sequences **of characters or of
+    # bytes** — `str` the only one of the former, and `bytes`, `bytearray` and `memoryview`
+    # the three byte-buffer types of the latter. That is the dividing line and not "every
+    # sequence type": `range`, `tuple` and `array.array` are `Sequence`s too, and they are
+    # correctly absent, because iterating any of them yields numbers and every number is
+    # then checked as an entry.
     if not isinstance(configured, Sequence) or isinstance(
-        configured, (str, bytes, bytearray)
+        configured, (str, bytes, bytearray, memoryview)
     ):
         raise TypeError(
             f"ablation.thresholds holds {configured!r}, a {type(configured).__name__}, "
@@ -819,9 +963,9 @@ def _thresholds(cfg: Config) -> tuple[int, ...]:
         # compares two integers exactly at any size, and `sweep` only asks
         # `count >= threshold` — every patch is `normal` at such a threshold and the row
         # is a row. What cannot hold it is the figure, where the thresholds become x-axis
-        # positions and a value too large for a float raises `OverflowError` out of
-        # matplotlib; that is a gap in the drawing path and a different question from the
-        # one this predicate answers.
+        # positions, so that question is answered in `plot` and not here; the two are
+        # separate, and a fix that moved the limit into this loop would have converted a
+        # documented limit into a behaviour change nobody ruled on.
         is_finite = not isinstance(value, float) or math.isfinite(value)
         # `whole` is `None` for anything the two tests above refused, so the single raise
         # below covers the type, the non-finite value and the fraction together, and

@@ -293,6 +293,61 @@ def test_plot_refuses_a_summary_with_no_selected_threshold(tmp_path):
     assert not (tmp_path / "ablation.png").exists()
 
 
+def test_plot_refuses_a_threshold_too_large_to_be_a_float(tmp_path):
+    # **Red before the fix**, and the exception it raised was not this one: `plot` handed
+    # the thresholds straight to matplotlib, which converts a data coordinate to a float in
+    # `Axes.add_line` -> `_update_line_limits`, and `float(10 ** 320)` raises
+    # `OverflowError: int too large to convert to float` there. CPython's sentence, out of a
+    # library, naming no rule — and `_thresholds` above had already recorded that a value
+    # this size is a *legitimate* whole number of blobs, so the sweep over it is exact and
+    # total and every patch is `normal` at that row. The counting can hold the value; only
+    # the drawing cannot, and the function that cannot hold it is the one that refuses.
+    #
+    # **`PlotError` and not a `ValueError`, and that is the whole reason the escape ends.**
+    # `plot`'s two other refusals are `ValueError`s and they are *its* refusals, but a
+    # `ValueError` raised anywhere inside matplotlib would be indistinguishable from one at
+    # the command line, which catches a refusal around this call. A project-raised type makes
+    # the arm as narrow as the defect: this call raises it, nothing else in the figure does.
+    # The same argument `bin/ablate_threshold.py` gives for keeping `OverflowError` out of
+    # the catch around `_thresholds`, read from the other side — a defect in this project
+    # must still print a traceback, and only a defect in this project can raise a `ValueError`
+    # out of `plt.subplots`.
+    #
+    # The `__cause__` is pinned because the refusal has to be *this* limit and not a limit
+    # somebody wrote down. The predicate is `float(threshold)` itself, so the boundary is
+    # whatever the conversion matplotlib performs accepts, and a `sys.float_info.max`
+    # comparison would be a second definition of a number that could drift away from it.
+    from blobcount.ablation import PlotError, plot, summarise, sweep
+
+    counts, slide_of = _balanced_pair()
+    huge = 10 ** 320
+    out = tmp_path / "ablation.png"
+    with pytest.raises(PlotError) as refused:
+        plot(summarise(sweep(counts, slide_of, [3, huge]), 3), out)
+    assert isinstance(refused.value.__cause__, OverflowError)
+    message = str(refused.value)
+    # The value as the user wrote it, and the rule it broke, because a refusal that does not
+    # name either is the CPython sentence this replaces.
+    assert str(huge) in message
+    assert "float" in message
+    # Nothing was drawn, and the check is before the first `plt.subplots`, so the refusal
+    # costs no open figure either.
+    assert not out.exists()
+
+
+def test_plot_still_draws_a_threshold_that_is_large_but_is_a_float(tmp_path):
+    # The other side of the boundary, and it is here because a predicate that reads as
+    # "refuse a big number" would pass the test above without being the rule at all.
+    # `2 ** 60` is over 1e18 and converts to a float without a murmur, so a sweep whose
+    # counts are anywhere near it is drawn like any other.
+    from blobcount.ablation import plot, summarise, sweep
+
+    counts, slide_of = _balanced_pair()
+    out = tmp_path / "ablation.png"
+    plot(summarise(sweep(counts, slide_of, [3, 2**60]), 3), out)
+    assert out.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+
+
 def test_plot_leaves_no_figure_open(tmp_path, monkeypatch):
     # matplotlib counts the figures a process has open and warns past
     # `figure.max_open_warning` of them, and `filterwarnings = ["error"]` turns that
@@ -997,11 +1052,18 @@ def test_thresholds_accepts_a_count_too_large_to_be_a_float():
     # unscoping the finiteness test turns this row red with that `OverflowError`.
     #
     # **The value is written out in full because that is what YAML has to be given.**
-    # `1e320` in a configuration file is the *string* `'1e320'` under PyYAML's resolver —
-    # its float pattern needs a `.` and a bare exponent matches nothing, so the value
-    # falls through to the string tag and is refused above as a quoted digit. The
-    # 321-digit integer is the shortest YAML a user can write that reads as the `int`
-    # this test is about, and `10 ** 320` is it without a line of digits in the source.
+    # `1e320` in a configuration file is the *string* `'1e320'`, so the value falls through
+    # to the string tag and is refused above as a quoted digit. **The reason it is a string
+    # is the exponent's missing sign, not a missing `.`:** PyYAML 6.0.3's float pattern is
+    # `[-+]?(?:[0-9][0-9_]*)\.[0-9_]*(?:[eE][-+][0-9]+)?|...`, and the exponent clause
+    # requires an explicit `+` or `-`, so `1.0e320` — which does have a `.` — is *also* the
+    # string `'1.0e320'`, as is `1.0e3`. Measured, not recalled. The spelling that does
+    # resolve is `1.0e+320`, and that is a `float` holding `inf`, which the predicate refuses
+    # as a non-finite whole number rather than as a quoted digit — a different refusal with
+    # a different message, reached by a value no user writes on purpose. Neither spelling
+    # gives an `int` of this magnitude, so the 321-digit integer is the only YAML that
+    # reaches the case this test is about, and `10 ** 320` is it without a line of digits in
+    # the source.
     from blobcount import ablation
 
     huge = 10 ** 320
@@ -1068,6 +1130,36 @@ def test_thresholds_refuses_a_key_that_is_not_a_sequence_of_thresholds(
     assert as_repr in message
     assert type(value).__name__ in message
     assert "not a sequence of thresholds" in message
+
+
+def test_thresholds_refuses_a_buffer_view_the_exclusion_tuple_missed():
+    # **Red before the fix**, and it is the same failure R10-4 was raised about, one class
+    # over: that fix excluded `(str, bytes, bytearray)` by name and left `memoryview` out,
+    # which is a `Sequence` by registration and sweeps `memoryview(b"35")` as the two
+    # thresholds 51 and 53. So the tuple named three of the four classes it was standing in
+    # for, and a reader of it would conclude the shape was covered.
+    #
+    # **Unreachable from a YAML file, and that is stated rather than used as the reason to
+    # skip it.** PyYAML emits `bytes` for `!!binary` and refuses `!!python` tags, and
+    # `yaml.safe_dump` cannot represent a memoryview at all — which is why this row is *not*
+    # in the parametrised test above, since that one writes the value out as a file and
+    # `_cfg` dumps through `safe_dump`. So it is built through `Config` directly, which is
+    # the only way the class arrives, and it is refused because the exclusion means what it
+    # says rather than because the shape is a live hole.
+    #
+    # The fix is the tuple, not a list of every buffer type in the standard library: the
+    # predicate is a `Sequence` test, and the exclusions are the sequence types that carry
+    # *elements* rather than *thresholds*. `memoryview` and `bytearray` and `bytes` are all
+    # that, and a reader of the tuple can now see the whole set.
+    from blobcount.ablation import _thresholds
+    from blobcount.config import Config
+
+    cfg = Config({"ablation": {"thresholds": memoryview(b"35")}})
+    with pytest.raises(TypeError) as refused:
+        _thresholds(cfg)
+    message = str(refused.value)
+    assert "not a sequence of thresholds" in message
+    assert "memoryview" in message
 
 
 def test_ablate_counts_a_patch_the_index_names_twice_once(project_scratch, synthetic_patch):
@@ -1644,6 +1736,82 @@ def test_cli_refuses_a_results_path_that_is_an_existing_file(cli, monkeypatch, c
     assert module.main(["--index", str(index)]) == module.EXIT_REFUSED
     assert occupied.is_file()
     assert "occupied" in capsys.readouterr().err
+
+
+def test_cli_refuses_a_threshold_too_large_to_be_a_float(cli, monkeypatch, capsys):
+    # **The end-to-end defect, and the one that made it worth closing**: before the fix this
+    # run wrote `threshold_ablation.json` to disk and then let `OverflowError: int too large
+    # to convert to float` out of `plot`, uncaught, out of `main`, out of the interpreter.
+    # Exit status 1, which `bin/ablate_threshold.py`'s own module docstring reserves for "a
+    # fact about this project's code rather than about the study" — produced by a caller
+    # editing one line of `configs/default.yaml`, on a value the validator had already
+    # accepted *by design*. Going through the CLI is the point: the exception itself is not
+    # the defect, the uncaught escape is, and a test that called `plot` directly could not
+    # see a status at all.
+    #
+    # **The range is a whole number of blobs and stays accepted.** `10 ** 320` is written out
+    # because no short YAML spelling reaches an `int` of this magnitude: `1e320` is the
+    # *string* `'1e320'` (PyYAML's float pattern wants an explicit sign on the exponent, so
+    # `1.0e320` is a string too) and is refused as a quoted digit, while `1.0e+320` is a
+    # `float` holding `inf` and is refused as a non-finite whole number. The count
+    # comparison against the long spelling is exact, so the sweep is total: both patches come
+    # out `normal` at that row and the row is a row.
+    module, index, results = cli
+    huge = 10 ** 320
+    monkeypatch.setattr(
+        "blobcount.config.DEFAULT_CONFIG_PATH",
+        _cfg(
+            results.parent,
+            "huge.yaml",
+            results=results,
+            ablation={"thresholds": [3, huge]},
+            labeling={"blob_threshold": 3},
+        ),
+    )
+    assert module.main(["--index", str(index)]) == module.EXIT_REFUSED
+    out = results / "label_analysis"
+    # The JSON is on disk, because the run got all the way through the counting and wrote
+    # what it measured before the figure could not be drawn. The figure is not, and that is
+    # the state a refusal leaves behind rather than a half-written artifact.
+    written = json.loads((out / "threshold_ablation.json").read_text(encoding="utf-8"))
+    assert written["per_threshold"][str(huge)] == {
+        "n_normal": 2,
+        "n_steatosis": 0,
+        "pooled_steatosis_ratio": 0.0,
+        "per_slide_ratio": {"2": 0.0, "3": 0.0},
+        "per_slide_ratio_spread": 0.0,
+        "selected": False,
+    }
+    assert not (out / "threshold_ablation.png").exists()
+    err = capsys.readouterr().err
+    # The project's rule and not the library's sentence about a float, for the reason the
+    # `.inf` arm above gives: a user hand-editing `configs/default.yaml` reads a decision.
+    assert "float" in err
+    assert str(huge) in err
+    assert "OverflowError" not in err
+
+
+def test_cli_does_not_swallow_a_defect_from_inside_plot(cli, monkeypatch):
+    # **A pin on the new arm, and the reason the arm catches `PlotError` and not
+    # `ValueError`.** The module docstring claims that a `ValueError` raised anywhere inside
+    # matplotlib still reaches the interpreter as a traceback, and that claim is what makes
+    # the catch narrow rather than merely small: catch `ValueError` here and every defect in
+    # the drawing would be printed on stderr as a decision about the caller's YAML, on a
+    # status that file defines as "a fact about this project's code rather than about the
+    # study". Mutating the arm to `except ValueError` turns this row red and leaves every
+    # other test in the file green — measured, not asserted.
+    #
+    # The pair with `test_cli_does_not_swallow_a_defect_from_inside_ablate`, and it replaces
+    # the name in the CLI module's own namespace, so it is the arm in *this* file that is
+    # under test and not some other caller's.
+    module, index, _ = cli
+
+    def _boom(summarised, out_path):
+        raise ValueError("injected")
+
+    monkeypatch.setattr(module, "plot", _boom)
+    with pytest.raises(ValueError, match="injected"):
+        module.main(["--index", str(index)])
 
 
 def test_cli_does_not_swallow_a_defect_from_inside_ablate(cli, monkeypatch):
