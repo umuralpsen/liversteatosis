@@ -29,7 +29,6 @@ _KEY_READ = re.compile(r"""\.(?:get|path)\(\s*["']([A-Za-z_]\w*(?:\.[A-Za-z_]\w*
 # delete, and a key that loses one is named as an unread declared key.
 _KEYS_WITHOUT_READER: frozenset[str] = frozenset(
     {
-        "ablation.thresholds",
         "augmentation.affine_translate",
         "augmentation.color_jitter_brightness",
         "augmentation.color_jitter_contrast",
