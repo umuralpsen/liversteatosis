@@ -54,11 +54,13 @@ dataset, never about this program:
   the check and the sweep cannot come to different answers about what is being swept.
 - **The configured range itself**, as `blobcount.ablation._thresholds`'s own refusal: a
   `ValueError` or `TypeError` out of that one call, caught here. A quoted digit, a
-  fraction, a YAML `true` and a non-finite float are all refused as `ValueError`s and the
-  message names the rule — a plain number that is finite, `3`, and not `'3'`, not `true`
-  and not `.inf` or `.nan` — so a user hand-editing `configs/default.yaml` reads a
-  decision and not an accident; a key that is not a sequence at all is the `TypeError`.
-  All five are the same hand-edit of the same key, and the catch is around that one call
+  fraction, a YAML `true`, a negative number and a non-finite float are all refused as
+  `ValueError`s and the message names the rule — a plain number that is finite, exactly a
+  count and not below zero, `3`, and not `'3'`, not `true`, not `-5` and not `.inf` or
+  `.nan` — so a user hand-editing `configs/default.yaml` reads a decision and not an
+  accident; a key that is not a sequence at all is the `TypeError`, which is what
+  `!!binary 'MzU='` and a `!!set` are.
+  All six are the same hand-edit of the same key, and the catch is around that one call
   and not around `ablate`, so it is wide enough to hold a mistyped configuration value
   and too narrow to hold a defect in the counting. **`OverflowError` is not in the tuple
   and adding it would be a mistake rather than caution.** `isinstance(float("inf"),
@@ -418,10 +420,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         swept = list(_thresholds(cfg))
     except (TypeError, ValueError) as error:
         # `ValueError` for a configured entry that is not a plain whole number of blobs —
-        # a fraction, a quoted digit, a `true`, a `.inf` or a `.nan` — and `TypeError` from
-        # the key itself not being a sequence, which `load` accepts because it validates
-        # that a key is declared and nothing about its value. Both are the same hand-edit
-        # of the same key, and the catch is around this one call rather than around
+        # a fraction, a quoted digit, a `true`, a negative number, a `.inf` or a `.nan` —
+        # and `TypeError` from the key itself not being a sequence, which `load` accepts
+        # because it validates that a key is declared and nothing about its value. Both
+        # are the same hand-edit of the same key, and the catch is around this one call
+        # rather than around
         # `ablate`, so it is too narrow to hold a defect in the counting. This refusal is
         # a statement about the configuration, which is why it is not the `ConfigError` arm
         # above: `load` accepted the file, and `ablation.thresholds` is a key this project

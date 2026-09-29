@@ -128,9 +128,12 @@ twice.
 rounded, because a sweep over 3.5 run as a sweep over 3 is a measurement of a threshold
 nobody configured — and a threshold that is not finite is not a count of blobs either, a
 question `_thresholds` answers on its own rather than leaving to `int()`, which refuses
-a `NaN` and an `inf` by raising two different exceptions. It is a `ValueError` out of
-`ablate` and not a
-`LabelingInputError`: it is a statement about the configuration, not about the index the
+a `NaN` and an `inf` by raising two different exceptions. **The same predicate refuses a
+quoted digit, a YAML `true` and a negative number**, since an entry has to be a plain
+number, finite, exactly a count and not below zero, and one message says all of it; the
+key itself has to be a list, so `!!binary 'MzU='` is not a range of 51 and 53. It is a
+`ValueError` out of `ablate` and not a `LabelingInputError`: it is a statement about the
+configuration, not about the index the
 caller pointed at. **It is not a traceback either.** The standing ruling that a
 hand-edited `extraction.patch_size` reaches the interpreter unvalidated does not transfer
 to a function that exists to reject the value: `extraction.patch_size` is a value this
@@ -217,8 +220,14 @@ _SWEEP_FIELDS = (
 # itself, so a reader of `threshold_range_coverage` does not have to have this module
 # open to know what `true` claims. It names **both** ends and the statistic each is held
 # against, and it is one definition: the code below computes the same two comparisons and
-# a test evaluates this string over the numbers the block carries, so the string, the
-# boolean and the predicate cannot come to different answers about the same run.
+# a test evaluates this string over the numbers the block carries and fails if it
+# disagrees with the boolean, so the string cannot drift away from the code that wrote
+# the boolean. **That test is not the only check, and this comment is not claiming to be
+# the whole of one.** A string and a predicate that moved *together* agree with each
+# other and can both be wrong — that is round 1's bug — and what catches it is a second,
+# independent reading of the same claim over the raw per-patch counts, in
+# `tests/test_ablation.py`, against an input this block does not carry. The two fail on
+# different bugs, which is the reason the file has both of them.
 #
 # The form is deliberate. Everything after ` iff ` is a comparison over sibling keys, and
 # `tests/test_ablation.py` evaluates it in a namespace holding those keys and nothing
@@ -334,8 +343,12 @@ class AblationStats:
         `threshold_ablation.json` and not this module. A file carrying a verdict and no
         criterion admits two readings of that verdict, and only one of them is the one
         this code implements. A test evaluates the string against the numbers in the same
-        block and fails if it disagrees with the boolean, so a predicate that moves
-        without the string moving is a red test rather than a silent change of meaning.
+        block and fails if it disagrees with the boolean, so a block that contradicts
+        itself — the string naming one statistic while the boolean is computed from
+        another, which is what a `count_min` key holding the median would be — is a red
+        test rather than a silent change of meaning. A string and a predicate that moved
+        together would satisfy that test and be wrong, and the second reading over the raw
+        counts in `tests/test_ablation.py` is what fails that one.
 
         **The low end is held against the distribution's `min` and not against its `p50`.**
         A median is the wrong end to hold a range against: a range whose bottom sits above
@@ -660,6 +673,16 @@ def _thresholds(cfg: Config) -> tuple[int, ...]:
     nobody configured, and one nobody configured is the same class of number as the
     constant this project keeps refusing to substitute for a measurement.
 
+    **The key has to be a sequence of thresholds and an entry has to be a whole number of
+    blobs, and the message names both in one list.** Four conditions are applied to an
+    entry — it is a plain number, it is finite, it is exactly a count, and it is not below
+    zero — and one to the key, and they are stated as a single sentence naming the shape
+    that breaks each: `3` and not `'3'` and not `true` and not `.inf` or `.nan` and not
+    `5.5` and not `-5`. **One list, not three tests with three messages**, because a
+    user hand-editing `configs/default.yaml` reads one refusal and has to act on it, and a
+    rule that lives in a test comment and in three places in a message is a rule nobody
+    can hold.
+
     **A quoted digit is refused, a YAML boolean is refused, and the refusal message says
     which.** An entry has to be a number: `["3", 5]` fails the test below because `3` and
     `"3"` are not the same value, and the message says so in those words rather than
@@ -673,6 +696,15 @@ def _thresholds(cfg: Config) -> tuple[int, ...]:
     printed as `(3, 5)` beside a configuration that says `["3", 5]` is a second thing for
     a reader to reconcile, in an artifact whose whole argument is that two numbers
     disagreeing should be visible rather than reconciled silently.
+
+    **A negative threshold is refused, because no count of blobs is below zero.** `[-5]`
+    passed every test above — a plain number, finite, and a whole number — and then cut
+    at nothing: no count is under it, so every patch came out `normal` and the swept row
+    reported a ratio of 1.0 for a threshold no count sits on. A threshold is a cut point
+    on a count, and a cut point below every possible count is not a measurement of where
+    a distribution bends; it is the one a reader is most likely to write by accident,
+    which is why it is refused here rather than left to `sweep`, which cannot tell an
+    empty cut from a clean one.
 
     **The refusal is a `ValueError` and not a `LabelingInputError`.** It is a statement
     about the configuration and not about the index the caller pointed at, and the
@@ -694,6 +726,18 @@ def _thresholds(cfg: Config) -> tuple[int, ...]:
     makes it** — which is also why fixing it in the command line's catch was not enough:
     a library caller of this function got the traceback either way.
 
+    **The key itself is checked, and a `TypeError` because that is what it raises.** The
+    loop this replaced iterated whatever `cfg.get` returned, so anything iterable was
+    swept: `!!binary 'MzU='` is a `bytes`, which is a `Sequence` and iterated as the two
+    thresholds 51 and 53, and a `!!set {3, 5}` iterated in an order YAML did not choose —
+    while the same bytes value was refused as an *entry*, which is the inconsistency this
+    check ends. `load` accepts any of it, having validated that the key is declared and
+    nothing about its value. `str` and `bytes` are excluded by name because they are
+    sequences — of characters, and of each other — so a `Sequence` test alone would sweep
+    `'35'` the way it sweeps `b"35"`; a `set` and a mapping are not sequences at all and
+    are refused by the same test. **This is not a YAML type policy**, which no caller
+    asked for: the one shape that matters is the one a reader can write by accident.
+
     **`OverflowError` is deliberately *not* added to the command line's catch tuple.** With
     the finiteness test above, this function cannot raise it from this call: `int()` is
     reached only for a value the predicate has already accepted as a finite number. An
@@ -704,8 +748,19 @@ def _thresholds(cfg: Config) -> tuple[int, ...]:
     refusal on stderr, which is the "looks validated and is not" state this function
     exists to end, and it would contradict the sentence in that file's docstring that its
     catch is wide enough for a hand-edit and too narrow for a defect. The catch holds
-    mistyped configuration values, and the finiteness test is what makes that true of every
-    one of them.
+    mistyped configuration values, and the finiteness test is what makes that true of
+    every one of them.
+
+    **The one limit that scope leaves, stated here rather than relied upon.** A threshold
+    too large for a `float()` is *accepted*, which is the same reasoning read from the
+    other side: it is a whole number of blobs, Python compares two integers exactly at
+    any size, and `sweep` only asks `count >= threshold`, so the sweep is total over it
+    and every patch is `normal` at that row. `plot` is where a value that size stops being
+    usable — the thresholds become x-axis positions — and a value too large for a float
+    raises `OverflowError` out of matplotlib's transform there, which no command line
+    catches. That is a gap in the drawing path rather than in this predicate, and it is
+    the controller's to rule on: refusing the count here would be this function answering
+    a question about a figure, which is the other half of what it was written not to do.
 
     **The caller reports it, and it does not reach the interpreter.** The standing limit
     `bin/extract_patches.py` records is that `load` checks that a key is declared and
@@ -716,13 +771,32 @@ def _thresholds(cfg: Config) -> tuple[int, ...]:
     one. `bin/ablate_threshold.py` therefore calls this function itself, before it reads a
     patch, and returns `EXIT_REFUSED` on its answer. The catch there is around that one
     call and not around `ablate`, so it is too narrow to hold a defect in the counting.
-    The `TypeError` it also catches comes from the key itself not being a sequence —
-    `load` accepts that, having validated that the key is declared and nothing about its
-    value — and not from an entry, because every entry is checked here, for its type and
-    then for its finiteness, before it is converted.
+    The `TypeError` it also catches is the check on the key itself, and not an entry,
+    because every entry is checked here, for its type and then for its finiteness, before
+    it is converted.
     """
+    configured = cfg.get("ablation.thresholds")
+    # The key is checked before any entry is, because an entry cannot be checked at all
+    # until the key says what a range is. `load` validated that the key is declared and
+    # nothing about its value, so anything iterable arrived here and was swept: `b"35"`
+    # is a `Sequence` and iterated as the two thresholds 51 and 53, and a `!!set`
+    # iterated in an order YAML did not choose. `str` and `bytes` are excluded by name
+    # because they *are* sequences — of characters, and of each other — so a
+    # `Sequence` test alone would sweep `'35'` the way it sweeps `b"35"`. A `TypeError`
+    # rather than a `ValueError`, because this is the key and not an entry, and
+    # `bin/ablate_threshold.py` attributes the `TypeError` arm of its catch to exactly
+    # this shape.
+    if not isinstance(configured, Sequence) or isinstance(
+        configured, (str, bytes, bytearray)
+    ):
+        raise TypeError(
+            f"ablation.thresholds holds {configured!r}, a {type(configured).__name__}, "
+            f"which is not a sequence of thresholds: the configured range is a list of "
+            f"whole numbers of blobs, and a string, bytes and a set are not one — bytes "
+            f"sweeps as the integers it spells and a set sweeps in an order nobody chose"
+        )
     out: list[int] = []
-    for value in cfg.get("ablation.thresholds"):
+    for value in configured:
         # One predicate decides what a whole number of blobs is, and it runs to completion
         # before the `int()` rather than after it, so the conversion below is only ever
         # handed a value that already has an answer and cannot raise on its own.
@@ -739,18 +813,35 @@ def _thresholds(cfg: Config) -> tuple[int, ...]:
         # accepted side because the test is `isfinite` and not `is_integer` — a range a
         # user computed arrives as floats, and refusing those would be the same mistake as
         # refusing a quoted digit.
+        #
+        # **A threshold too large to be a float is accepted here, on the same reasoning,
+        # and `tests/test_ablation.py` pins that.** It is a whole number of blobs, Python
+        # compares two integers exactly at any size, and `sweep` only asks
+        # `count >= threshold` — every patch is `normal` at such a threshold and the row
+        # is a row. What cannot hold it is the figure, where the thresholds become x-axis
+        # positions and a value too large for a float raises `OverflowError` out of
+        # matplotlib; that is a gap in the drawing path and a different question from the
+        # one this predicate answers.
         is_finite = not isinstance(value, float) or math.isfinite(value)
         # `whole` is `None` for anything the two tests above refused, so the single raise
         # below covers the type, the non-finite value and the fraction together, and
         # `whole != value` is the fraction test alone.
         whole = int(value) if is_number and is_finite else None
-        if whole is None or whole != value:
+        # **And a negative whole number is refused, which is the fourth condition and the
+        # one the message had not named.** A threshold is a cut point on a count of blobs
+        # and no count is below zero, so `[-5]` cut at nothing, labelled every patch
+        # `normal` and reported a ratio of 1.0 for a threshold no count sits on. It is
+        # the most plausible hand-edit of the shapes a reader can write by accident, and
+        # it is here rather than left to `sweep`, which cannot tell an empty cut from a
+        # clean one.
+        if whole is None or whole != value or whole < 0:
             raise ValueError(
                 f"ablation.thresholds holds {value!r}, which is not a whole number of "
-                f"blobs: every entry has to be a plain number that is finite, 3 and not "
-                f"'3' and not true and not .inf or .nan, because a sweep is cut at the "
-                f"count a threshold states and a quoted digit, a rounded fraction or a "
-                f"non-finite one would measure a threshold nobody configured"
+                f"blobs: every entry has to be a plain number that is finite, exactly a "
+                f"count and not below zero, 3 and not '3' and not true and not .inf or "
+                f".nan and not 5.5 and not -5, because a sweep is cut at the count a "
+                f"threshold states and a quoted digit, a rounded fraction, a negative "
+                f"value or a non-finite one would measure a threshold nobody configured"
             )
         out.append(whole)
     return tuple(out)

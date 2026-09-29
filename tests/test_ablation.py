@@ -579,13 +579,16 @@ def _criterion_holds(coverage):
     from the same run over the same numbers, so they can agree while both are wrong: a run
     that held the low end against `count_p50` and wrote a criterion string naming
     `count_p50` is perfectly self-consistent and still hands a reader of the JSON the wrong
-    answer, and so does one whose `count_min` key holds the median. Only an input the
-    artifact did not carry can catch either, and the caller of this function supplies one —
-    it re-types the comparison over the raw per-patch counts it stubbed into `count_blobs`,
-    which the block does not report and cannot be derived from. So the rule against
-    re-typing is a rule about the *criterion string*, which this function exists to keep
-    honest, and not about the *predicate*, where a second independent reading is the only
-    thing that checks anything.
+    answer. **What this function does catch is a block that disagrees with itself**, and
+    the example is a `count_min` key holding the median: the string names `count_min` and
+    the boolean is computed from the counts themselves, so on a distribution whose median
+    clears the swept minimum the two come to different answers and this fails. Only a
+    *self-consistent* move needs the caller's independent reading, and the caller of this
+    function supplies one — it re-types the comparison over the raw per-patch counts it
+    stubbed into `count_blobs`, which the block does not report and cannot be derived
+    from. So the rule against re-typing is a rule about the *criterion string*, which this
+    function exists to keep honest, and not about the *predicate*, where a second
+    independent reading is the only thing that checks anything.
     """
     assert " iff " in coverage["criterion"], (
         f"the criterion has to name its comparison in the form this test evaluates, and "
@@ -722,17 +725,18 @@ def test_the_range_coverage_criterion_string_and_its_boolean_agree(
         # alone: it is true exactly when every count lies inside the swept range, which is
         # the definition a reader of the artifact would apply to it.
         #
-        # **Re-typing here is the point, where `_criterion_holds` treats it as the defect
-        # it was in round 1.** That function checks the criterion *string* against the
-        # boolean, over numbers the block reports, so what it catches is a string that
-        # drifted away from the code. This checks the *boolean* against `counts` — the
-        # values `_stub_counts` handed to `count_blobs`, which the block does not carry and
-        # which no field in it reproduces — so what it catches is a flag computed from the
-        # wrong statistic, or a `count_min` that is not the minimum. Re-typing an
-        # expression over the numbers it came from would only be a second copy of it;
-        # re-typing it over numbers the artifact never carried is a second, independent
-        # reading of the same claim, and the two checks fail on different bugs, which is
-        # the reason both are here rather than one.
+        # **Re-typing here is the point, and this catches what `_criterion_holds` cannot.**
+        # That function checks the criterion *string* against the boolean, so what it
+        # catches is a block that disagrees with itself — a `count_min` key holding the
+        # median is that, because the string names `count_min` and the boolean is
+        # computed from the counts. This checks the *boolean* against `counts`, the
+        # values `_stub_counts` handed to `count_blobs` and the block does not carry, so
+        # what it catches is a run that is self-consistently wrong: a predicate that read
+        # `count_p50` and a string that named it together, which agree with each other
+        # and are both wrong. Two checks that fail on different bugs is the reason both
+        # are here rather than one. **What this does not read is `count_min`:** it
+        # compares the swept range against the raw counts, so a `count_min` holding the
+        # wrong statistic is not what it looks for, and the check above is.
         assert coverage["brackets_distribution"] is all(
             coverage["swept_min"] <= value <= coverage["swept_max"] for value in counts
         ), f"counts {counts} swept at {thresholds} are not all inside the swept range"
@@ -875,72 +879,79 @@ def test_ablate_raises_a_value_error_for_a_range_that_is_not_whole_numbers(
     assert not isinstance(escaped.value, LabelingInputError)
 
 
-def test_thresholds_refuses_a_quoted_digit_and_says_that_is_the_rule():
-    # **Red before the fix**: `int("3") != "3"`, so `["3", 5]` was refused — which is
-    # defensible — but the choice was documented in a test comment and nowhere a user
-    # hand-editing `configs/default.yaml` would read it. Refusing without saying so is the
-    # finding. The message now names the rule: a plain number, and not a quoted digit.
-    from blobcount import ablation
-
-    with pytest.raises(ValueError) as refused:
-        ablation._thresholds(load(overrides=["ablation.thresholds=['3', 5]"]))
-    message = str(refused.value)
-    # The offending value, as the YAML wrote it, so the reader knows which entry to fix.
-    assert "'3'" in message
-    assert "whole number of blobs" in message
-    assert "a plain number" in message and "not '3'" in message
-
-
-def test_thresholds_refuses_a_yaml_boolean():
-    # **Red before the fix**: `bool` subclasses `int`, so `int(True) == 1` and
-    # `1 != True` is False — a `true` in the configured range was accepted and swept as
-    # the threshold 1, with no message anywhere. The same rule as the quoted digit: an
-    # entry has to be a number and not a flag, and a flag that becomes a threshold
-    # silently is a measurement of a threshold nobody configured.
-    from blobcount import ablation
-
-    with pytest.raises(ValueError) as refused:
-        ablation._thresholds(load(overrides=["ablation.thresholds=[true]"]))
-    assert "True" in str(refused.value)
-
-
 @pytest.mark.parametrize(
     ("literal", "as_repr"),
     [
+        # A quoted digit, which is a string and not a number. Round 3's first refusal.
+        ("'3'", "'3'"),
+        # A YAML flag. `bool` subclasses `int`, so `int(True) == 1` and `1 != True` is
+        # False: a `true` in the configured range passed the whole-number test and was
+        # swept as the threshold 1, with no message anywhere. Round 3's second refusal.
+        ("true", "True"),
+        # The three non-finite floats. `isinstance(inf, float)` is True, so the type test
+        # admitted all three and `int()` refused them from inside the standard library
+        # instead, in two different ways: `int(float("nan"))` raises `ValueError` and
+        # `int(float("inf"))` raises `OverflowError`, and only the first is in the
+        # `(TypeError, ValueError)` tuple `bin/ablate_threshold.py` catches. So a
+        # hand-edited `.inf` left a traceback and exited 1 — the status that CLI documents
+        # as a defect in this project's own code. The `.nan` row was already refused, but
+        # by that accident: what reached the user was CPython's `cannot convert float NaN
+        # to integer`, which names no rule.
         (".inf", "inf"),
         ("-.inf", "-inf"),
         (".nan", "nan"),
+        # A fraction, which the type test and the finiteness test both admit and only
+        # `int(value) == value` refuses. The row is here because that third condition is
+        # one of the three the message has to name, and until this round it named two.
+        ("5.5", "5.5"),
+        # **Red before the fix**: a negative threshold is a plain number, it is finite and
+        # it is a whole number, so nothing above refused it. No blob count is below a
+        # negative threshold, so every patch came out `normal` at it, the swept row
+        # reported a ratio of 1.0, and the figure drew a curve flat at zero for a
+        # threshold no count sits on. A threshold is a cut point on a count of blobs and
+        # no count is below zero, so a negative one cuts at nothing and then reports an
+        # answer as though it had cut at something.
+        ("-5", "-5"),
     ],
 )
-def test_thresholds_refuses_a_non_finite_float_and_says_that_is_the_rule(literal, as_repr):
-    # **Red before the fix**, on the two `inf` rows. `isinstance(inf, float)` is True, so
-    # the type test admitted all three of these, and `int()` then refused them from
-    # inside the standard library instead of from this predicate. The two refuse
-    # differently and neither difference is a decision: `int(float("nan"))` raises
-    # `ValueError` and `int(float("inf"))` raises `OverflowError`, and only the first is
-    # in the `(TypeError, ValueError)` tuple `bin/ablate_threshold.py:403` catches, so
-    # `ablation.thresholds: [.inf]` left a traceback and exited 1 — the status that CLI
-    # documents as a defect in this project's own code, produced by a hand-edited YAML
-    # value. The `.nan` row was already refused, but by that accident: what reached the
-    # user was CPython's `cannot convert float NaN to integer`, which names no rule, and
-    # a refusal that names no rule is a crash the user has to interpret. All three are
-    # refused here by one predicate, so what counts as a whole number of blobs does not
-    # depend on which exception a library happens to raise. The three are one parametrised
-    # test on purpose: `literal` is the YAML a hand-edit produces and `as_repr` is what
-    # this module prints for the same number, so a reader can match the two, and pinning
-    # the two families together is what stops the second being discovered later.
+def test_thresholds_refuses_every_shape_that_is_not_a_threshold(literal, as_repr):
+    # **One parametrised test on purpose, so that there is one list of what a threshold
+    # is.** These were three tests, each with its own message assertion, and a fourth
+    # shape refused today would have been a fourth message to write; one list is a thing
+    # a reader can hold. `literal` is the YAML a hand-edit produces and `as_repr` is what
+    # this module prints for the same value, so a reader can match the two.
+    #
+    # **The message is the finding, not the exception.** Every one of these values was
+    # already refused, or is refused by this round's predicate, and what a user
+    # hand-editing `configs/default.yaml` gets to read is a sentence naming the rule it
+    # broke. A refusal that names no rule is a crash the user has to interpret, which is
+    # what round 1's `int()` was for `.nan`, and what a CPython sentence about a
+    # `cannot convert float NaN to integer` was for the row that got refused by accident.
     from blobcount import ablation
 
     with pytest.raises(ValueError) as refused:
-        ablation._thresholds(load(overrides=[f"ablation.thresholds=[3, {literal}]"]))
+        ablation._thresholds(load(overrides=[f"ablation.thresholds=[{literal}]"]))
     message = str(refused.value)
     # The offending entry, as this module names it, so the reader knows which one to fix.
     assert as_repr in message
-    # And the rule, in the same words as the quoted digit and the boolean, because a
-    # `.inf` is as hand-writable as a `'3'` and gets as little reason to guess at it.
     assert "whole number of blobs" in message
-    assert "a plain number" in message and "not '3'" in message
-    assert ".inf" in message and ".nan" in message
+    # **And the whole rule, in one list, checked on every row.** Four conditions are
+    # applied to an entry — a plain number, finite, exactly a count, and not below zero —
+    # and the message names all four, with the shape that breaks each. Naming two and
+    # applying four is the defect this row set exists to end, and a message that named
+    # the list only on the rows that need it would be the same defect again.
+    for phrase in (
+        "a plain number that is finite",
+        "exactly a count",
+        "not below zero",
+        "not '3'",
+        "not true",
+        ".inf",
+        ".nan",
+        "5.5",
+        "-5",
+    ):
+        assert phrase in message, f"{phrase!r} is not named in the refusal {message!r}"
 
 
 def test_thresholds_still_accepts_a_whole_number_written_as_a_float():
@@ -955,6 +966,108 @@ def test_thresholds_still_accepts_a_whole_number_written_as_a_float():
     assert ablation._thresholds(
         load(overrides=["ablation.thresholds=[3.0, 5.0]"])
     ) == (3, 5)
+
+
+def test_thresholds_accepts_a_count_too_large_to_be_a_float():
+    # **The threshold a future reader will want to refuse, and must not.** The finiteness
+    # test in `_thresholds` reads `not isinstance(value, float) or math.isfinite(value)`,
+    # and the scope to floats is load-bearing in one direction and invisible: `math.isfinite`
+    # converts its argument to a float, so the unscoped form raises
+    # `OverflowError: int too large to convert to float` on the value below. That is the
+    # round 3 escape class back again, one layer down, and nothing in the file could see
+    # it: the reviewer rewrote the line unscoped and all 53 tests in this file stayed
+    # green while the bug returned. So this test pins the behaviour and not the code, and
+    # rewriting the line unscoped now turns this row red and leaves the other 57 in this
+    # file green — measured, not asserted.
+    #
+    # **Why accepting it is right, since it looks like the opposite.** A threshold is a
+    # cut point on a count of blobs, and this value is a whole number of blobs however
+    # large it is. Python compares two integers exactly at any size, `sweep` only asks
+    # `count >= threshold`, and this run labels every patch `normal` at this threshold: a
+    # real row in `per_threshold` with a ratio of 0.0, not a failure and not a refusal.
+    # What cannot hold a value this size is a *figure*: `plot` puts the thresholds on a
+    # float x-axis, and a value too large for a float raises `OverflowError` there, out of
+    # matplotlib's transform rather than out of a rule. That is a gap in the drawing
+    # path, and it is a different argument from the one this validator answers — refusing
+    # a count here to accommodate a plotting library would be this function deciding a
+    # question that is not its own, on behalf of a caller that asked for a sweep.
+    #
+    # So the shape is accepted deliberately, and this test is here so that "deliberately"
+    # is a fact the suite carries rather than a comment it has to be trusted about:
+    # unscoping the finiteness test turns this row red with that `OverflowError`.
+    #
+    # **The value is written out in full because that is what YAML has to be given.**
+    # `1e320` in a configuration file is the *string* `'1e320'` under PyYAML's resolver —
+    # its float pattern needs a `.` and a bare exponent matches nothing, so the value
+    # falls through to the string tag and is refused above as a quoted digit. The
+    # 321-digit integer is the shortest YAML a user can write that reads as the `int`
+    # this test is about, and `10 ** 320` is it without a line of digits in the source.
+    from blobcount import ablation
+
+    huge = 10 ** 320
+    assert ablation._thresholds(
+        load(overrides=[f"ablation.thresholds=[3, {huge}]"])
+    ) == (3, huge)
+    # And that the sweep is total over it, which is the other half of why a float
+    # conversion is not this validator's business: a comparison of two ints cannot
+    # overflow, so the row below is a row and not an exception.
+    swept = ablation.sweep({"A_0": 4, "A_1": 9}, {"A_0": "A", "A_1": "A"}, (huge,))
+    assert swept[huge]["n_normal"] == 2
+    assert swept[huge]["n_steatosis"] == 0
+    assert swept[huge]["pooled_steatosis_ratio"] == 0.0
+
+
+@pytest.mark.parametrize(
+    ("value", "as_repr"),
+    [
+        # `!!binary 'MzU='`, which a hand-edit can write and which iterates as the two
+        # integers 51 and 53 — a sweep over a range nobody configured, reported as a
+        # range like any other.
+        (b"35", "b'35'"),
+        # `!!set {3, 5}`, which iterates in an order YAML did not choose and which is not
+        # a range at all.
+        ({3, 5}, "{3, 5}"),
+    ],
+)
+def test_thresholds_refuses_a_key_that_is_not_a_sequence_of_thresholds(
+    tmp_path, value, as_repr
+):
+    # **Red before the fix**, on both rows, and inconsistently with itself: the loop was
+    # `for value in cfg.get("ablation.thresholds")`, so anything iterable was swept, and
+    # the same bytes value was refused as an *entry* by the type test two lines below.
+    # Bytes and a set are not a range, and a range read out of a string or a set is a
+    # threshold nobody configured wearing the costume of one.
+    #
+    # The check is a `Sequence` test and not a YAML type policy: this project asks for no
+    # general policy, `load` already refuses a file whose top level is not a mapping, and
+    # the shape that matters is the one a reader can write by accident. `str`, `bytes` and
+    # `bytearray` are excluded by name because they *are* sequences — of characters, and
+    # of each other — so a `Sequence` test alone would sweep `'35'` as 51 and 53 and
+    # `b"35"` the same way.
+    #
+    # **A `TypeError`, and not a `ValueError`,** because this is the key and not an entry,
+    # and the two are different answers: the command line's catch is `(TypeError,
+    # ValueError)` around this one call and its own docstring already attributes the
+    # `TypeError` arm to "a key that is not a sequence" — which was, until this round, a
+    # statement about an accident and not about a check. **Written out as a file, not as
+    # an override:** `load` refuses an override whose type differs from the configured
+    # one, so `!!binary` and `!!set` can only arrive the way a hand-edit delivers them.
+    from blobcount import ablation
+
+    path = _cfg(
+        tmp_path,
+        "not_a_list.yaml",
+        results=tmp_path / "results",
+        ablation={"thresholds": value},
+    )
+    with pytest.raises(TypeError) as refused:
+        ablation._thresholds(load(path))
+    message = str(refused.value)
+    # The value as it reads, and its type, because the YAML tag the user wrote is not what
+    # they see back and `b'35'` names the shape where `!!binary 'MzU='` does not.
+    assert as_repr in message
+    assert type(value).__name__ in message
+    assert "not a sequence of thresholds" in message
 
 
 def test_ablate_counts_a_patch_the_index_names_twice_once(project_scratch, synthetic_patch):
@@ -1303,6 +1416,45 @@ def test_cli_converts_the_configured_range_once_for_its_selection_guard(
     # a parse accident. `_thresholds`' own refusal now states it.
     assert "a plain number" in err and "not '3'" in err
     assert "is not one of the ablation.thresholds" not in err
+    assert "Traceback" not in err
+    assert not (results / "label_analysis").exists()
+
+
+def test_cli_refuses_a_configured_range_that_is_not_a_sequence(
+    cli, project_scratch, monkeypatch, capsys
+):
+    # **Red before the fix**, on the message and not on the status. `!!binary 'MzU='` is
+    # iterable, so the run swept it as the two thresholds 51 and 53 and refused
+    # `--selected 2` from the selection guard: `EXIT_REFUSED`, but a refusal reporting a
+    # range nobody configured as the range it swept. The `TypeError` arm of the catch in
+    # `bin/ablate_threshold.py` had no shape that could reach it — only an accident, an
+    # int where a list was configured — and that file's docstring already attributed the
+    # arm to "a key that is not a sequence". The key check is that shape, so this pins
+    # the claim at the boundary that makes it.
+    from blobcount import ablation
+
+    module, index, results = cli
+    monkeypatch.setattr(
+        "blobcount.config.DEFAULT_CONFIG_PATH",
+        _cfg(
+            project_scratch,
+            "binary.yaml",
+            results=results,
+            ablation={"thresholds": b"35"},
+            labeling={"blob_threshold": 2},
+        ),
+    )
+
+    def _boom(path, size):
+        raise AssertionError("a patch was read before the configured range was refused")
+
+    monkeypatch.setattr(ablation, "load_patch", _boom)
+    assert module.main(["--index", str(index)]) == module.EXIT_REFUSED
+    err = capsys.readouterr().err
+    # The rule, and not the range the bytes spelled: a message naming 51 would be a
+    # report of a sweep nobody configured.
+    assert "not a sequence of thresholds" in err
+    assert "51" not in err
     assert "Traceback" not in err
     assert not (results / "label_analysis").exists()
 
