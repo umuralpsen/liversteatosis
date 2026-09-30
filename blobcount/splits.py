@@ -42,8 +42,11 @@ runs. `sorted()` is the ordering, spelled once, rather than "whatever appeared f
 because a fold number written into an artifact has to mean the same specimen on the next
 run of the pipeline.
 
-**A `str` and a `bytes` are refused, for the same reason the indices are.** Both satisfy
-`Sequence[str]`, so `loso_folds("456")` splits one argument into three specimens called
+**A `str` and a `bytes` are refused, for the same reason the indices are.** Both are a
+`collections.abc.Sequence` at runtime — measured `isinstance(b"456", Sequence)` is `True`
+— and the `Sequence[str]` annotation on this function states the argument a caller is
+meant to pass, which nothing here checks, so a string and a bytes value both arrive at it.
+So `loso_folds("456")` splits one argument into three specimens called
 `"4"`, `"5"` and `"6"` — three folds of one row each, which is the patch-level split
 above wearing a specimen-level name, returned as a valid result. `bytes` is worse rather
 than different: iterating `b"456"` yields the integers 52, 53 and 54, so `held_out` would
@@ -63,21 +66,22 @@ What the four buy is that they cover the shapes a caller reaches without an
 characters, and the difference is recorded here rather than left for a reader to assume
 away.
 
-That is the same rule and the same reasoning `blobcount.ablation._thresholds` applies to
-`ablation.thresholds`. **Its two forms of the `Sequence` test are named apart here, because
-they differ only in their sign and the sign is the whole argument.** The *positive* form,
-`isinstance(x, Sequence)`, accepts all four names above — measured `True` for each — so on
-its own it would split `'456'` into three specimens exactly as it splits `b"456"`, and only
-naming them catches it. This is not a type policy nobody asked for; it is the one shape a
-reader writes by accident.
+**The exclusion rule is the same one, on the same reasoning, as
+`blobcount.ablation._thresholds` applies to `ablation.thresholds`.** A `Sequence` test
+alone accepts every one of these four names, so on its own it would split `'456'` into
+three specimens exactly as it splits `b"456"`, and only naming them catches it. This is
+not a type policy nobody asked for; it is the one shape a reader writes by accident.
 
-**The *negative* form that module also applies is not repeated here**, and this is the one
-place the two predicates differ. Its predicate is
-`not isinstance(x, Sequence) or isinstance(x, <the four names>)`, which refuses every
-non-`Sequence` on top of the four. Measured: `isinstance(np.array(["a", "b"]), Sequence)`
-is `False`, and so is a pandas `Series`, because neither is registered as a `Sequence` — so
-the negative form would refuse `ndarray`, `Series`, `set` and `dict`, none of which is a
-sequence of characters or of bytes, at the price of refusing the two most natural per-row
+**That module applies its `Sequence` test in two forms, and both are named here because
+they differ only in their sign, and the sign is the whole argument.** The *positive* form
+is the `isinstance(x, Sequence)` just described, and this module's use of it is the four
+names. The *negative* form is `not isinstance(x, Sequence) or isinstance(x, <the four
+names>)`, which refuses every non-`Sequence` on top of the four, and **it is not repeated
+here** — this is the one place the two predicates differ. Measured:
+`isinstance(np.array(["a", "b"]), Sequence)` is `False`, and so is a pandas `Series`,
+because neither is registered as a `Sequence` — so the negative form would refuse
+`ndarray`, `Series`, `set` and `dict`, none of which is a sequence of characters or of
+bytes, at the price of refusing the two most natural per-row
 id columns a caller holding a DataFrame has. The names to refuse are named here; nothing
 else about the argument's type is checked, and no length check is applied against any
 expected row count, because with one argument there is nothing to check against and a guess
@@ -213,9 +217,11 @@ def loso_folds(specimen_of_row: Sequence[str]) -> list[Fold]:
     and their lengths sum to the number of rows supplied.
 
     **An argument that is a sequence of characters or of bytes is refused, before a single
-    row is counted.** `str`, `bytes`, `bytearray` and `memoryview` all satisfy
-    `Sequence[str]`, so `loso_folds("456")` would split into three folds of one row each
-    called `"4"`, `"5"` and `"6"`, and `loso_folds(b"456")` into three folds held out by
+    row is counted.** All four are a `collections.abc.Sequence` at runtime — measured `True`
+    for each — and the `Sequence[str]` annotation on this signature states what a caller is
+    meant to pass rather than what arrives, so `loso_folds("456")` would split into three
+    folds of one row each called `"4"`, `"5"` and `"6"`, and `loso_folds(b"456")` into
+    three folds held out by
     the integers 52, 53 and 54 — both a patch-level split wearing a specimen-level name,
     returned as a valid result rather than as a refusal. The message names the remedy, and
     the rule is about the shape of the argument and not about how long it is: **no length
