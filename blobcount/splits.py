@@ -48,23 +48,40 @@ run of the pipeline.
 above wearing a specimen-level name, returned as a valid result. `bytes` is worse rather
 than different: iterating `b"456"` yields the integers 52, 53 and 54, so `held_out` would
 carry an `int` on a dataclass annotated `str`. `str`, `bytes`, `bytearray` and
-`memoryview` are excluded **by name, and those four names are the standard library's
-sequences of characters and of bytes** — `str` the only one of the former, and the other
-three byte-buffer types of the latter. That is the same rule and the same reasoning
-`blobcount.ablation._thresholds` applies to `ablation.thresholds`, for the same reason: a
-`Sequence` test alone would split `'456'` the way it splits `b"456"`, and this is not a
-type policy nobody asked for, it is the one shape a reader writes by accident.
+`memoryview` are excluded by name, and those four are **the character and byte-buffer
+sequences a caller already holds without importing anything** — `str` the only sequence
+of characters, the other three the byte-buffer types.
 
-**The `Sequence` membership test that module uses is deliberately not repeated here**, and
-this is the one place the two predicates differ. Measured: `isinstance(np.array(["a",
-"b"]), Sequence)` is `False`, and so is a pandas `Series`, because neither is registered
-as a `Sequence`. Membership would therefore add the refusal of `ndarray`, `Series`, `set`
-and `dict` — none of which is a sequence of characters or of bytes, so it buys nothing for
-the one shape this guard exists to catch — at the price of refusing the two most natural
-per-row id columns a caller holding a DataFrame has. The names to refuse are named here;
-nothing else about the argument's type is checked, and no length check is applied against
-any expected row count, because with one argument there is nothing to check against and a
-guess would refuse a legitimate cohort of six one-patch specimens.
+**That set is not closed over the standard library, and the tuple is not widened to close
+it.** `array.array` is a fifth: `array.array("w", "abc")` iterates `'a'`, `'b'`, `'c'`,
+and `array.array("b", b"456")` iterates 52, 53 and 54, both measured
+`isinstance(_, Sequence) is True`, and `loso_folds` accepts both today and returns the same
+three one-row folds. It is parked to be closed together with the identical hole in
+`blobcount.ablation._thresholds`, which refuses these same four names and has the same gap.
+What the four buy is that they cover the shapes a caller reaches without an
+`import array`; naming them is not the same thing as covering every sequence of
+characters, and the difference is recorded here rather than left for a reader to assume
+away.
+
+That is the same rule and the same reasoning `blobcount.ablation._thresholds` applies to
+`ablation.thresholds`. **Its two forms of the `Sequence` test are named apart here, because
+they differ only in their sign and the sign is the whole argument.** The *positive* form,
+`isinstance(x, Sequence)`, accepts all four names above — measured `True` for each — so on
+its own it would split `'456'` into three specimens exactly as it splits `b"456"`, and only
+naming them catches it. This is not a type policy nobody asked for; it is the one shape a
+reader writes by accident.
+
+**The *negative* form that module also applies is not repeated here**, and this is the one
+place the two predicates differ. Its predicate is
+`not isinstance(x, Sequence) or isinstance(x, <the four names>)`, which refuses every
+non-`Sequence` on top of the four. Measured: `isinstance(np.array(["a", "b"]), Sequence)`
+is `False`, and so is a pandas `Series`, because neither is registered as a `Sequence` — so
+the negative form would refuse `ndarray`, `Series`, `set` and `dict`, none of which is a
+sequence of characters or of bytes, at the price of refusing the two most natural per-row
+id columns a caller holding a DataFrame has. The names to refuse are named here; nothing
+else about the argument's type is checked, and no length check is applied against any
+expected row count, because with one argument there is nothing to check against and a guess
+would refuse a legitimate cohort of six one-patch specimens.
 
 **Fewer than two distinct specimens is refused, as a `SplitError`.** The message states
 the rule and the two counts that failed it, because a refusal a caller cannot act on is a
@@ -99,21 +116,28 @@ import numpy as np
 
 __all__ = ["Fold", "SplitError", "loso_folds"]
 
-# The standard library's sequences **of characters or of bytes**, and the only shapes
-# refused by name: `str` is the only sequence of characters, and `bytes`, `bytearray` and
-# `memoryview` are the three byte-buffer types, each a sequence of the integers its bytes
-# spell. All four are registered as a `collections.abc.Sequence` and all four would split
-# into one fold per element, so a `Sequence` test alone would refuse none of them.
-# `range`, `tuple` and `array.array` are correctly absent: a tuple or an array of specimen
-# ids is a legitimate per-row column and `loso_folds` accepts both, and a `range` is a
-# sequence of numbers, which is outside `Sequence[str]` rather than a sequence of
-# characters.
+# The standard library's sequences **of characters or of bytes** that a caller reaches
+# without an import, and the only shapes refused by name: `str` is the only sequence of
+# characters, and `bytes`, `bytearray` and `memoryview` are the three byte-buffer types,
+# each a sequence of the integers its bytes spell. All four are registered as a
+# `collections.abc.Sequence`, so the *positive* test `isinstance(x, Sequence)` accepts
+# every one of them and would split `'456'` into three specimens as readily as `b"456"`;
+# only naming them catches it.
 #
-# `blobcount.ablation._thresholds` refuses `ablation.thresholds` on this same list and on
-# a `Sequence` membership test that this module does not repeat, because
-# `isinstance(np.array(["a", "b"]), Sequence)` is `False` — as it is for a pandas
-# `Series`, neither being registered as a `Sequence` — so membership would refuse a
-# per-row column of ids that arrives in exactly that shape.
+# `range`, `tuple` and `array.array` are correctly absent, and `array.array` is absent for
+# a reason the others are not: a tuple or an array of specimen ids is a legitimate per-row
+# column and `loso_folds` accepts both, where a `range` is a sequence of numbers and is
+# outside `Sequence[str]`. **The cost of that is that an `array.array` of characters or of
+# bytes arrives with it** — `array.array("w", "abc")` iterates `'a'`, `'b'`, `'c'` and
+# `array.array("b", b"456")` iterates 52, 53 and 54 — so this list is *not* closed over
+# the standard library, and it does not claim to be. Parked to be closed alongside the
+# identical gap in `blobcount.ablation._thresholds`, which refuses these same four names.
+#
+# That module's predicate is `not isinstance(x, Sequence) or isinstance(x, <these four>)`,
+# and the second clause is the one repeated here. The first is not, because
+# `isinstance(np.array(["a", "b"]), Sequence)` is `False` — as it is for a pandas `Series`,
+# neither being registered as a `Sequence` — so it would refuse a per-row column of ids
+# that arrives in exactly that shape.
 _SEQUENCES_OF_CHARACTERS_OR_BYTES = (str, bytes, bytearray, memoryview)
 
 
