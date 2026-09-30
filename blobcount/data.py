@@ -360,8 +360,8 @@ def _class_index(label: int, num_classes: int | None = None) -> int:
             f"class a labelling run wrote for a patch, and one that is not reaches "
             f"CrossEntropyLoss as a target it cannot score, which reports the mistake "
             f"against the loss rather than against the column it came from. A class index "
-            f"is a whole number a type can carry — an int, a float that is exactly one, or "
-            f"a numpy integer — {shapes}. Fix the label{remedy}"
+            f"is a whole number a type can carry: an int, a float that is exactly an "
+            f"integer, or a numpy integer — {shapes}. Fix the label{remedy}"
         )
     return whole
 

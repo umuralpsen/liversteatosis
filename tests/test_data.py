@@ -389,7 +389,11 @@ def test_class_weights_refuse_every_label_that_is_not_a_class_index(label, condi
     assert condition in message, message
     assert "CrossEntropyLoss" in message
     assert "Fix the label" in message
-    # And the enumeration the docstring states, so the two cannot drift apart silently.
+    # And the whole enumeration, asserted here as a literal. **This pins the message and
+    # not the module docstring**, which states the same enumeration in prose and is
+    # checked by a reader: no test reads a docstring, and the duplication is the shape
+    # `blobcount.ablation` already uses, where the copy that reaches a caller is the
+    # message and the prose is the one beside it.
     assert (
         "0 or 0.0 or a numpy integer, and not '0' and not true and not a float with a "
         "fraction and not .inf or .nan and not -1 and not 2" in message
@@ -407,13 +411,6 @@ def test_the_refusal_never_claims_a_range_the_label_is_inside_of(label, conditio
     # reported `label '0' is outside range(2)` and sent the reader to the class count.
     # `1.5` is the same false claim with a different value. Only a label that really is
     # outside may be told that it is.
-    with pytest.raises(ValueError) as refused:
-        class_weights([0, 1, label])
-    message = str(refused.value)
-    if "outside range" not in condition:
-        assert "outside range" not in message, message
-    if condition != "not finite":
-        assert "not finite" not in message, message
     with pytest.raises(ValueError) as refused:
         class_weights([0, 1, label])
     message = str(refused.value)
@@ -468,10 +465,23 @@ def test_the_sampler_refuses_every_label_the_weights_refuse(label, condition):
     # one of three places depending on which function the caller reached first. The two
     # are the same predicate over the same list now, and the check is before the `enabled`
     # test, so a disabled sampler refuses what an enabled one refuses.
-    with pytest.raises(ValueError, match="is not a class index"):
-        build_sampler([0, 1, label], enabled=True, seed=1)
-    with pytest.raises(ValueError, match="is not a class index"):
-        build_sampler([0, 1, label], enabled=False, seed=1)
+    #
+    # **The refusal text is compared too, and not only its stem.** Matching
+    # `"is not a class index"` alone would be satisfied by three different refusals at three
+    # call sites; asserting the condition this label broke is what shows they are the same
+    # refusal. The one documented difference is derived from the column rather than listed:
+    # `-1` has no class count here, so it is reported as below zero rather than as outside a
+    # range — the asymmetry `test_the_sampler_names_the_lower_bound_because_it_was_given_no_class_count`
+    # states, in the one case where it applies.
+    expected = (
+        "below zero, which no class index is"
+        if condition.startswith("outside range")
+        else condition
+    )
+    for enabled in (True, False):
+        with pytest.raises(ValueError, match="is not a class index") as refused:
+            build_sampler([0, 1, label], enabled=enabled, seed=1)
+        assert expected in str(refused.value)
 
 
 def test_the_sampler_names_the_lower_bound_because_it_was_given_no_class_count():
@@ -493,8 +503,17 @@ def test_the_sampler_names_the_lower_bound_because_it_was_given_no_class_count()
 def test_the_dataset_refuses_every_label_the_weights_refuse(label, condition, tmp_path):
     # The third of the three, and the one that mattered most: its labels reached
     # `__getitem__`, where the `int()` that stood there truncated whatever it was given.
-    with pytest.raises(ValueError, match="is not a class index"):
+    # As at `build_sampler`, the refusal text is compared and not only its stem, for the
+    # same reason: three call sites making the same refusal is a stronger claim than three
+    # call sites making a refusal.
+    expected = (
+        "below zero, which no class index is"
+        if condition.startswith("outside range")
+        else condition
+    )
+    with pytest.raises(ValueError, match="is not a class index") as refused:
         PatchDataset(_patches(tmp_path, count=3), [0, 1, label])
+    assert expected in str(refused.value)
 
 
 def test_the_dataset_does_not_truncate_a_fractional_label(tmp_path):
