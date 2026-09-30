@@ -1,3 +1,4 @@
+import math
 from pathlib import Path
 
 import numpy as np
@@ -49,6 +50,25 @@ def _write_patch(path, size: int = 64, seed: int = 0):
 def _patches(directory, count: int = 6, size: int = 64):
     """Write `count` distinct patches and return their paths in order."""
     return [_write_patch(directory / f"patch{index}.png", size, seed=index) for index in range(count)]
+
+
+# The eight labels a fold's column can hold that are not class indices, with the condition
+# each one breaks. `2` is absent from the shared list on purpose: it is outside
+# `range(2)` and inside `range(3)`, so only the function that was given a class count can
+# refuse it, and that asymmetry is what the two tests over the call sites pin. The list is
+# the module docstring's enumeration — `0` and not `'0'` and not `true` and not `.inf` or
+# `.nan` and not `1.5` and not `-1` and not `2` — with the second half of it split out.
+_NOT_A_CLASS_INDEX = [
+    ("0", "quoted digit", "not a plain number but a str"),
+    (True, "true", "not a plain number but a bool"),
+    (False, "false", "not a plain number but a bool"),
+    (None, "none", "not a plain number but a NoneType"),
+    (1.5, "fraction", "not a whole number"),
+    (math.inf, "infinity", "not finite"),
+    (-math.inf, "negative infinity", "not finite"),
+    (math.nan, "nan", "not finite"),
+    (-1, "negative", "outside range(2)"),
+]
 
 
 # ---------------------------------------------------------------------------
@@ -164,7 +184,10 @@ def test_class_weights_refuse_a_label_outside_the_class_range(label):
 
 
 def test_class_weights_refuse_a_label_that_is_not_a_whole_class_index():
-    with pytest.raises(ValueError, match="outside range"):
+    # `1.5` is inside `range(2)` and is not a class index, and the message says the second
+    # of those things rather than the first: the old one claimed a range it was not
+    # outside of, which sends the reader to the class count instead of to the cell.
+    with pytest.raises(ValueError, match="not a whole number"):
         class_weights([0, 1.5])
 
 
@@ -335,3 +358,194 @@ def test_torch_refuses_a_sampler_and_shuffle_together(tmp_path):
     ds = PatchDataset(_patches(tmp_path, count=2), [0, 1])
     with pytest.raises(ValueError, match="mutually exclusive"):
         DataLoader(ds, batch_size=2, sampler=build_sampler([0, 1], True, 1), shuffle=True)
+
+
+# ---------------------------------------------------------------------------
+# The label predicate. One `_class_index`, three call sites, and the conditions it holds
+# are the module docstring's enumeration.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("label", "shape", "condition"), _NOT_A_CLASS_INDEX, ids=[row[1] for row in _NOT_A_CLASS_INDEX]
+)
+def test_class_weights_refuse_every_label_that_is_not_a_class_index(label, shape, condition):
+    with pytest.raises(ValueError, match="is not a class index") as refused:
+        class_weights([0, 1, label])
+    message = str(refused.value)
+    # The condition this label broke, and the two sentences that make the refusal worth
+    # reading: why the label matters at all, and what the caller does about it.
+    assert condition in message, message
+    assert "CrossEntropyLoss" in message
+    assert "Fix the label" in message
+    # And the enumeration the docstring states, so the two cannot drift apart silently.
+    assert "and not '0' and not true and not .inf or .nan and not 1.5 and not -1 and not 2" in message
+
+
+@pytest.mark.parametrize(
+    ("label", "shape", "condition"), _NOT_A_CLASS_INDEX, ids=[row[1] for row in _NOT_A_CLASS_INDEX]
+)
+def test_the_refusal_never_claims_a_range_the_label_is_inside_of(label, shape, condition):
+    # The defect this closes, stated as a property of every message rather than of one
+    # label: `int("0")` is `0`, so the range test that stood beside the conversion
+    # reported `label '0' is outside range(2)` and sent the reader to the class count.
+    # `1.5` is the same false claim with a different value. Only a label that really is
+    # outside may be told that it is.
+    with pytest.raises(ValueError) as refused:
+        class_weights([0, 1, label])
+    message = str(refused.value)
+    if "outside range" not in condition:
+        assert "outside range" not in message, message
+    if condition != "not finite":
+        assert "not finite" not in message, message
+
+
+def test_a_non_finite_label_is_refused_by_the_rule_and_not_by_the_conversion():
+    # Both of these escaped the old validator for reasons that had nothing to do with the
+    # rule, measured on this stack: `int(float("inf"))` raises `OverflowError`, which is
+    # not the `ValueError` the module's contract promises, and `int(float("nan"))` raises
+    # `ValueError` carrying CPython's `cannot convert float NaN to integer`, which names
+    # no rule and offers no remedy. A validator whose refusals are the standard library's
+    # is a validator that reports whatever the conversion happened to dislike.
+    for label in (math.inf, -math.inf, math.nan):
+        with pytest.raises(ValueError) as refused:
+            class_weights([0, 1, label])
+        message = str(refused.value)
+        assert "not finite" in message, message
+        assert "cannot convert float" not in message
+        assert "cannot convert float infinity" not in message
+
+
+def test_a_bool_is_refused_where_every_comparison_would_have_accepted_it():
+    # `bool` subclasses `int`, and that is the whole of it: `1 != True` is `False`, so the
+    # range test accepted it, and `int(True) == 1`, so the whole-number test did too.
+    # `class_weights([0, 1, True])` returned the weights of classes 1 and 0 and said
+    # nothing, which is a fold that trains on a class nobody labelled.
+    assert (1 == True) and (1 != True) is False
+    with pytest.raises(ValueError, match="not a plain number but a bool"):
+        class_weights([True, False])
+
+
+def test_an_int_too_large_to_be_a_float_is_refused_as_a_range_and_not_as_an_overflow():
+    # `math.isfinite` converts its argument, so testing every label for finiteness would
+    # trade the `OverflowError` above for a second one a layer below it, in the predicate
+    # written to end them. There is no such thing as an infinite `int`, so the test is
+    # scoped to floats and this label is judged on the only condition that can judge it.
+    with pytest.raises(ValueError, match="outside range\\(2\\)"):
+        class_weights([0, 1, 10**400])
+
+
+@pytest.mark.parametrize(
+    ("label", "shape", "condition"), _NOT_A_CLASS_INDEX, ids=[row[1] for row in _NOT_A_CLASS_INDEX]
+)
+def test_the_sampler_refuses_every_label_the_weights_refuse(label, shape, condition):
+    # `build_sampler` held no check at all before, so a fold's labels were validated in
+    # one of three places depending on which function the caller reached first. The two
+    # are the same predicate over the same list now, and the check is before the `enabled`
+    # test, so a disabled sampler refuses what an enabled one refuses.
+    with pytest.raises(ValueError, match="is not a class index"):
+        build_sampler([0, 1, label], enabled=True, seed=1)
+    with pytest.raises(ValueError, match="is not a class index"):
+        build_sampler([0, 1, label], enabled=False, seed=1)
+
+
+def test_the_sampler_names_the_lower_bound_because_it_was_given_no_class_count():
+    # The asymmetry between the three call sites, stated rather than left to be found at
+    # fold time. `build_sampler` has no `num_classes`, so the upper bound is not a
+    # condition it can hold and the lower bound is: no class index is below zero under any
+    # labelling run. `class_weights` is where `-1` is reported as outside the range.
+    with pytest.raises(ValueError, match="below zero, which no class index is"):
+        build_sampler([0, -1], enabled=True, seed=1)
+    with pytest.raises(ValueError, match="outside range\\(2\\)"):
+        class_weights([0, -1])
+
+
+@pytest.mark.parametrize(
+    ("label", "shape", "condition"), _NOT_A_CLASS_INDEX, ids=[row[1] for row in _NOT_A_CLASS_INDEX]
+)
+def test_the_dataset_refuses_every_label_the_weights_refuse(label, shape, condition, tmp_path):
+    # The third of the three, and the one that mattered most: its labels reached
+    # `__getitem__`, where the `int()` that stood there truncated whatever it was given.
+    with pytest.raises(ValueError, match="is not a class index"):
+        PatchDataset(_patches(tmp_path, count=3), [0, 1, label])
+
+
+def test_the_dataset_does_not_truncate_a_fractional_label(tmp_path):
+    # `int(1.5)` is `1`. The conversion that stood in `__getitem__` truncated a fractional
+    # label to a class the labelling run never wrote, said nothing, and the only trace was
+    # a `labels.csv` cell a reader had to notice by hand. The check is in `__init__` now,
+    # so the label never reaches an item.
+    with pytest.raises(ValueError, match="not a whole number"):
+        PatchDataset(_patches(tmp_path, count=1), [1.5])
+    with pytest.raises(ValueError, match="not a class index"):
+        PatchDataset(_patches(tmp_path, count=1), [0, "1"])
+
+
+def test_the_dataset_and_the_sampler_hold_the_same_rule_the_weights_hold(tmp_path):
+    # One predicate, three call sites: every label every one of them refuses is refused by
+    # the same four conditions, and the only difference between them is which conditions
+    # they have the arguments to hold. A `2` is the case that shows it — outside
+    # `range(2)`, inside `range(3)` — and it is accepted below by the two that hold no
+    # class count and refused by the one that does.
+    for labels in ([0, 1], [0.0, 1.0]):
+        assert class_weights(labels).tolist() == pytest.approx([1.0, 1.0])
+        assert build_sampler(labels, enabled=True, seed=1) is not None
+        ds = PatchDataset(_patches(tmp_path, count=2), labels)
+        # And the label the dataset hands back is the plain `int` the check returned, which
+        # is what `__getitem__`'s return type claims whether the caller wrote `0` or `0.0`.
+        assert all(type(label) is int for label in ds.labels)
+    assert len(PatchDataset(_patches(tmp_path, count=1), [2]).labels) == 1
+    assert build_sampler([0, 2], enabled=True, seed=1) is not None
+    with pytest.raises(ValueError, match="outside range\\(2\\)"):
+        class_weights([0, 2])
+
+
+def test_a_quoted_digit_is_refused_because_a_csv_cell_is_a_string(tmp_path):
+    # The shape this refusal is most likely to meet, and the reason the message names the
+    # type: `labels.csv` is read by `csv.DictReader`, where every cell is a string, so the
+    # one mistake this predicate exists for is a caller that skipped the `int()` at the
+    # read. `'0'` and `0` differ only in those quotes and the weights were being computed
+    # from the difference.
+    with pytest.raises(ValueError, match="not a plain number but a str"):
+        class_weights(["0", "1"])
+    with pytest.raises(ValueError, match="not a plain number but a str"):
+        build_sampler(["0", "1"], enabled=True, seed=1)
+    with pytest.raises(ValueError, match="not a plain number but a str"):
+        PatchDataset(_patches(tmp_path, count=2), ["0", "1"])
+
+
+# ---------------------------------------------------------------------------
+# The loader's shuffle. The order must come from the generator this function seeds, and
+# not from a `DataLoader` behaviour that is torch's business and not this interface's.
+# ---------------------------------------------------------------------------
+
+
+def test_the_shuffle_sampler_is_built_here_and_holds_the_loaders_generator(tmp_path):
+    # `shuffle=True` is a `RandomSampler` holding the loader's own generator, and the
+    # `shuffle` flag this function passes is `False` whatever the caller asked for. The
+    # torch installed here hands its `generator` to the sampler it creates for
+    # `shuffle=True`, so on this stack the two are indistinguishable in what they produce;
+    # what is pinned is the shape, which is what a torch that did not do it would change.
+    ds = PatchDataset(_patches(tmp_path, count=6), [0, 1, 0, 1, 0, 1])
+    loader = build_loader(ds, 2, None, True, 0, 7)
+    assert isinstance(loader.sampler, RandomSampler)
+    assert loader.sampler.generator is loader.generator
+    assert loader.sampler.generator is not torch.default_generator
+    # A loader built with no shuffle has a `SequentialSampler` and no generator at all,
+    # which is the branch the flag is not reaching.
+    plain = build_loader(ds, 2, None, False, 0, 7)
+    assert isinstance(plain.sampler, SequentialSampler)
+
+
+def test_a_second_epoch_is_a_different_order_and_a_rerun_gives_the_same_one(tmp_path):
+    # One generator serves the permutation and the base seed each worker gets, so a second
+    # epoch draws again from the same stream: a different order from the first epoch, and
+    # the same different order in the next run. `training.epochs` is a configured key, so
+    # this is a property the loop depends on rather than an accident of one pass.
+    ds = PatchDataset(_patches(tmp_path, count=6), [0, 1, 0, 1, 0, 1])
+    a = build_loader(ds, 2, None, True, 0, 7)
+    first, second = [y.tolist() for _, y in a], [y.tolist() for _, y in a]
+    b = build_loader(ds, 2, None, True, 0, 7)
+    assert [y.tolist() for _, y in b] == first
+    assert [y.tolist() for _, y in b] == second
+    assert first != second

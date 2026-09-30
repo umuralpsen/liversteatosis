@@ -33,14 +33,63 @@ cross-validation loop**, so until then a label outside the range reaches the int
 as a traceback out of this module; the message names the remedy, which is the part that
 survives the traceback.
 
-**The two flip keys are passed to `p=` as the booleans they are, and are not run through
-`int()`.** `bool` subclasses `int`, so `int(True) == 1` and a coercion here would change
-no behaviour and hide nothing — it is declined because the parameter is a probability and
-`configs/default.yaml` states a `bool` for it, and because `blobcount.config.load` accepts
-an override only when its type is exactly the configured one, so
-`augmentation.horizontal_flip: 1` is a `ConfigError` at load time and never reaches this
-function. `blobcount.ablation._thresholds` refuses a `bool` entry in a threshold list for
-the same reason and against the same hazard.
+**One predicate decides what a label is, and all three functions that take a fold's labels
+run it over every one of them.** `class_weights`, `build_sampler` and `PatchDataset` are
+the three, and they used to disagree about what a label is: `class_weights` refused what
+was outside the range, `build_sampler` counted whatever `Counter` accepted, and
+`PatchDataset` passed the label to `int()` in `__getitem__` and truncated a `1.5` to `1`
+in silence. So a caller's labels were checked in one of three places, and a caller who had
+them wrong learned it from whichever function it happened to call first — which is the
+"looks validated and is not" state this module is written to refuse. `_class_index` is the
+one answer, it is private, and it runs to completion **before** the `int()` it wraps, so
+the conversion is reached only for a value that already has one.
+
+**A label has to be a plain number, finite, exactly a class index, and not below zero, and
+the refusal names the condition it broke.** Four conditions, in the shape
+`blobcount.ablation._thresholds` gives its thresholds and for the reason that module
+states — a rule that lives in three places and in a test comment is a rule nobody can
+hold:
+
+    0  and not '0'  and not true  and not .inf or .nan  and not 1.5  and not -1  and not 2
+
+**A `bool` is refused by a type test and not by the comparison beside it, and the two flip
+keys are passed to `p=` as the booleans they are for the same reason.** `bool` subclasses
+`int`, so `int(True) == 1` and `1 != True` is `False`: every test a label can be put
+through — whole, in range, hashable — accepts it, and `class_weights([0, 1, True])`
+returned the weights of classes 1 and 0 and said nothing about it. A `bool` is a
+legitimate value for a probability and never a legitimate value for a class, and the two
+have to be told apart by type because Python will not. The flip keys stay uncoerced
+because the parameter is a probability and `configs/default.yaml` states a `bool` for it,
+and because `blobcount.config.load` accepts an override only when its type is exactly the
+configured one, so `augmentation.horizontal_flip: 1` is a `ConfigError` at load time and
+never reaches this function.
+
+**A non-finite label is refused by the predicate and not by `int()` refusing it on the way
+through.** `int(float("inf"))` raises `OverflowError` and `int(float("nan"))` raises
+`ValueError` carrying CPython's `cannot convert float NaN to integer`; measured on this
+stack, and neither names a rule. The first is not the `ValueError` this module's contract
+promises, and the second is a refusal with no remedy in it. The finiteness test is scoped
+to `float` in both directions, as in `ablation`: `math.isfinite` converts its argument, so
+it raises an `OverflowError` of its own for an `int` too large to be a float — which would
+trade the bug this predicate exists for a second one a layer below it — and there is no
+such thing as an infinite `int`.
+
+**A `str` is refused, and the refusal does not claim a range it is inside of.** `int("0")`
+is `0` and `0 != "0"`, so the range test that stood beside the conversion reported `label
+'0' is outside range(2)` — false, and false in the way that costs a reader the most,
+because it points at the class count rather than at the cell. This matters here more than
+in `ablation`: a label arrives from a `labels.csv` row read by `csv.DictReader`, where
+every cell is a string, and a caller who forgot the `int()` at the read hands this function
+`'0'`.
+
+**The range is `class_weights`' condition to hold, and the other two do not hold it.**
+`PatchDataset` and `build_sampler` are given no `num_classes` and cannot infer one: a
+class the fold holds none of is still a legal label, so the widest label a caller may
+legitimately have is a class index it has not named here. They run the same three
+conditions and the lower bound, which no class index is under, and a `2` under a two-class
+labelling run is refused by `class_weights` — where the `num_classes` that makes `2` wrong
+is an argument the caller passed. This is stated rather than left to be found at fold time,
+and it is not a second opinion that disagrees with the first.
 
 **The transform values were hard-coded in the original and are configured here.**
 `train.py:97` built the train transform from a literal `Resize((224, 224))`, two bare
@@ -58,17 +107,23 @@ dicts or lists; found <class 'PIL.Image.Image'>`. So a dataset with no transform
 `ToTensor` and nothing else, which is the conversion the interface promises and no
 resizing and no normalization, because choosing those is what `build_transforms` is for.
 
-**A loader's order comes from the generator it is handed, and not from the global one.**
-`build_loader` seeds its own `torch.Generator` from `seed` and passes it to the
-`DataLoader`, which draws each worker process's base seed from it and — in the torch 2.10
-this project resolves to — hands it to the `RandomSampler` it creates for `shuffle=True`.
-So two loaders built with the same seed agree whatever has happened to the global RNG in
-between, which is the property a fold-by-fold run needs: a run that seeds once and then
-builds a loader per fold would otherwise get a different order for every fold from the
-global stream it never reseeded. **That pass-through is a property of the library and is
-stated here because this module's determinism rests on it**, and a torch that did not make
-it would leave the shuffle order drawn from the global stream while the seed argument
-still looked honoured.
+**A loader's order comes from the generator it is built with, and the shuffle sampler is
+built here rather than left to the `DataLoader` to create.** `build_loader` seeds its own
+`torch.Generator` from `seed`, hands it to a `RandomSampler` it constructs, and passes
+`shuffle=False` — so two loaders built with the same seed agree whatever has happened to
+the global RNG in between, which is the property a fold-by-fold run needs: a run that seeds
+once and then builds a loader per fold would otherwise get a different order for every fold
+from the global stream it never reseeded. **The sampler is constructed here because the
+order must not depend on a library behaviour this project has not declared.** `DataLoader`
+accepts a `generator`, and whether it also passes that generator to the `RandomSampler` it
+creates for `shuffle=True` is torch's business and not this interface's: in the torch 2.10
+installed here it does — measured, and this module's determinism rested on it for a round —
+and the pass-through is nowhere in `pyproject.toml`, whose `torch>=2.0` admits resolutions
+that do not have it. A red suite on a legal resolution is the wrong failure mode, and
+`shuffle=True` *is* `RandomSampler(dataset, generator=generator)`, so spelling it out costs
+the loader nothing and needs no floor bump. One generator serves both that permutation and
+the base seed each worker gets, so a second epoch of the same loader draws a different
+order from the same stream: reproducible across runs, and not a repeat of the first epoch.
 
 **Nothing here is caught, logged, or written.** `PatchDataset.__getitem__` opens one
 patch, and a patch file that is not there raises from that read — inside a worker process
@@ -106,12 +161,13 @@ Declared interface, in `__all__` order:
 
 from __future__ import annotations
 
+import math
 from collections import Counter
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import torch
-from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
+from torch.utils.data import DataLoader, Dataset, RandomSampler, WeightedRandomSampler
 from torchvision import transforms
 
 from blobcount.config import Config
@@ -143,6 +199,87 @@ IMAGENET_STD = (0.229, 0.224, 0.225)
 _TO_TENSOR = transforms.ToTensor()
 
 
+def _class_index(label: int, num_classes: int | None = None) -> int:
+    """Return `label` as a plain `int` class index, refusing anything that is not one.
+
+    **This is the one definition of a label in this module, and all three functions that
+    take a fold's labels run it over every label they are given.** The conditions are the
+    module docstring's, as is the argument for one predicate over three call sites rather
+    than one test per function; what is here is the code that makes both hold.
+
+    `num_classes` is `None` for `PatchDataset` and `build_sampler`, which are given no
+    class count and cannot infer one, so the upper bound is not held here for them — the
+    module docstring gives why, and `class_weights` is where a `2` under a two-class
+    labelling run is refused, because `num_classes` is its argument.
+
+    **A `ValueError` in every case, and one message that names the condition the label
+    actually broke rather than one message per condition.** The broken condition comes
+    first and the four conditions after it, so a quoted digit is told it is a quoted digit
+    and not that it is outside a range it is inside of, and the type is named rather than
+    described: `'0'` and `0` are the two values a caller holding a `labels.csv` cell
+    actually has, and the difference between them is the whole mistake.
+    """
+    # One predicate, and every test in it runs to completion *before* the `int()` below, so
+    # the conversion is reached only for a value that already has an answer. Measured on
+    # this stack, in the order the old code reached them: `int(float("inf"))` raises
+    # `OverflowError`, `int(float("nan"))` raises `ValueError` carrying CPython's
+    # `cannot convert float NaN to integer`, and `int("0")` is `0`, which is why the range
+    # test that stood beside the conversion called a string out of range rather than out of
+    # type. The argument is a label, so it is a Python number and not a string.
+    is_number = isinstance(label, (int, float)) and not isinstance(label, bool)
+    # The finiteness test, scoped to `float` on purpose in both directions: `math.isfinite`
+    # converts its argument and raises an `OverflowError` of its own for an `int` too large
+    # to be a float, and there is no such thing as an infinite `int`. A `bool` is not asked
+    # about, since the type test already refused it and its answer would be `True` anyway.
+    is_finite = not isinstance(label, float) or math.isfinite(label)
+    # `whole` is `None` for anything the two tests above refused, and every test after this
+    # line is guarded on it: `int()` of a `str` is legal, so an unguarded `whole != label`
+    # would be one predicate reporting three different mistakes for one value.
+    whole = int(label) if is_number and is_finite else None
+    problems: list[str] = []
+    if not is_number:
+        problems.append(f"not a plain number but a {type(label).__name__}")
+    elif not is_finite:
+        problems.append("not finite")
+    elif whole != label:
+        problems.append("not a whole number")
+    # The upper bound is held only where a class count was given, and the lower bound
+    # wherever it was not already reported: a `-1` under `class_weights` is outside the
+    # range and that is the whole of what is true about it, while the same `-1` at the two
+    # call sites with no count is refused for what it is — below zero, which no class index
+    # is under any labelling run. One bound per message, so the list never names a
+    # condition twice for one value.
+    outside = whole is not None and num_classes is not None and not 0 <= whole < num_classes
+    if outside:
+        problems.append(
+            f"outside range({num_classes}), the class indices 0 to {num_classes - 1}"
+        )
+    elif whole is not None and whole < 0:
+        problems.append("below zero, which no class index is")
+    if problems:
+        # The enumeration is the same four conditions in the shape the module docstring
+        # states them, with the upper bound's own example added only where there is a class
+        # count to be outside of. It is the second half of the message because the first
+        # half is what this label did and this is what any label may not do.
+        shapes = "0 and not '0' and not true and not .inf or .nan and not 1.5 and not -1"
+        if num_classes is not None:
+            shapes += f" and not {num_classes}"
+        remedy = (
+            ", or pass the num_classes that labelling run used"
+            if num_classes is not None
+            else ""
+        )
+        raise ValueError(
+            f"label {label!r} is not a class index: {'; '.join(problems)}. A label is the "
+            f"class a labelling run wrote for a patch, and one that is not reaches "
+            f"CrossEntropyLoss as a target it cannot score, which reports the mistake "
+            f"against the loss rather than against the column it came from. Every label "
+            f"has to be a plain number that is finite, exactly a class index and not "
+            f"below zero — {shapes}. Fix the label{remedy}"
+        )
+    return whole
+
+
 class PatchDataset(Dataset):
     """One patch per row, with the class labelling gave it, rendered by one transform.
 
@@ -160,6 +297,13 @@ class PatchDataset(Dataset):
     tensor, and a caller holding one label and comparing it against a plain `int` should
     not have to know that anything else was possible.
 
+    **Every label is checked here, in `__init__`, and kept as the plain `int` the check
+    returned.** No `num_classes` is passed, so the upper bound is not one of the conditions
+    this call makes and the module docstring says why; a `1.5` is refused here rather than
+    reaching `__getitem__`, where the `int()` that stood there would have truncated it to
+    `1` and said nothing — the fold would then have trained on a class nobody labelled, and
+    the only trace would be a `labels.csv` cell a reader had to notice by hand.
+
     Nothing is resized on the way in and no channel is dropped: `extract.read_patch` wrote
     every patch as the `uint8` `(extraction.patch_size, extraction.patch_size, 3)` array
     the index records, so the pixels here are the pixels that were extracted, and the
@@ -174,7 +318,7 @@ class PatchDataset(Dataset):
         transform: Callable | None = None,
     ) -> None:
         self.paths = [Path(path) for path in paths]
-        self.labels = list(labels)
+        self.labels = [_class_index(label) for label in labels]
         self.transform = transform
 
     def __len__(self) -> int:
@@ -189,8 +333,8 @@ class PatchDataset(Dataset):
         with Image.open(self.paths[index]) as source:
             patch = source.convert("RGB")
         if self.transform is None:
-            return _TO_TENSOR(patch), int(self.labels[index])
-        return self.transform(patch), int(self.labels[index])
+            return _TO_TENSOR(patch), self.labels[index]
+        return self.transform(patch), self.labels[index]
 
 
 def class_weights(labels: Sequence[int], num_classes: int = 2) -> torch.Tensor:
@@ -211,13 +355,19 @@ def class_weights(labels: Sequence[int], num_classes: int = 2) -> torch.Tensor:
     gets `0.0` rather than the `inf` the quotient would divide to; the module docstring
     carries why, and the state is reachable in this cohort rather than hypothetical.
 
-    **A label that is not one of the `num_classes` classes is refused here**, as a
-    `ValueError` naming the remedy, because the alternative is an out-of-range target
-    reaching `CrossEntropyLoss` and surfacing as an index error attributed to the loss. A
-    label is also required to be a whole number, and a `1.5` is refused by the same
-    message rather than counted as class 1: the labels are written by the labelling run
-    from `labeling.blob_threshold` and there is no shape of a labelling run that produces
-    one, so a fractional label is a caller mistake and not a rounding to perform.
+    **Every label is checked by `_class_index`, and no weight is computed until every one
+    of them has passed**, so a fold's vector is not returned when a fraction of it was a
+    label the weight was not really weighting. The four conditions are the module
+    docstring's; what is added here is the one only this function can hold.
+
+    **The class range is checked here and at neither of the other two call sites, because
+    this is the function the `num_classes` was passed to.** A label of `2` is outside
+    `range(2)` and inside `range(3)`, so no check that does not have the width can call it
+    wrong; `PatchDataset` and `build_sampler` are given no width and refuse a label only
+    for what it is. The two are the same predicate asked two questions, and the
+    cross-validation loop builds all three from one fold's labels, so a label this refuses
+    is a label the fold cannot be trained on rather than one two functions happened to
+    allow.
 
     `num_classes` is the width of the returned vector and the range a label has to fall
     in, so a caller whose labels run used a third class must say so here rather than
@@ -226,17 +376,7 @@ def class_weights(labels: Sequence[int], num_classes: int = 2) -> torch.Tensor:
     counts = [0] * num_classes
     total = len(labels)
     for label in labels:
-        whole = int(label)
-        if whole != label or not 0 <= whole < num_classes:
-            raise ValueError(
-                f"label {label!r} is outside range({num_classes}), the class indices 0 to "
-                f"{num_classes - 1} that this weight vector has one entry for: a label is "
-                f"the class a labelling run wrote for a patch, and one outside the range "
-                f"reaches CrossEntropyLoss as a target it cannot score, which reports the "
-                f"mistake against the loss rather than against the column it came from. "
-                f"Fix the label, or pass the num_classes that labelling run used"
-            )
-        counts[whole] += 1
+        counts[_class_index(label, num_classes)] += 1
     return torch.tensor(
         [total / (num_classes * count) if count else 0.0 for count in counts],
         dtype=torch.float32,
@@ -272,12 +412,23 @@ def build_sampler(
     The caller must pass the same labels it gave `PatchDataset` and `class_weights` for
     this fold, one per training row: the weights are indexed by position, so a `labels`
     that is not the fold's training labels samples a fold the loss was not fitted for.
+
+    **Every label is checked here too, by the same `_class_index` `class_weights` uses,
+    and the labels the weights are counted from are the ones the check returned.** This
+    function used to hold no check at all, so a fold's labels were validated in one of
+    three places depending on which function the caller happened to reach first; the two
+    are now the same predicate over the same list, and the class count is the one condition
+    only `class_weights` holds, because only it is given one. **The check runs before the
+    `enabled` test and not after it, so a disabled sampler refuses a label an enabled one
+    refuses** — the argument is the fold's labels either way, and a caller that gets them
+    wrong should hear it from the call it made rather than from the next one.
     """
+    indices = [_class_index(label) for label in labels]
     if not enabled:
         return None
-    counts = Counter(labels)
+    counts = Counter(indices)
     return WeightedRandomSampler(
-        weights=[1.0 / counts[label] for label in labels],
+        weights=[1.0 / counts[index] for index in indices],
         num_samples=len(labels),
         replacement=True,
         generator=torch.Generator().manual_seed(seed),
@@ -365,15 +516,16 @@ def build_loader(
     rows in dataset order, which is what a validation loader wants and what
     `blobcount.splits.val_idx` is built to be read in.
 
-    **The generator is this function's own, seeded from `seed` and never the global one.**
-    It is handed to the `DataLoader`, which draws each worker process's base seed from it
-    and, in the torch 2.10 this project resolves to, passes it to the `RandomSampler` it
-    creates for `shuffle=True`. Both are what make a fold reproducible: the run seeds once
-    and builds a loader per fold, and a loader that read the global stream would give every
-    fold a different order from a stream nothing reseeded, so a rerun of the same fold
-    would not be the same fold. `tests/test_data.py` separates the two loaders by a
-    deliberate draw from the global generator, so a loader that fell back to it would fail
-    rather than agree by luck.
+    **`shuffle=True` is a `RandomSampler` this function constructs, not a flag it passes.**
+    The module docstring gives the whole of it: a `DataLoader` given `generator=` and
+    `shuffle=True` hands that generator to the `RandomSampler` it creates in the torch 2.10
+    installed here, and nothing in `pyproject.toml` says a resolution below that would, so
+    on such a resolution the order would come from the global stream while the `seed`
+    argument still looked honoured. What `DataLoader` builds for a `shuffle` it is not given
+    is a `SequentialSampler`, so the two cases below are the flag written out rather than
+    interpreted. **One generator serves the permutation and the base seed each worker is
+    given**, so a second epoch of one loader draws a different order from the same stream:
+    reproducible across runs, and not a repeat of the first epoch.
 
     `batch_size` and `num_workers` arrive as arguments and are not read from a
     configuration here: `training.batch_size` and `training.num_workers` are read by the
@@ -382,11 +534,16 @@ def build_loader(
     """
     generator = torch.Generator()
     generator.manual_seed(int(seed))
+    sampler = (
+        RandomSampler(dataset, generator=generator)
+        if sampler is None and shuffle
+        else sampler
+    )
     return DataLoader(
         dataset,
         batch_size=batch_size,
         sampler=sampler,
-        shuffle=shuffle if sampler is None else False,
+        shuffle=False,
         num_workers=num_workers,
         generator=generator,
     )
