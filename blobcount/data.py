@@ -44,13 +44,51 @@ them wrong learned it from whichever function it happened to call first — whic
 one answer, it is private, and it runs to completion **before** the `int()` it wraps, so
 the conversion is reached only for a value that already has one.
 
-**A label has to be a plain number, finite, exactly a class index, and not below zero, and
-the refusal names the condition it broke.** Four conditions, in the shape
-`blobcount.ablation._thresholds` gives its thresholds and for the reason that module
-states — a rule that lives in three places and in a test comment is a rule nobody can
-hold:
+**A class index is a whole number a type can carry, and the refusal names the condition it
+broke.** The rule is a type rule and a value rule, in the shape
+`blobcount.ablation._thresholds` gives its thresholds and for the reason that module states
+— a rule that lives in three places and in a test comment is a rule nobody can hold:
 
-    0  and not '0'  and not true  and not .inf or .nan  and not 1.5  and not -1  and not 2
+    0, or 0.0, or a numpy integer
+    not '0', not True or False, not a float with a fraction, not .inf or .nan, not -1,
+    and not 2 when num_classes is 2
+
+**The type rule is `numbers.Integral` or `float`, and it is stated that way rather than as
+a list of types it happens to name.** The first version of this predicate tested
+`isinstance(label, (int, float))`, and that refused a numpy integer: measured on the numpy
+2.2.2 here, `isinstance(np.int64(0), int)` is `False` and so is `isinstance(np.int32(0),
+int)`, so `class_weights(np.array([0, 1, 0, 1]))` and `build_sampler(np.array([0, 1, 0, 1]),
+True, 1)` raised where both had worked — a caller reading the `label` column of a DataFrame
+holds nothing else. `numbers.Integral` is the registration CPython and numpy both agree on
+and `float` is the other half of it, so the two rules are **a numpy integer is a class
+index; a float is one only when it is finite and exactly an integer.** One sentence, and it
+is a contract rather than a list of what happened to be registered.
+
+**A `numpy` array of labels is accepted by all three functions although it is not a
+`Sequence`.** Measured: `isinstance(np.array([0, 1]), Sequence)` is `False`, so the declared
+`Sequence[int]` does not cover it — and `class_weights(np.array([0, 1, 0, 1]))`,
+`build_sampler(np.array([0, 1, 0, 1]), True, 1)` and `PatchDataset(paths, np.array([0, 1]))`
+all work, because each of the three iterates what it was given and `_class_index` judges the
+values that come out. **This is the same asymmetry `blobcount.splits` states for per-row ids
+at `splits.py:78-85`**, where the negative form of a container predicate "would refuse
+`ndarray`, `Series`, `set` and `dict` … at the price of refusing the two most natural per-row
+id columns a caller holding a DataFrame has" — and it is stated here for the same reason: a
+DataFrame column is the most natural source of a fold's labels there is, and this module must
+not refuse it.
+
+**`np.float64` is still accepted here and `np.float32` is not, and that is a fact of numpy's
+registration rather than a rule — so the rule above is written to absorb it.** `np.float64`
+subclasses Python's `float` and `np.float32` does not, measured, which is the same
+registration accident as the one the `numbers.Integral` half fixes, pointing the other way.
+A width of float is not a different kind of class index, and **`np.float32` is refused by the
+type test rather than by the fraction rule**: `int(np.float32(0.5))` is `0` and
+`0 != np.float32(0.5)` is `True`, so had the type test let it through the fraction rule
+would have caught it anyway, and a caller is told the type it holds rather than a fraction it
+does not. `np.float32(0.0)` is therefore the one value a caller can reach that this refuses
+for no good reason, and the remedy is a documented `.astype(int)` at that caller's read
+rather than a wider rule here — a rule wide enough to admit it would admit a `Fraction` and a
+`Decimal` beside it. **`np.bool_` is not an `Integral`** and is refused by the type test, not
+by the `bool` guard below.
 
 **A `bool` is refused by a type test and not by the comparison beside it, and the two flip
 keys are passed to `p=` as the booleans they are for the same reason.** `bool` subclasses
@@ -62,7 +100,8 @@ have to be told apart by type because Python will not. The flip keys stay uncoer
 because the parameter is a probability and `configs/default.yaml` states a `bool` for it,
 and because `blobcount.config.load` accepts an override only when its type is exactly the
 configured one, so `augmentation.horizontal_flip: 1` is a `ConfigError` at load time and
-never reaches this function.
+never reaches this function. `bool` subclasses `numbers.Integral` as well as `int`, so the
+`bool` guard is the whole of what keeps it out of the widened type test.
 
 **A non-finite label is refused by the predicate and not by `int()` refusing it on the way
 through.** `int(float("inf"))` raises `OverflowError` and `int(float("nan"))` raises
@@ -80,16 +119,17 @@ is `0` and `0 != "0"`, so the range test that stood beside the conversion report
 because it points at the class count rather than at the cell. This matters here more than
 in `ablation`: a label arrives from a `labels.csv` row read by `csv.DictReader`, where
 every cell is a string, and a caller who forgot the `int()` at the read hands this function
-`'0'`.
+`'0'`. The refusal names the type by its **qualified** name, `numpy.int64` and not
+`int64`, because a traceback out of a worker process is read on its own.
 
 **The range is `class_weights`' condition to hold, and the other two do not hold it.**
 `PatchDataset` and `build_sampler` are given no `num_classes` and cannot infer one: a
 class the fold holds none of is still a legal label, so the widest label a caller may
-legitimately have is a class index it has not named here. They run the same three
-conditions and the lower bound, which no class index is under, and a `2` under a two-class
-labelling run is refused by `class_weights` — where the `num_classes` that makes `2` wrong
-is an argument the caller passed. This is stated rather than left to be found at fold time,
-and it is not a second opinion that disagrees with the first.
+legitimately have is a class index it has not named here. They run the same conditions
+except the upper bound, and the lower bound with it, which no class index is under, and a
+`2` under a two-class labelling run is refused by `class_weights` — where the `num_classes`
+that makes `2` wrong is an argument the caller passed. This is stated rather than left to be
+found at fold time, and it is not a second opinion that disagrees with the first.
 
 **The transform values were hard-coded in the original and are configured here.**
 `train.py:97` built the train transform from a literal `Resize((224, 224))`, two bare
@@ -162,6 +202,7 @@ Declared interface, in `__all__` order:
 from __future__ import annotations
 
 import math
+import numbers
 from collections import Counter
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -214,10 +255,20 @@ def _class_index(label: int, num_classes: int | None = None) -> int:
 
     **A `ValueError` in every case, and one message that names the condition the label
     actually broke rather than one message per condition.** The broken condition comes
-    first and the four conditions after it, so a quoted digit is told it is a quoted digit
-    and not that it is outside a range it is inside of, and the type is named rather than
-    described: `'0'` and `0` are the two values a caller holding a `labels.csv` cell
-    actually has, and the difference between them is the whole mistake.
+    first and the conditions after it, so a quoted digit is told it is a quoted digit and
+    not that it is outside a range it is inside of. The type is named by its **qualified**
+    name — `numpy.int64` and not `int64` — because a traceback read out of a worker process
+    is read on its own and `int64` alone says nothing about where the value came from.
+
+    **A class index is an integer, and `numbers.Integral` is what that means here.** The
+    two rules are in the module docstring: the *integral* rule accepts `int` and every
+    `numbers.Integral` a caller reaches per row, which is what a numpy integer is; the
+    *float* rule accepts a `float` that is finite and exactly a class index, because a
+    weight vector computed from a computed label is a weight vector whose provenance nobody
+    can check. Both are the same `ablation` shape — one predicate, tests before the
+    conversion — with the type test widened from `(int, float)` to `numbers.Integral` and
+    `float`, which is the only line that differs from `blobcount.ablation._thresholds:951`
+    and the only one the numpy rule needed.
     """
     # One predicate, and every test in it runs to completion *before* the `int()` below, so
     # the conversion is reached only for a value that already has an answer. Measured on
@@ -225,8 +276,30 @@ def _class_index(label: int, num_classes: int | None = None) -> int:
     # `OverflowError`, `int(float("nan"))` raises `ValueError` carrying CPython's
     # `cannot convert float NaN to integer`, and `int("0")` is `0`, which is why the range
     # test that stood beside the conversion called a string out of range rather than out of
-    # type. The argument is a label, so it is a Python number and not a string.
-    is_number = isinstance(label, (int, float)) and not isinstance(label, bool)
+    # type.
+    #
+    # **The type test is two rules, not one, and the second is why `numbers` is imported
+    # here at all.** `isinstance(np.int64(0), int)` is `False` on this stack and
+    # `isinstance(np.int32(0), int)` is `False` too, so the `(int, float)` this predicate
+    # used for a round refused a numpy integer a caller reads straight out of a DataFrame
+    # column — measured: `class_weights(np.array([0, 1, 0, 1]))` and
+    # `build_sampler(np.array([0, 1, 0, 1]), True, 1)` both raised, and both worked before
+    # it. `numbers.Integral` is the registration CPython and numpy both agree on, and
+    # `bool` subclasses it, so the `bool` guard is what keeps `True` out — which is the
+    # condition it was written for and is not weakened by the widening.
+    #
+    # `float` rather than `numbers.Real` on the other branch, and the reason is the same
+    # one: `Real` is `True` of a `Fraction` and of `np.float32` alike, and a fraction is
+    # not a class index under any reading. `np.float64` is a `float` subclass and is
+    # therefore still accepted here; `np.float32` is not, and that is a float of a different
+    # width rather than a different kind of number. The two numpy widths splitting is a
+    # registration fact of the library and not a rule, which is why the rule is stated as
+    # "`numbers.Integral` or `float`" above instead of as a list of types it happens to
+    # name. **`np.bool_` is not an `Integral`** and is refused by the type test rather than
+    # by the `bool` guard, which is the one thing about it worth knowing.
+    is_number = (
+        not isinstance(label, bool) and isinstance(label, (numbers.Integral, float))
+    )
     # The finiteness test, scoped to `float` on purpose in both directions: `math.isfinite`
     # converts its argument and raises an `OverflowError` of its own for an `int` too large
     # to be a float, and there is no such thing as an infinite `int`. A `bool` is not asked
@@ -238,7 +311,15 @@ def _class_index(label: int, num_classes: int | None = None) -> int:
     whole = int(label) if is_number and is_finite else None
     problems: list[str] = []
     if not is_number:
-        problems.append(f"not a plain number but a {type(label).__name__}")
+        # The qualified name, not `__name__` alone: measured, `type(label).__name__` of a
+        # numpy label is `int64`, which tells a reader of a worker's traceback nothing
+        # about where the value came from, and `str` is a worse collision with a reader who
+        # is holding an `np.str_`. The article agrees with the type and not with the class
+        # name, which is why the name is last in the sentence.
+        problems.append(
+            "not a number a class index can be, but a "
+            f"{type(label).__module__}.{type(label).__name__}"
+        )
     elif not is_finite:
         problems.append("not finite")
     elif whole != label:
@@ -257,11 +338,16 @@ def _class_index(label: int, num_classes: int | None = None) -> int:
     elif whole is not None and whole < 0:
         problems.append("below zero, which no class index is")
     if problems:
-        # The enumeration is the same four conditions in the shape the module docstring
-        # states them, with the upper bound's own example added only where there is a class
-        # count to be outside of. It is the second half of the message because the first
-        # half is what this label did and this is what any label may not do.
-        shapes = "0 and not '0' and not true and not .inf or .nan and not 1.5 and not -1"
+        # The enumeration is the same conditions in the shape the module docstring states
+        # them, with the upper bound's own example added only where there is a class count
+        # to be outside of. It is the second half of the message because the first half is
+        # what this label did and this is what any label may not do. The numpy examples are
+        # in it because the rule that produces this message accepts them, and a caller
+        # holding a DataFrame column has them in hand when they read it.
+        shapes = (
+            "0 or 0.0 or a numpy integer, and not '0' and not true and not a float with a "
+            "fraction and not .inf or .nan and not -1"
+        )
         if num_classes is not None:
             shapes += f" and not {num_classes}"
         remedy = (
@@ -273,9 +359,9 @@ def _class_index(label: int, num_classes: int | None = None) -> int:
             f"label {label!r} is not a class index: {'; '.join(problems)}. A label is the "
             f"class a labelling run wrote for a patch, and one that is not reaches "
             f"CrossEntropyLoss as a target it cannot score, which reports the mistake "
-            f"against the loss rather than against the column it came from. Every label "
-            f"has to be a plain number that is finite, exactly a class index and not "
-            f"below zero — {shapes}. Fix the label{remedy}"
+            f"against the loss rather than against the column it came from. A class index "
+            f"is a whole number a type can carry — an int, a float that is exactly one, or "
+            f"a numpy integer — {shapes}. Fix the label{remedy}"
         )
     return whole
 
@@ -302,7 +388,10 @@ class PatchDataset(Dataset):
     this call makes and the module docstring says why; a `1.5` is refused here rather than
     reaching `__getitem__`, where the `int()` that stood there would have truncated it to
     `1` and said nothing — the fold would then have trained on a class nobody labelled, and
-    the only trace would be a `labels.csv` cell a reader had to notice by hand.
+    the only trace would be a `labels.csv` cell a reader had to notice by hand. `labels` is
+    declared a `Sequence[int]` and a `numpy` array of labels is accepted anyway, iterated
+    row by row; the module docstring gives why, and it is the same rule the other two call
+    sites run over the same rows.
 
     Nothing is resized on the way in and no channel is dropped: `extract.read_patch` wrote
     every patch as the `uint8` `(extraction.patch_size, extraction.patch_size, 3)` array
@@ -357,7 +446,7 @@ def class_weights(labels: Sequence[int], num_classes: int = 2) -> torch.Tensor:
 
     **Every label is checked by `_class_index`, and no weight is computed until every one
     of them has passed**, so a fold's vector is not returned when a fraction of it was a
-    label the weight was not really weighting. The four conditions are the module
+    label the weight was not really weighting. The conditions are the module
     docstring's; what is added here is the one only this function can hold.
 
     **The class range is checked here and at neither of the other two call sites, because
@@ -371,7 +460,9 @@ def class_weights(labels: Sequence[int], num_classes: int = 2) -> torch.Tensor:
 
     `num_classes` is the width of the returned vector and the range a label has to fall
     in, so a caller whose labels run used a third class must say so here rather than
-    receive a vector it can index out of.
+    receive a vector it can index out of. `labels` is declared a `Sequence[int]` and a
+    `numpy` array of labels is accepted anyway; the module docstring gives why, and the
+    rule for one label is the same one the other two call sites run.
     """
     counts = [0] * num_classes
     total = len(labels)
@@ -421,7 +512,8 @@ def build_sampler(
     only `class_weights` holds, because only it is given one. **The check runs before the
     `enabled` test and not after it, so a disabled sampler refuses a label an enabled one
     refuses** — the argument is the fold's labels either way, and a caller that gets them
-    wrong should hear it from the call it made rather than from the next one.
+    wrong should hear it from the call it made rather than from the next one. A `numpy` array
+    of labels is accepted although it is not a `Sequence`; the module docstring gives why.
     """
     indices = [_class_index(label) for label in labels]
     if not enabled:

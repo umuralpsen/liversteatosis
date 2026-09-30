@@ -1,4 +1,5 @@
 import math
+from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
@@ -52,22 +53,28 @@ def _patches(directory, count: int = 6, size: int = 64):
     return [_write_patch(directory / f"patch{index}.png", size, seed=index) for index in range(count)]
 
 
-# The eight labels a fold's column can hold that are not class indices, with the condition
-# each one breaks. `2` is absent from the shared list on purpose: it is outside
-# `range(2)` and inside `range(3)`, so only the function that was given a class count can
-# refuse it, and that asymmetry is what the two tests over the call sites pin. The list is
-# the module docstring's enumeration — `0` and not `'0'` and not `true` and not `.inf` or
-# `.nan` and not `1.5` and not `-1` and not `2` — with the second half of it split out.
+# The nine labels a fold's column can hold that are not class indices, each with the
+# condition it breaks — two columns, because a reader of a failure needs both and `ids`
+# alone is not in the message. The `condition` is a plain substring of the refusal, so a
+# change to the wording of a message fails here rather than passing silently; the qualified
+# type name in it is the same one the message is required to carry, which is what pins it.
+# `2` is absent on purpose: it is outside `range(2)` and inside `range(3)`, so only the
+# function that was given a class count can refuse it, and that asymmetry is what
+# `test_the_sampler_names_the_lower_bound_because_it_was_given_no_class_count` and
+# `test_the_dataset_and_the_sampler_hold_the_same_rule_the_weights_hold` pin. This is the
+# module docstring's enumeration — `0` or `0.0` or a numpy integer, and not `'0'` and not
+# `true` and not a float with a fraction and not `.inf` or `.nan` and not `-1` and not `2`
+# — with the upper bound split out.
 _NOT_A_CLASS_INDEX = [
-    ("0", "quoted digit", "not a plain number but a str"),
-    (True, "true", "not a plain number but a bool"),
-    (False, "false", "not a plain number but a bool"),
-    (None, "none", "not a plain number but a NoneType"),
-    (1.5, "fraction", "not a whole number"),
-    (math.inf, "infinity", "not finite"),
-    (-math.inf, "negative infinity", "not finite"),
-    (math.nan, "nan", "not finite"),
-    (-1, "negative", "outside range(2)"),
+    ("0", "not a number a class index can be, but a builtins.str"),
+    (True, "not a number a class index can be, but a builtins.bool"),
+    (False, "not a number a class index can be, but a builtins.bool"),
+    (None, "not a number a class index can be, but a builtins.NoneType"),
+    (1.5, "not a whole number"),
+    (math.inf, "not finite"),
+    (-math.inf, "not finite"),
+    (math.nan, "not finite"),
+    (-1, "outside range(2)"),
 ]
 
 
@@ -362,14 +369,18 @@ def test_torch_refuses_a_sampler_and_shuffle_together(tmp_path):
 
 # ---------------------------------------------------------------------------
 # The label predicate. One `_class_index`, three call sites, and the conditions it holds
-# are the module docstring's enumeration.
+# are the module docstring's enumeration. The `ids` below are written out rather than taken
+# from a column of `_NOT_A_CLASS_INDEX`, because the labels in it are values rather than
+# names and `repr` of a `nan` is a poor id.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
-    ("label", "shape", "condition"), _NOT_A_CLASS_INDEX, ids=[row[1] for row in _NOT_A_CLASS_INDEX]
+    ("label", "condition"),
+    _NOT_A_CLASS_INDEX,
+    ids=["str", "true", "false", "none", "fraction", "inf", "-inf", "nan", "negative"],
 )
-def test_class_weights_refuse_every_label_that_is_not_a_class_index(label, shape, condition):
+def test_class_weights_refuse_every_label_that_is_not_a_class_index(label, condition):
     with pytest.raises(ValueError, match="is not a class index") as refused:
         class_weights([0, 1, label])
     message = str(refused.value)
@@ -379,18 +390,30 @@ def test_class_weights_refuse_every_label_that_is_not_a_class_index(label, shape
     assert "CrossEntropyLoss" in message
     assert "Fix the label" in message
     # And the enumeration the docstring states, so the two cannot drift apart silently.
-    assert "and not '0' and not true and not .inf or .nan and not 1.5 and not -1 and not 2" in message
+    assert (
+        "0 or 0.0 or a numpy integer, and not '0' and not true and not a float with a "
+        "fraction and not .inf or .nan and not -1 and not 2" in message
+    )
 
 
 @pytest.mark.parametrize(
-    ("label", "shape", "condition"), _NOT_A_CLASS_INDEX, ids=[row[1] for row in _NOT_A_CLASS_INDEX]
+    ("label", "condition"),
+    _NOT_A_CLASS_INDEX,
+    ids=["str", "true", "false", "none", "fraction", "inf", "-inf", "nan", "negative"],
 )
-def test_the_refusal_never_claims_a_range_the_label_is_inside_of(label, shape, condition):
+def test_the_refusal_never_claims_a_range_the_label_is_inside_of(label, condition):
     # The defect this closes, stated as a property of every message rather than of one
     # label: `int("0")` is `0`, so the range test that stood beside the conversion
     # reported `label '0' is outside range(2)` and sent the reader to the class count.
     # `1.5` is the same false claim with a different value. Only a label that really is
     # outside may be told that it is.
+    with pytest.raises(ValueError) as refused:
+        class_weights([0, 1, label])
+    message = str(refused.value)
+    if "outside range" not in condition:
+        assert "outside range" not in message, message
+    if condition != "not finite":
+        assert "not finite" not in message, message
     with pytest.raises(ValueError) as refused:
         class_weights([0, 1, label])
     message = str(refused.value)
@@ -422,7 +445,7 @@ def test_a_bool_is_refused_where_every_comparison_would_have_accepted_it():
     # `class_weights([0, 1, True])` returned the weights of classes 1 and 0 and said
     # nothing, which is a fold that trains on a class nobody labelled.
     assert (1 == True) and (1 != True) is False
-    with pytest.raises(ValueError, match="not a plain number but a bool"):
+    with pytest.raises(ValueError, match="not a number a class index can be, but a builtins.bool"):
         class_weights([True, False])
 
 
@@ -436,9 +459,11 @@ def test_an_int_too_large_to_be_a_float_is_refused_as_a_range_and_not_as_an_over
 
 
 @pytest.mark.parametrize(
-    ("label", "shape", "condition"), _NOT_A_CLASS_INDEX, ids=[row[1] for row in _NOT_A_CLASS_INDEX]
+    ("label", "condition"),
+    _NOT_A_CLASS_INDEX,
+    ids=["str", "true", "false", "none", "fraction", "inf", "-inf", "nan", "negative"],
 )
-def test_the_sampler_refuses_every_label_the_weights_refuse(label, shape, condition):
+def test_the_sampler_refuses_every_label_the_weights_refuse(label, condition):
     # `build_sampler` held no check at all before, so a fold's labels were validated in
     # one of three places depending on which function the caller reached first. The two
     # are the same predicate over the same list now, and the check is before the `enabled`
@@ -461,9 +486,11 @@ def test_the_sampler_names_the_lower_bound_because_it_was_given_no_class_count()
 
 
 @pytest.mark.parametrize(
-    ("label", "shape", "condition"), _NOT_A_CLASS_INDEX, ids=[row[1] for row in _NOT_A_CLASS_INDEX]
+    ("label", "condition"),
+    _NOT_A_CLASS_INDEX,
+    ids=["str", "true", "false", "none", "fraction", "inf", "-inf", "nan", "negative"],
 )
-def test_the_dataset_refuses_every_label_the_weights_refuse(label, shape, condition, tmp_path):
+def test_the_dataset_refuses_every_label_the_weights_refuse(label, condition, tmp_path):
     # The third of the three, and the one that mattered most: its labels reached
     # `__getitem__`, where the `int()` that stood there truncated whatever it was given.
     with pytest.raises(ValueError, match="is not a class index"):
@@ -483,7 +510,7 @@ def test_the_dataset_does_not_truncate_a_fractional_label(tmp_path):
 
 def test_the_dataset_and_the_sampler_hold_the_same_rule_the_weights_hold(tmp_path):
     # One predicate, three call sites: every label every one of them refuses is refused by
-    # the same four conditions, and the only difference between them is which conditions
+    # the same conditions, and the only difference between them is which conditions
     # they have the arguments to hold. A `2` is the case that shows it — outside
     # `range(2)`, inside `range(3)` — and it is accepted below by the two that hold no
     # class count and refused by the one that does.
@@ -506,12 +533,107 @@ def test_a_quoted_digit_is_refused_because_a_csv_cell_is_a_string(tmp_path):
     # one mistake this predicate exists for is a caller that skipped the `int()` at the
     # read. `'0'` and `0` differ only in those quotes and the weights were being computed
     # from the difference.
-    with pytest.raises(ValueError, match="not a plain number but a str"):
+    with pytest.raises(ValueError, match="not a number a class index can be, but a builtins.str"):
         class_weights(["0", "1"])
-    with pytest.raises(ValueError, match="not a plain number but a str"):
+    with pytest.raises(ValueError, match="not a number a class index can be, but a builtins.str"):
         build_sampler(["0", "1"], enabled=True, seed=1)
-    with pytest.raises(ValueError, match="not a plain number but a str"):
+    with pytest.raises(ValueError, match="not a number a class index can be, but a builtins.str"):
         PatchDataset(_patches(tmp_path, count=2), ["0", "1"])
+
+
+# ---------------------------------------------------------------------------
+# What a class index may be, as a stated rule: a `numbers.Integral` or a `float` that is
+# finite and exactly a class index. The tests above hold the three original holes shut; the
+# ones below hold the rule itself, and the type it accepts is the part that regressed.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "dtype",
+    ["int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64"],
+)
+def test_a_numpy_integer_is_a_class_index(dtype):
+    # The regression: the type test was `isinstance(label, (int, float))`, and on this numpy
+    # `isinstance(np.int64(0), int)` is `False`, so a caller reading the `label` column of a
+    # DataFrame — a `numpy` array of `int64` — was refused a class index they had every right
+    # to pass. Measured at `f14dd55`: `class_weights(np.array([0, 1, 0, 1]))` and
+    # `build_sampler(np.array([0, 1, 0, 1]), True, 1)` both raised, and both worked at
+    # `ccb3145`. The rule is `numbers.Integral`, and this is every width of it numpy
+    # registers — the first line is what would have failed.
+    value = np.dtype(dtype).type(1)
+    assert type(value) is not int
+    assert class_weights([0, value]).tolist() == pytest.approx([1.0, 1.0])
+    assert build_sampler([0, value], enabled=True, seed=1) is not None
+
+
+def test_a_numpy_array_of_labels_is_accepted_by_all_three_call_sites(tmp_path):
+    # `isinstance(np.array([0, 1]), Sequence)` is `False`, so the declared `Sequence[int]`
+    # does not cover this and the module docstring says so instead. Each of the three
+    # iterates what it was given, so the container is transparent and only the values are
+    # judged — which is what `blobcount.splits:78-85` argues for per-row ids, in the other
+    # direction and for the same reason.
+    labels = np.array([0, 1, 0, 1])
+    assert not isinstance(labels, Sequence)
+    assert class_weights(labels).tolist() == pytest.approx([1.0, 1.0])
+    sampler = build_sampler(labels, enabled=True, seed=1)
+    assert isinstance(sampler, WeightedRandomSampler)
+    # One weight per row and one per class counted twice, so the balancing still reads the
+    # labels it was given rather than the positions they arrived in.
+    assert len(sampler.weights) == len(labels)
+    assert sampler.weights[0] == pytest.approx(0.5)
+    dataset = PatchDataset(_patches(tmp_path, count=4), labels)
+    assert dataset.labels == [0, 1, 0, 1]
+    assert all(type(label) is int for label in dataset.labels)
+
+
+@pytest.mark.parametrize(
+    ("label", "condition"),
+    [
+        (np.float32(0.0), "not a number a class index can be, but a numpy.float32"),
+        (np.float32(0.5), "not a number a class index can be, but a numpy.float32"),
+        (np.bool_(True), "not a number a class index can be, but a numpy.bool"),
+        (np.str_("0"), "not a number a class index can be, but a numpy.str_"),
+    ],
+    ids=["float32 whole", "float32 fraction", "bool_", "str_"],
+)
+def test_a_numpy_type_that_is_not_an_integer_is_refused_and_named(label, condition):
+    # `np.bool_` is not an `Integral` and `np.str_` is not a number, so both fall to the
+    # type test rather than to the conditions beside it — which is why each is refused with
+    # a type named and not with a range or a fraction it never had.
+    with pytest.raises(ValueError, match="is not a class index") as refused:
+        class_weights([0, 1, label])
+    assert condition in str(refused.value)
+
+
+def test_a_numpy_float64_is_accepted_because_it_subclasses_float_and_the_rule_says_why():
+    # The one asymmetry the stated rule absorbs rather than forbids: `np.float64` subclasses
+    # Python's `float` and `np.float32` does not, measured, so a `float64` label is a class
+    # index and a `float32` one is not. The module docstring records it as a fact of
+    # registration and not as a rule — a width of float is not a different kind of class
+    # index — and this is what the fact costs a caller, measured rather than described: one
+    # `.astype(int)` at the read, and no weight vector lost.
+    assert isinstance(np.float64(0.0), float)
+    assert not isinstance(np.float32(0.0), float)
+    assert class_weights([0, np.float64(1.0)]).tolist() == pytest.approx([1.0, 1.0])
+    assert class_weights([0, np.arange(2, dtype=np.float64)[1]]).tolist() == pytest.approx(
+        [1.0, 1.0]
+    )
+    with pytest.raises(ValueError, match="numpy.float32"):
+        class_weights([0, np.float32(0.0)])
+
+
+def test_the_refusal_names_the_type_by_its_qualified_name():
+    # `type(label).__name__` of a numpy label is `float32`, `int64` or `str_`, and a bare
+    # `str` is a worse collision for a reader holding an `np.str_`. A traceback out of a
+    # worker process is read on its own, so the module is part of the name — and the article
+    # agrees with the type rather than with the class name, which is what
+    # `builtins.str` and not `a str` states.
+    with pytest.raises(ValueError) as refused:
+        class_weights([0, np.float32(0.0)])
+    assert "numpy.float32" in str(refused.value)
+    with pytest.raises(ValueError) as refused:
+        class_weights(["0"])
+    assert "not a number a class index can be, but a builtins.str" in str(refused.value)
 
 
 # ---------------------------------------------------------------------------
