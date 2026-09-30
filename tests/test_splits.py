@@ -106,13 +106,65 @@ def test_fold_is_frozen_and_declares_the_four_fields_in_order():
         fold.fold = 3
 
 
-def test_comparing_two_folds_is_a_plain_answer_and_not_a_value_error():
-    # A generated `__eq__` over two `np.ndarray` fields answers with an array, and
-    # `bool()` of it raises "the truth value of an array with more than one element is
-    # ambiguous" for every fold of more than one row. `Fold` therefore keeps identity
-    # equality, so a caller comparing two folds gets `False` instead of that.
-    a = loso_folds(["a", "b"])[0]
-    b = loso_folds(["a", "b"])[0]
+# `Fold` carries two `np.ndarray` fields, and the three tests below pin what a caller
+# gets from comparing two of them. They are written against folds of MORE THAN ONE ROW on
+# purpose. A generated `__eq__` on CPython 3.13.14 walks the fields, converts each
+# field's comparison to a bool as it goes, and returns the last comparison raw, so a
+# one-row fold is the one shape where the defect is invisible: two size-1 arrays compare
+# to a size-1 boolean and `bool()` of that is defined. The earlier version of this test
+# used `loso_folds(["a", "b"])[0]`, whose index arrays are both size 1, and so could not
+# produce the `ValueError` its name claimed.
+
+
+def test_comparing_two_folds_with_a_multi_row_train_side_answers_false():
+    # `train_idx` is not the last field, so a generated `__eq__` converts its comparison
+    # to a bool -- and `bool()` of a two-element boolean array raises `ValueError` out of
+    # the comparison itself. `Fold` answers `False`.
+    a = loso_folds(["a", "a", "b"])[1]
+    b = loso_folds(["a", "a", "b"])[1]
+    assert len(a.train_idx) == 2
     assert a is not b
     assert (a == b) is False
-    assert len({a, b}) == 2
+
+
+def test_comparing_two_folds_with_a_multi_row_val_side_answers_false_not_an_array():
+    # `val_idx` is the last field, so a generated `__eq__` returns its elementwise
+    # comparison raw: `a == b` would evaluate to `array([True, True])`, which looks like
+    # it returned something and raises `ValueError` in whatever boolean context a caller
+    # wraps it in. `Fold` answers `False`.
+    a = loso_folds(["a", "b", "a"])[0]
+    b = loso_folds(["a", "b", "a"])[0]
+    assert len(a.val_idx) == 2
+    assert (a == b) is False
+
+
+def test_a_fold_is_hashable_by_identity():
+    folds = loso_folds(["a", "b"])
+    again = loso_folds(["a", "b"])
+    assert folds[0] is not again[0]
+    assert len({folds[0], again[0]}) == 2
+    assert len({folds[0], folds[0]}) == 1
+
+
+@pytest.mark.parametrize(
+    "specimen_of_row",
+    ["456", b"456", bytearray(b"456"), memoryview(b"456")],
+    ids=["str", "bytes", "bytearray", "memoryview"],
+)
+def test_a_sequence_of_characters_or_bytes_is_refused(specimen_of_row):
+    # Each of the four is a `Sequence` -- of characters, or of the integers its bytes
+    # spell -- and each would split into one fold per element, which is a patch-level
+    # split wearing a specimen-level name and would be returned as a valid result.
+    with pytest.raises(SplitError, match="one specimen id per dataset row"):
+        loso_folds(specimen_of_row)
+
+
+def test_a_numpy_column_of_ids_is_accepted_like_a_list():
+    # The tolerance this guard deliberately keeps: a per-row column of ids arrives from
+    # pandas as an `ndarray` or a `Series`, and neither is registered as a
+    # `collections.abc.Sequence`, so a predicate that also required membership would
+    # refuse the two most natural things a caller has.
+    folds = loso_folds(np.array(["b", "a", "b"]))
+    assert [f.held_out for f in folds] == ["a", "b"]
+    assert folds[1].val_idx.tolist() == [0, 2]
+    assert folds[1].train_idx.tolist() == [1]

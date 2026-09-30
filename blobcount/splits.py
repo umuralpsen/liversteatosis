@@ -42,6 +42,30 @@ runs. `sorted()` is the ordering, spelled once, rather than "whatever appeared f
 because a fold number written into an artifact has to mean the same specimen on the next
 run of the pipeline.
 
+**A `str` and a `bytes` are refused, for the same reason the indices are.** Both satisfy
+`Sequence[str]`, so `loso_folds("456")` splits one argument into three specimens called
+`"4"`, `"5"` and `"6"` — three folds of one row each, which is the patch-level split
+above wearing a specimen-level name, returned as a valid result. `bytes` is worse rather
+than different: iterating `b"456"` yields the integers 52, 53 and 54, so `held_out` would
+carry an `int` on a dataclass annotated `str`. `str`, `bytes`, `bytearray` and
+`memoryview` are excluded **by name, and those four names are the standard library's
+sequences of characters and of bytes** — `str` the only one of the former, and the other
+three byte-buffer types of the latter. That is the same rule and the same reasoning
+`blobcount.ablation._thresholds` applies to `ablation.thresholds`, for the same reason: a
+`Sequence` test alone would split `'456'` the way it splits `b"456"`, and this is not a
+type policy nobody asked for, it is the one shape a reader writes by accident.
+
+**The `Sequence` membership test that module uses is deliberately not repeated here**, and
+this is the one place the two predicates differ. Measured: `isinstance(np.array(["a",
+"b"]), Sequence)` is `False`, and so is a pandas `Series`, because neither is registered
+as a `Sequence`. Membership would therefore add the refusal of `ndarray`, `Series`, `set`
+and `dict` — none of which is a sequence of characters or of bytes, so it buys nothing for
+the one shape this guard exists to catch — at the price of refusing the two most natural
+per-row id columns a caller holding a DataFrame has. The names to refuse are named here;
+nothing else about the argument's type is checked, and no length check is applied against
+any expected row count, because with one argument there is nothing to check against and a
+guess would refuse a legitimate cohort of six one-patch specimens.
+
 **Fewer than two distinct specimens is refused, as a `SplitError`.** The message states
 the rule and the two counts that failed it, because a refusal a caller cannot act on is a
 traceback with better manners: holding out the only specimen there is would train on
@@ -75,9 +99,33 @@ import numpy as np
 
 __all__ = ["Fold", "SplitError", "loso_folds"]
 
+# The standard library's sequences **of characters or of bytes**, and the only shapes
+# refused by name: `str` is the only sequence of characters, and `bytes`, `bytearray` and
+# `memoryview` are the three byte-buffer types, each a sequence of the integers its bytes
+# spell. All four are registered as a `collections.abc.Sequence` and all four would split
+# into one fold per element, so a `Sequence` test alone would refuse none of them.
+# `range`, `tuple` and `array.array` are correctly absent: a tuple or an array of specimen
+# ids is a legitimate per-row column and `loso_folds` accepts both, and a `range` is a
+# sequence of numbers, which is outside `Sequence[str]` rather than a sequence of
+# characters.
+#
+# `blobcount.ablation._thresholds` refuses `ablation.thresholds` on this same list and on
+# a `Sequence` membership test that this module does not repeat, because
+# `isinstance(np.array(["a", "b"]), Sequence)` is `False` — as it is for a pandas
+# `Series`, neither being registered as a `Sequence` — so membership would refuse a
+# per-row column of ids that arrives in exactly that shape.
+_SEQUENCES_OF_CHARACTERS_OR_BYTES = (str, bytes, bytearray, memoryview)
+
 
 class SplitError(Exception):
-    """Raised when a set of specimen ids cannot be split into leave-one-specimen-out folds."""
+    """Raised when specimen ids cannot be split into leave-one-specimen-out folds.
+
+    Two shapes reach it: an argument that is not a column of specimen ids at all — a
+    `str`, `bytes`, `bytearray` or `memoryview`, which is a sequence of characters or of
+    bytes and splits into one fold per element — and a column carrying fewer than two
+    distinct specimens, where holding out the only specimen present would train on
+    nothing.
+    """
 
 
 @dataclass(frozen=True, eq=False)
@@ -95,14 +143,26 @@ class Fold:
     shared state, so a caller that sorts or mutates one fold's indices leaves every other
     fold's alone.
 
-    **The dataclass keeps identity equality (`eq=False`), and a generated `__eq__` over two
-    `np.ndarray` fields is a trap.** It would compare the arrays elementwise, answer with
-    an array, and then have that answer converted to a bool — which raises "the truth
-    value of an array with more than one element is ambiguous" for every fold of more than
-    one row, and quietly compares only the first element for a one-row fold. Both outcomes
-    are worse than `False`. Identity equality also leaves `__hash__` as the inherited one,
-    so a `Fold` can be put in a set or used as a dict key, which a generated hash over an
-    ndarray field could not be.
+    **The dataclass keeps identity equality (`eq=False`), and a generated `__eq__` over
+    `np.ndarray` fields cannot answer the question a caller is asking.** Measured on
+    CPython 3.13.14: the generated method walks the fields, converts each field's
+    comparison to a bool as it goes, and returns the last comparison raw. Comparing two
+    folds whose `train_idx` holds more than one row therefore raises `ValueError: The
+    truth value of an array with more than one element is ambiguous` **out of the
+    comparison itself**, and where every earlier field is short enough for `bool()` to
+    succeed, `f1 == f2` evaluates to an `ndarray` rather than to `True` or `False` — which
+    raises the same `ValueError` in the `assert` or the `if` the caller wraps it in.
+    Neither answer is one a caller can use, and the second is the more treacherous,
+    because the comparison looks like it returned something.
+
+    The one shape where the generated method looks harmless is a fold whose every index
+    array holds a single row: two size-1 arrays compare to a size-1 boolean, and `bool()`
+    of that is defined. That is why the defect is invisible on the smallest possible
+    example, and why the tests that pin this use folds of more than one row.
+
+    Identity equality also leaves `__hash__` as the inherited one, so a `Fold` can be put
+    in a set or used as a dict key. A generated hash raises `TypeError: unhashable type:
+    'numpy.ndarray'` on the first array field, measured on the same interpreter.
     """
 
     fold: int
@@ -128,12 +188,36 @@ def loso_folds(specimen_of_row: Sequence[str]) -> list[Fold]:
     same numbers. Both index arrays are `np.ndarray` of `int64`, ascending, and disjoint,
     and their lengths sum to the number of rows supplied.
 
+    **An argument that is a sequence of characters or of bytes is refused, before a single
+    row is counted.** `str`, `bytes`, `bytearray` and `memoryview` all satisfy
+    `Sequence[str]`, so `loso_folds("456")` would split into three folds of one row each
+    called `"4"`, `"5"` and `"6"`, and `loso_folds(b"456")` into three folds held out by
+    the integers 52, 53 and 54 — both a patch-level split wearing a specimen-level name,
+    returned as a valid result rather than as a refusal. The message names the remedy, and
+    the rule is about the shape of the argument and not about how long it is: **no length
+    check is applied against any expected row count**, because with one argument there is
+    nothing to check against, and a guess would refuse a legitimate cohort of six
+    one-patch specimens. The four names are also not the only sequences there are — they
+    are the sequences of characters and of bytes, and an argument that is a sequence of
+    something else is outside `Sequence[str]` and outside this rule.
+
     **Fewer than two distinct ids is refused as a `SplitError`**, counting distinct ids
     and not rows: `[]` and `["only", "only"]` are refused alongside `["only"]`, because
     holding out the only specimen there is leaves nothing to train on. The caller cannot
     distinguish those cases by outcome, and none of them is a state a caller can train
     through by accident.
     """
+    if isinstance(specimen_of_row, _SEQUENCES_OF_CHARACTERS_OR_BYTES):
+        raise SplitError(
+            f"loso_folds was given {specimen_of_row!r}, a "
+            f"{type(specimen_of_row).__name__}, which is a sequence of characters or of "
+            f"bytes and not one specimen id per dataset row: it iterates as "
+            f"{len(specimen_of_row)} separate elements — a string as its characters, "
+            f"bytes as the integers it spells — so the folds built from it would hold out "
+            f"one element each, which is a patch-level split wearing a specimen-level "
+            f"name. Pass a list or a tuple of specimen ids, one per dataset row, repeated "
+            f"where several rows come from the same specimen"
+        )
     rows = np.arange(len(specimen_of_row), dtype=np.int64)
     held_out_in_order = sorted(set(specimen_of_row))
     if len(held_out_in_order) < 2:
