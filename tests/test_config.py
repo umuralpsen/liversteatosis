@@ -29,14 +29,6 @@ _KEY_READ = re.compile(r"""\.(?:get|path)\(\s*["']([A-Za-z_]\w*(?:\.[A-Za-z_]\w*
 # delete, and a key that loses one is named as an unread declared key.
 _KEYS_WITHOUT_READER: frozenset[str] = frozenset(
     {
-        "augmentation.affine_translate",
-        "augmentation.color_jitter_brightness",
-        "augmentation.color_jitter_contrast",
-        "augmentation.color_jitter_hue",
-        "augmentation.color_jitter_saturation",
-        "augmentation.horizontal_flip",
-        "augmentation.rotation_degrees",
-        "augmentation.vertical_flip",
         "evaluation.bootstrap_samples",
         "evaluation.confidence_level",
         "gradcam.alpha",
@@ -47,7 +39,6 @@ _KEYS_WITHOUT_READER: frozenset[str] = frozenset(
         "training.architecture",
         "training.batch_size",
         "training.epochs",
-        "training.input_size",
         "training.learning_rate",
         "training.lr_scheduler_factor",
         "training.num_classes",
