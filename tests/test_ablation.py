@@ -1121,8 +1121,11 @@ def test_thresholds_refuses_a_key_that_is_not_a_sequence_of_thresholds(value, as
     # hand-edit does today reads
     # `tests/test_config.py::test_a_thresholds_key_that_is_not_a_list_is_refused`.
     # `_thresholds` keeps its own check because a `Config` is constructible in memory from
-    # any mapping and need not come from a file: `tests/test_config.py:157,164,169` and
-    # `:569,575` build one that way, as does the memoryview test two below.
+    # any mapping and need not come from a file: `tests/test_config.py:157,164,169,657,663`
+    # build one that way, and the memoryview test two below builds another. Each of those
+    # lines is a `Config({...})` call; the two `paths.*` ones are the `Config({"paths":
+    # {"slides": 7}})` and `Config({"paths": {"slides": "   "}})` that `Config.path`'s two
+    # refusals are about, and `blobcount/config.py` points at them in that docstring.
     from blobcount import ablation
     from blobcount.config import Config
 

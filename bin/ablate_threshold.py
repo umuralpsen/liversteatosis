@@ -136,23 +136,36 @@ the two apart reads stderr: a refusal names what it refused, and a traceback nam
 and a line. The `plot` arm is the one place where a project-raised type is what keeps that
 true: `PlotError` is raised by this project and by nothing in a figure library, so catching
 it says "this value cannot be drawn" and says nothing else. **A configured value this
-project does not check is a limit, and a checked one is not — and the two are separated by
-whether a validator exists, not by whether the value is mistyped.** `load` now type-checks
-both of its inputs, so a *mistyped* value anywhere in this project's configuration is a
-refusal before this program reads a patch, and that covers `extraction.patch_size` as much
-as it covers `ablation.thresholds`; the test that says so for this file's own keys is
+project does not check would be a limit, and a checked one is not — and the two are
+separated by whether a validator exists, not by whether the value is mistyped.** `load`
+type-checks both of its inputs, so a *mistyped* value anywhere in this project's
+configuration is a refusal before this program reads a patch, and that covers
+`ablation.thresholds` and `labeling.blob_threshold` as much as it covers anything else; the
+test that says so for this file's own keys is
 `tests/test_config.py::test_a_file_value_whose_type_is_not_the_declared_one_is_refused`.
-What remains outside `load` is a value of the *declared* type that is nonetheless wrong, and
-that splits three ways here. `extraction.patch_size` is read and used, never checked, so a
-hand-edit of it to a negative integer reaches the interpreter as a traceback and that is the
-recorded limit — a type this project checked, a value it did not. `ablation.thresholds` is
-read by a function written to reject a value that is not a whole number of blobs, and a
-validator that validates and then reports by traceback looks like a check without being one,
-so its refusal is caught above and reported as a refusal. **The same ruling reaches the
-drawing path one layer on, and stops at the same line:** a threshold the validator is right
-to accept and a renderer is not able to place is a fact about the run's configuration, so it
-is caught and reported as a refusal — while a threshold the validator would have accepted and
-that a *defect* made impossible to place is still a traceback.
+
+**What is left outside `load` is a value of the *declared* type that is nonetheless wrong,
+and every one of them is refused here.** That is the whole of it, and it is worth stating
+plainly because this paragraph used to record a limit that does not exist: it named
+`extraction.patch_size` as read-and-used-never-checked, and a hand-edit of it to a negative
+integer as reaching the interpreter as a traceback. Measured, and false —
+`plan_resolution(0.5, 0.5, -1, (1.0, 2.0))` raises `SlideError: cannot plan a resolution:
+patch_size must be positive, got -1`, `bin/extract_patches.py` catches that around
+`extract_slide` and returns `EXIT_REFUSED`, and `tests/test_slides.py:168,221` pin it. So
+`patch_size: -1` is a refusal in another command line, not a traceback in this one, and the
+`ablation.thresholds` contrast it was carrying was not a contrast between a checked value
+and an unchecked one but between two refusals.
+
+`ablation.thresholds` is read by a function written to reject a value that is not a whole
+number of blobs, and a validator that validates and then reports by traceback looks like a
+check without being one, so its refusal is caught above and reported as a refusal.
+`labeling.blob_threshold` is checked by the selection guard, which refuses a `--selected`
+that is not one of the configured thresholds and reports it before a patch is read.
+**The same ruling reaches the drawing path one layer on, and stops at the same line:** a
+threshold the validator is right to accept and a renderer is not able to place is a fact
+about the run's configuration, so it is caught and reported as a refusal — while a threshold
+the validator would have accepted and that a *defect* made impossible to place is still a
+traceback.
 
 **A summary line, the range coverage, then two tables.** The count distribution comes
 first, because the ratios are ratios of it and a reader who has seen a pooled ratio of 0.9

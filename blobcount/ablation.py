@@ -134,12 +134,14 @@ number, finite, exactly a count and not below zero, and one message says all of 
 key itself has to be a list, so `!!binary 'MzU='` is not a range of 51 and 53. It is a
 `ValueError` out of `ablate` and not a `LabelingInputError`: it is a statement about the
 configuration, not about the index the
-caller pointed at. **It is not a traceback either.** The standing ruling that a
-hand-edited `extraction.patch_size` reaches the interpreter unvalidated does not transfer
-to a function that exists to reject the value: `extraction.patch_size` is a value this
-project chose not to validate, and `_thresholds` is code that was written to validate, and
-a validator that validates and then reports by traceback looks like a check without being
-one. `bin/ablate_threshold.py` calls `_thresholds` itself before it reads a patch and
+caller pointed at. **It is not a traceback either**, and the argument no longer rests on a
+contrast with a key this project does not check, because there is no such key: `load`
+type-checks every declared key on both its input paths, and the one value that used to be
+named as the unchecked counterexample — a hand-edited `extraction.patch_size` — is refused
+by `plan_resolution` as a `SlideError` and caught as a refusal by `bin/extract_patches.py`,
+measured. What survives is the part that was always the argument: a validator that validates
+and then reports by traceback looks like a check without being one, whatever else is
+checked. `bin/ablate_threshold.py` calls `_thresholds` itself before it reads a patch and
 returns `EXIT_REFUSED` on its answer; the call inside `ablate` is the same pure conversion
 of the same configuration and cannot come to a different one. The command line checks the
 selection it was given for the same reason, against the same converted range, and reports
