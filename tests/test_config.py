@@ -4,12 +4,14 @@ import pytest
 import yaml
 
 from blobcount.config import (
+    KEY_TYPES,
     KNOWN_KEYS,
     PROJECT_ROOT,
     Config,
     ConfigError,
     _find_project_root,
     _iter_keys,
+    _lookup,
     _reset_default_config,
     default_config,
     get_device,
@@ -54,6 +56,12 @@ _KEYS_WITHOUT_READER: frozenset[str] = frozenset(
 def _default_yaml_keys() -> set[str]:
     raw = (PROJECT_ROOT / "configs" / "default.yaml").read_text(encoding="utf-8")
     return set(_iter_keys(yaml.safe_load(raw)))
+
+
+def _default_yaml() -> dict:
+    """Return the shipped configuration as parsed, for the type assertions to read."""
+    raw = (PROJECT_ROOT / "configs" / "default.yaml").read_text(encoding="utf-8")
+    return yaml.safe_load(raw)
 
 
 def _package_source() -> str:
@@ -204,6 +212,270 @@ def test_int_override_widens_to_float_for_a_float_key():
 def test_int_override_is_not_accepted_for_an_int_key():
     with pytest.raises(ConfigError, match="has type"):
         load(overrides=["extraction.patch_size=256.0"])
+
+
+# The next group is the file path, which `load` typed only for overrides before this round.
+# The measured defect is in the table below and nowhere else in this file: `load()` reads
+# `configs/default.yaml` when given no `path`, so a check that compared a file against that
+# same file would have measured `training.pretrained: 1` against the `1` it had just become
+# and called it correct. The declared types live in `KEY_TYPES` and these tests pin all four
+# things that have to be true of it.
+
+
+def _config_with_one_value_edited(key, value, tmp_path):
+    """Write `configs/default.yaml` with the value at `key` replaced, and return its path.
+
+    The file is written through `yaml.safe_dump` the way a hand-edit reaches `load`, so the
+    value arrives as the type PyYAML produces for it rather than as the object a test built.
+    """
+    data = yaml.safe_load((PROJECT_ROOT / "configs" / "default.yaml").read_text(encoding="utf-8"))
+    section, name = key.split(".")
+    data[section][name] = value
+    path = tmp_path / f"config-{name}-is-{type(value).__name__}.yaml"
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    return path
+
+
+def test_key_types_cover_every_declared_key_and_nothing_else():
+    # The table is the whole of the check, so a key missing from it is a key `load` cannot
+    # type, and a key in it that nothing declares is a rule about a key that cannot exist.
+    assert set(KEY_TYPES) == set(KNOWN_KEYS)
+
+
+def test_key_types_agree_with_default_yaml_in_both_directions():
+    # What stops the table and the shipped file drifting apart. Without this the two could
+    # disagree and the file would stop loading at all, or — worse — a rule could be loosened
+    # in one and tightened in the other with nothing here noticing which.
+    values = {
+        key: _lookup(_default_yaml(), key)[1]
+        for key in _iter_keys(_default_yaml())
+    }
+    assert {key: type(value) for key, value in values.items()} == KEY_TYPES
+
+
+def test_every_declared_key_is_compared_as_a_bool_where_the_file_says_true():
+    # `bool` is spelled `bool` and not `int` for the reason the whole comparison is `type() is`:
+    # `bool` subclasses `int`, `1 != True` is False, and an `isinstance`-shaped check would
+    # accept `augmentation.horizontal_flip: 1` as a truthy integer and invert the flip.
+    asserted_bools = sorted(
+        key for key in KEY_TYPES if KEY_TYPES[key] is bool
+    )
+    assert asserted_bools == [
+        "augmentation.horizontal_flip",
+        "augmentation.vertical_flip",
+        "blobs.stain_normalization",
+        "training.pretrained",
+        "training.use_weighted_sampler",
+    ]
+    # Four of the five are `true` in the shipped file and `blobs.stain_normalization` is
+    # `false`; both are the same declaration, and the point is the *type* — a `false` in a
+    # key declared `bool` is what proves `bool` was the type read and not `int`.
+    for key in asserted_bools:
+        assert _lookup(_default_yaml(), key)[1] is (key != "blobs.stain_normalization"), key
+
+
+def test_a_bool_declared_key_refuses_an_int_written_in_the_file(tmp_path):
+    # The measured defect, and the one the mechanism exists for. `int` is truthy, so this
+    # used to take the pretrained path with no error anywhere in the program: a silent
+    # inversion reachable by deleting three characters from a git-tracked file.
+    with pytest.raises(ConfigError, match="has type"):
+        load(_config_with_one_value_edited("training.pretrained", 1, tmp_path))
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        # One row per declared type, so a rule that fires for `bool` and not for `list` is
+        # visible here rather than inferred.
+        ("project.name", 7),
+        ("project.seed", "42"),
+        ("paths.results", 7),
+        ("extraction.patch_size", "big"),
+        ("extraction.target_mpp", "half"),
+        # A float key is refused a `str` and a `list`, but *not* an `int`: that is the one
+        # admitted pair and `test_an_int_in_the_file_widens_to_float_for_a_float_key` below
+        # is where it is asserted, so the two tests together are the whole rule.
+        ("blobs.area_um2_min", "3.1"),
+        ("blobs.gray_percentile", 95.5),
+        ("blobs.stain_normalization", 1),
+        ("labeling.blob_threshold", "5"),
+        ("ablation.thresholds", "35"),
+        ("training.architecture", 18),
+        ("training.pretrained", 1),
+        ("training.learning_rate", "0.0001"),
+        ("training.use_weighted_sampler", "yes"),
+        ("augmentation.horizontal_flip", 1),
+        ("augmentation.rotation_degrees", 15.0),
+        ("augmentation.color_jitter_hue", [0.05]),
+        ("evaluation.bootstrap_samples", "2000"),
+        ("gradcam.colormap", 3),
+        ("gradcam.alpha", "0.4"),
+    ],
+)
+def test_a_file_value_whose_type_is_not_the_declared_one_is_refused(key, value, tmp_path):
+    with pytest.raises(ConfigError, match="has type"):
+        load(_config_with_one_value_edited(key, value, tmp_path))
+
+
+def test_the_file_refusal_names_the_key_the_type_found_and_the_type_read(tmp_path):
+    path = _config_with_one_value_edited("extraction.patch_size", "big", tmp_path)
+    with pytest.raises(ConfigError) as caught:
+        load(path)
+    message = str(caught.value)
+    # The key *first*, in the opening clause. The message names the key twice — once as what
+    # was found and once in the remedy — so an assertion that only looked for it somewhere
+    # would be satisfied by the remedy alone, and the clause identifying the mistake could
+    # be dropped without anything here going red.
+    assert message.startswith(f"key 'extraction.patch_size' in {path}"), message
+    # The type found, then the type read — two clauses, because they are two different facts
+    # and a message that named only one would leave a reader guessing which was wrong.
+    assert "has type str" in message, message
+    assert "but this project reads it as int" in message, message
+    # The remedy names the type again *and* the file that states a correct one, so the
+    # refusal ends in something a caller can act on rather than in a rule with no next step.
+    assert "supply a value of type int for 'extraction.patch_size'" in message, message
+    assert "configs/default.yaml" in message, message
+
+
+def test_a_bool_written_under_an_int_declared_key_is_refused(tmp_path):
+    # **The row that makes the comparison's shape observable.** Every other row of the table
+    # above is refused under an `isinstance`-shaped check too, because `int` is not a
+    # `str`, not a `float` and not a `list`. This one is not: `bool` subclasses `int`, so
+    # `isinstance(True, int)` is `True` and an `isinstance` check would read
+    # `extraction.patch_size: true` as the integer 1 and build a 1-square patch out of it.
+    # `type(value) is expected` has no such gap, and this is the row that proves it.
+    with pytest.raises(ConfigError, match="has type"):
+        load(_config_with_one_value_edited("extraction.patch_size", True, tmp_path))
+
+
+def test_the_declared_types_are_not_read_from_the_file_being_validated(
+    tmp_path, monkeypatch
+):
+    # **The tautology, tested rather than asserted in a comment.** If `_check_value_type`
+    # read its expected type out of `configs/default.yaml` instead of out of `KEY_TYPES`, then
+    # `load()` — which reads `configs/default.yaml` by default — would measure that file
+    # against itself and accept every hand-edit to it. `training.pretrained: 1` would agree
+    # with the `int` it had just become and be reported correct, which is the measured defect
+    # this round exists to close.
+    #
+    # The test points `PROJECT_ROOT` at a scratch tree whose own
+    # `configs/default.yaml` holds the mistyped value, and loads it. A check that measured
+    # the file against itself would find `training.pretrained` an `int`, agree, and return
+    # a config; the table in this file says `bool` and refuses.
+    scratch = tmp_path / "scratch"
+    (scratch / "configs").mkdir(parents=True)
+    (scratch / "configs" / "default.yaml").write_text(
+        (PROJECT_ROOT / "configs" / "default.yaml").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("blobcount.config.PROJECT_ROOT", scratch)
+    monkeypatch.setattr("blobcount.config.DEFAULT_CONFIG_PATH", scratch / "configs" / "default.yaml")
+    assert load().get("training.pretrained") is True
+
+    # Now hand-edit that very file, which is the only way `load()` reaches it.
+    data = yaml.safe_load((scratch / "configs" / "default.yaml").read_text(encoding="utf-8"))
+    data["training"]["pretrained"] = 1
+    (scratch / "configs" / "default.yaml").write_text(
+        yaml.safe_dump(data), encoding="utf-8"
+    )
+    with pytest.raises(ConfigError, match="has type"):
+        load()
+
+
+def test_the_file_refusal_names_the_file_it_came_from(tmp_path):
+    path = _config_with_one_value_edited("training.batch_size", "big", tmp_path)
+    with pytest.raises(ConfigError) as caught:
+        load(path)
+    assert str(path) in str(caught.value), str(caught.value)
+
+
+def test_an_int_in_the_file_widens_to_float_for_a_float_key(tmp_path):
+    # The one pair the check admits, and it admits it on this path for the same reason it
+    # does on the override path: `125` and `125.0` are the same number, so refusing one
+    # spelling would be a rule about writing rather than about type. Measured through the
+    # config the caller reads, not through `_check_value_type` directly.
+    cfg = load(_config_with_one_value_edited("blobs.area_um2_max", 125, tmp_path))
+    value = cfg.get("blobs.area_um2_max")
+    assert value == 125.0
+    assert type(value) is float
+
+
+def test_a_float_in_the_file_is_not_narrowed_to_an_int_key(tmp_path):
+    # The widening is one-directional. `extraction.patch_size: 256.0` is the wrong type for a
+    # key this project reads as an `int`, and admitting it would make the check a comparison
+    # of values rather than of types.
+    with pytest.raises(ConfigError, match="has type"):
+        load(_config_with_one_value_edited("extraction.patch_size", 256.0, tmp_path))
+
+
+def test_both_input_paths_refuse_the_same_value_the_same_way(tmp_path):
+    # The two paths are one rule, so the same mistake is the same refusal whichever way it
+    # arrives. Before this, the override arm refused it and the file arm accepted it, and
+    # which one a caller hit depended on how the value was written rather than on the value.
+    path = _config_with_one_value_edited("training.pretrained", 1, tmp_path)
+    with pytest.raises(ConfigError) as from_file:
+        load(path)
+    with pytest.raises(ConfigError) as from_override:
+        load(overrides=["training.pretrained=1"])
+    file_message = str(from_file.value)
+    override_message = str(from_override.value)
+    for text in ("has type int", "training.pretrained"):
+        assert text in file_message, file_message
+        assert text in override_message, override_message
+
+
+def test_the_default_file_itself_is_accepted(tmp_path):
+    # The tautology this mechanism has to avoid becoming. If `load` refused the shipped file,
+    # nothing would run; if it measured the shipped file against itself, a hand-edit would
+    # pass. This is the assertion that says the table is doing the work.
+    cfg = load(_config_with_one_value_edited("project.name", "x", tmp_path))
+    assert cfg.get("project.name") == "x"
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        # A declared type and a nonsense value of it. None of these is refused, and that is
+        # the point of the boundary: `load` answers "is this the type I read", and each of
+        # these is. What a value has to *mean* belongs to the function that reads it —
+        # `ablation._thresholds` refuses a non-finite threshold, `ablation` refuses a
+        # percentile outside [0, 100], and neither moved here.
+        ("evaluation.confidence_level", 1.0),
+        ("evaluation.confidence_level", -1.0),
+        ("extraction.patch_size", -1),
+        ("extraction.patch_size", 0),
+        ("blobs.area_um2_max", 0.0),
+        ("training.epochs", -3),
+        ("augmentation.rotation_degrees", -15),
+        ("training.pretrained", False),
+        ("blobs.stain_normalization", False),
+    ],
+)
+def test_a_value_of_the_declared_type_is_accepted_whatever_it_means(key, value, tmp_path):
+    # The negative space of the type check, and the assertion a future reader who wants to
+    # widen `load` into a value validator has to delete. Without it, "add a range check" is
+    # a one-line change with nothing red.
+    assert load(_config_with_one_value_edited(key, value, tmp_path)).get(key) == value
+
+
+def test_a_thresholds_key_that_is_not_a_list_is_refused(tmp_path):
+    # Named because `tests/test_ablation.py` asserts the same value reaches
+    # `_thresholds`' own check, and it can no longer arrive there from a file. The two tests
+    # are one move of one shape: what used to be written out as YAML to get past a check that
+    # only covered overrides is now refused earlier, and the reader of either test is pointed
+    # at the other.
+    with pytest.raises(ConfigError, match="has type"):
+        load(_config_with_one_value_edited("ablation.thresholds", b"35", tmp_path))
+
+
+def test_a_typed_file_key_refuses_before_a_missing_required_key(tmp_path):
+    # The order of the two checks is a claim: a file that is wrong in both ways is reported
+    # for the key it got wrong first, and a reader fixing one error at a time is not sent
+    # back to `load` twice for one mistake. Here the value is the wrong type and no required
+    # key is missing, so this asserts the type check is the one that fires; the missing-key
+    # case is covered by `test_missing_required_key_is_refused` above.
+    with pytest.raises(ConfigError, match="has type"):
+        load(_config_with_one_value_edited("training.batch_size", "big", tmp_path))
 
 
 def test_override_without_equals_raises():

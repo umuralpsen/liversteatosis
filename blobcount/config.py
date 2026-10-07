@@ -13,6 +13,18 @@ substitutes for the other:
   from reaching a run; it says nothing about a declared key that nothing reads.
   `tests/test_config.py` asserts that `KNOWN_KEYS` and `configs/default.yaml`
   hold the same key set, in both directions.
+- `KEY_TYPES` is the declaration of what each declared key is read *as*, and it
+  is checked on **both** of `load`'s two input paths. A file whose value for a
+  declared key has a type other than the one declared is refused at load, and so
+  is an override — the same `type() is` comparison and the same one widening of
+  an `int` under a declared `float`, in one place. Before this, the check covered
+  overrides only, which made `training.pretrained: 1` a silent inversion: a truthy
+  `int` reaching the pretrained path with no error anywhere, reachable by editing
+  one character in a git-tracked file. The declared types are **not** read from
+  `configs/default.yaml`, because `load()` reads that file by default and would
+  therefore measure it against itself and accept every hand-edit to it;
+  `tests/test_config.py` asserts the table and the file agree for all 46 keys in
+  both directions so the two cannot drift.
 - `load` reads no key on the caller's behalf, because a caller asks for keys
   after `load` has already returned, so read tracking can never be complete at
   load time. A test instead scans the source of every module under `blobcount/`
@@ -30,6 +42,7 @@ Declared interface, in `__all__` order:
         Config.unknown_keys(self) -> set[str]
     ConfigError
     DEFAULT_CONFIG_PATH: Path
+    KEY_TYPES: dict[str, type]
     KNOWN_KEYS: frozenset[str]
     PROJECT_ROOT: Path
     REQUIRED_KEYS: frozenset[str]
@@ -53,6 +66,7 @@ __all__ = [
     "Config",
     "ConfigError",
     "DEFAULT_CONFIG_PATH",
+    "KEY_TYPES",
     "KNOWN_KEYS",
     "PROJECT_ROOT",
     "REQUIRED_KEYS",
@@ -184,6 +198,81 @@ KNOWN_KEYS: frozenset[str] = frozenset(
 
 _SECTIONS: frozenset[str] = frozenset(key.split(".", 1)[0] for key in KNOWN_KEYS)
 
+# The type each declared key is read as, and the whole of the file-value check. This is a
+# declaration in code rather than a reading of `configs/default.yaml`, and the reason is the
+# one that made the file-only version useless: `load()` with no `path` reads
+# `configs/default.yaml`, so comparing a file's values against that same file accepts every
+# hand-edit to it — `training.pretrained: 1` would agree with the `1` it just became and be
+# called correct. The measured defect is exactly that edit, in exactly that file. A table here
+# is refused by it, and `tests/test_config.py` asserts the table and the file hold the same
+# type for every one of the 46 keys in both directions, so the two cannot drift apart and the
+# shipped file cannot become the yardstick it is measured against.
+#
+# The types are the ones a caller reads the value as, not the ones YAML spells: `true` in the
+# file is a `bool` here, and a `bool` is written `bool` rather than `int` so that the exact
+# comparison below refuses the integer 1 — `bool` subclasses `int`, and `1 != True` is False,
+# so an `isinstance`-shaped check would let `augmentation.horizontal_flip: 1` through as a
+# truthy integer and invert a run on a hand-edit.
+#
+# `ablation.thresholds` is declared `list` and nothing more. What a list *holds* is
+# `blobcount.ablation._thresholds`'s business, on its own reasoning, and it refuses the
+# entries it refuses today; a second opinion here would be two rules for one key.
+#
+# An `int` where a `float` is declared is widened, on the file path exactly as on the override
+# path and for the same reason: `blobs.area_um2_max: 125` states the same limit as the
+# configured `125.0`, so it is the same number and refusing it would be a rule about spelling
+# rather than about type. This is the only pair the check admits, it is a widening and never a
+# narrowing, and it is the one that keeps `evaluation.confidence_level: 1` mean 100% rather
+# than being refused — which is a value question, and this check makes no value claims.
+KEY_TYPES: dict[str, type] = {
+    "project.name": str,
+    "project.seed": int,
+    "project.device": str,
+    "paths.slides": str,
+    "paths.patches": str,
+    "paths.labels": str,
+    "paths.results": str,
+    "paths.manifest": str,
+    "extraction.target_mpp": float,
+    "extraction.patch_size": int,
+    "extraction.step_size": int,
+    "extraction.tissue_percentile": int,
+    "extraction.tissue_gray_max": int,
+    "blobs.area_um2_min": float,
+    "blobs.area_um2_max": float,
+    "blobs.circularity_min": float,
+    "blobs.gray_percentile": int,
+    "blobs.morph_kernel_size": int,
+    "blobs.morph_iterations": int,
+    "blobs.stain_normalization": bool,
+    "labeling.blob_threshold": int,
+    "ablation.thresholds": list,
+    "training.architecture": str,
+    "training.pretrained": bool,
+    "training.num_classes": int,
+    "training.input_size": int,
+    "training.batch_size": int,
+    "training.epochs": int,
+    "training.learning_rate": float,
+    "training.patience_early_stop": int,
+    "training.patience_lr_scheduler": int,
+    "training.lr_scheduler_factor": float,
+    "training.use_weighted_sampler": bool,
+    "training.num_workers": int,
+    "augmentation.horizontal_flip": bool,
+    "augmentation.vertical_flip": bool,
+    "augmentation.rotation_degrees": int,
+    "augmentation.color_jitter_brightness": float,
+    "augmentation.color_jitter_contrast": float,
+    "augmentation.color_jitter_saturation": float,
+    "augmentation.color_jitter_hue": float,
+    "augmentation.affine_translate": float,
+    "evaluation.bootstrap_samples": int,
+    "evaluation.confidence_level": float,
+    "gradcam.alpha": float,
+    "gradcam.colormap": str,
+}
+
 
 def _iter_keys(data: dict[str, Any], prefix: str = "") -> list[str]:
     """Flatten nested mappings into dotted keys, leaves become key ends."""
@@ -217,6 +306,39 @@ def _validate_key(key: str, origin: str) -> None:
         raise ConfigError(
             f"unknown key '{key}' in {origin}: add it to blobcount.config.KNOWN_KEYS if code reads it"
         )
+
+
+def _check_value_type(key: str, value: Any, origin: str) -> Any:
+    """Return `value` as the type `KEY_TYPES` declares for `key`, or refuse it.
+
+    **The comparison is `type(value) is expected`, and that shape is the whole of the rule.**
+    `bool` subclasses `int`, so `1 != True` is `False` and an `isinstance`-shaped check would
+    accept `training.pretrained: 1` as a truthy boolean — the silent inversion this check
+    exists to prevent, reachable by editing one character in a git-tracked file. `is` on the
+    two types has no such gap.
+
+    **An `int` under a declared `float` is widened rather than refused**, and it is the only
+    pair admitted: `blobs.area_um2_max: 125` and the configured `125.0` are the same number,
+    so refusing it would be a rule about how the limit was spelled. This mirrors what the
+    override path has always done, and it is what keeps the two paths from disagreeing about
+    the same value.
+
+    **Nothing else is checked, deliberately.** There is no finiteness test, no range, no sign
+    and no allow-list of shapes: a value that is the declared type and is nonsense passes,
+    because the job of a wrong *type* is to be caught where the type is known and the job of
+    a wrong *value* belongs to the function that reads it and knows what it means. This is why
+    the message names the type and stops there.
+    """
+    expected = KEY_TYPES[key]
+    if type(value) is expected:
+        return value
+    if expected is float and type(value) is int:
+        return float(value)
+    raise ConfigError(
+        f"key '{key}' in {origin} has type {type(value).__name__}, but this project reads "
+        f"it as {expected.__name__}; supply a value of type {expected.__name__} for '{key}' "
+        f"(configs/default.yaml states one)"
+    )
 
 
 def _parse_override(item: str) -> tuple[str, str, Any]:
@@ -315,13 +437,26 @@ def load(path: Path | None = None, overrides: Sequence[str] = ()) -> Config:
     `path` defaults to `configs/default.yaml` inside the project. Each override
     is a `key=value` string whose value is parsed with `yaml.safe_load` so that
     types survive; a value that is not valid YAML, such as `%VAR%/out`, is kept
-    as a string. An override whose parsed type differs from the type already
-    configured is rejected, so a mistyped boolean cannot silently invert a run.
-    The one exception is an `int` written to a key configured as a `float`, which
-    is widened, because `blobs.area_um2_max=125` states the same limit as the
-    configured `125.0`. The comparison is exact on both sides, so `bool` never
-    passes: `bool` subclasses `int`, and an `isinstance` check would accept
-    `augmentation.horizontal_flip=1` as a truthy integer.
+    as a string.
+
+    **Both of this function's inputs are type-checked, and neither is checked
+    loosely.** A value is compared to the type `KEY_TYPES` declares for its key
+    with `type(value) is declared`, on the file path and on the override path, so
+    a mistyped boolean cannot silently invert a run: `bool` subclasses `int`, and
+    `1 != True` is `False`, so an `isinstance`-shaped test would accept
+    `augmentation.horizontal_flip=1` as a truthy integer. The one exception is an
+    `int` where a `float` is declared, which is widened because
+    `blobs.area_um2_max=125` states the same limit as the configured `125.0`; it
+    is the only pair admitted, and it is a widening and never a narrowing.
+
+    **This is a type check and not a value check**, and the difference is the point.
+    There is no finiteness test, no range, no sign and no per-key allow-list: a
+    `confidence_level` of `1` is the declared `float` and passes, a negative
+    `patch_size` is the declared `int` and passes, and a threshold list holding
+    `'3'` is the declared `list` and passes. What a value has to *mean* is the
+    reading function's business and stays there — `blobcount.ablation._thresholds`
+    refuses a non-finite threshold, `blobcount.ablation` refuses a percentile
+    outside [0, 100], and neither of those moves here.
 
     No key is read here. Callers request keys after this returns, so marking them
     read now would make `unknown_keys()` unconditionally empty.
@@ -356,6 +491,13 @@ def load(path: Path | None = None, overrides: Sequence[str] = ()) -> Config:
     declared = _iter_keys(data)
     for key in declared:
         _validate_key(key, str(source))
+    # The file path is checked against `KEY_TYPES`, which is the same check the override path
+    # has always made against the configured value, applied to the other of `load`'s two
+    # inputs. It runs after the key check and before the missing-key check, so a file that is
+    # wrong in both ways is reported for the key it got wrong first, and so an undeclared key
+    # is named as one rather than as a type.
+    for key in declared:
+        _set_dotted(data, key, _check_value_type(key, _lookup(data, key)[1], str(source)))
     missing = sorted(REQUIRED_KEYS - set(declared))
     if missing:
         raise ConfigError(f"missing required keys in {source}: " + ", ".join(missing))
