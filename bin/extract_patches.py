@@ -95,24 +95,36 @@ program deletes anything. The test that holds that line down is
 touched anything.** `load` types both of its inputs, so `extraction.patch_size: big` is
 refused at load as a `ConfigError` naming the key, the type found and the type read — on the
 `ConfigError` arm above, before a slide is opened, a directory is listed, or a byte is
-written. That check is a *type* check and nothing more: a `patch_size` of `-1` is the
-declared `int` and passes, and a `target_mpp` of `.inf` is the declared `float` and passes,
-because what a value has to mean is the reading function's business and
-`blobcount.slides.plan_resolution` still refuses both. The test is
+written. That check is a *type* check and nothing more, and the two keys it lets through
+divide between them rather than sharing an answer. A `patch_size` of `-1` or `0` is the
+declared `int`, passes `load`, and is then refused by
+`blobcount.slides.plan_resolution` as a `SlideError` — measured, and that is the right
+answer, because a non-positive patch size makes the plan undefined rather than inaccurate. A
+`target_mpp` of `.inf` is the declared `float`, passes `load`, and is **not** refused by
+`plan_resolution`: measured on this stack it raises `OverflowError: cannot convert float
+infinity to integer` out of the `round()` that computes `read_px`, which is the fifth of the
+tracebacks enumerated below and not a refusal. So a type check at `load` is not the whole of
+what a caller is protected from, and the part it does not cover is named here rather than
+left to be found at the first `.inf`. The test is
 `test_cli_reports_a_mistyped_configuration_value_as_a_refusal` in `tests/test_extract.py`,
 which used to pin the opposite outcome and says in its own prose why the pin moved.
 
-**Four exceptions are still left to the interpreter, and that is the K10 ruling standing.**
-A `ValueError` from a conversion inside a value that passed the type check, a `TypeError` or
+**Five exceptions are still left to the interpreter, and that is the K10 ruling standing.**
+A `ValueError` from a conversion inside a value that passed the type check — measured:
+`target_mpp: .nan` raises `ValueError: cannot convert float NaN to integer` — an
+`OverflowError` out of the same `round()` for a `target_mpp` of `.inf`, a `TypeError` or
 `ValueError` out of planning a read, an `OSError` out of the index write, and a
-`PermissionError` out of listing or clearing a directory are all still tracebacks. Nothing
-was widened to reach the paragraph above: the refusal there comes from the `load` call
-whose `ConfigError` arm already existed, on a value that call already had to look at. A catch
-wide enough to hold these four would also hold a defect in this project's own arithmetic, and
-reporting a defect as a refusal would send the caller to fix a configuration that is fine —
-the ruling `bin/label_patches.py` records for a `blobs.gray_percentile` outside [0, 100]. A
-per-patch read or write that raises is not in that list because `extract_slide` catches both,
-logs the exception object with the slide id and the coordinates, and counts the patch as a
+`PermissionError` out of listing or clearing a directory. **`OverflowError` is in that list
+because it is a traceback and not a refusal, and the reason it is not caught is that it
+arrives from the standard library's own refusal rather than from a rule this project wrote:**
+`int()` and `round()` refusing `.inf` names the value and no rule, and adding it to this
+arm's catch would turn a defect in this project's own arithmetic — the same `round()` raising
+`OverflowError` for a number that is finite and absurd — into a refusal, which is the ruling
+`bin/label_patches.py` records for a `blobs.gray_percentile` outside [0, 100]. Nothing was
+widened to reach the paragraph above: the refusal there comes from the `load` call whose
+`ConfigError` arm already existed, on a value that call already had to look at. A per-patch
+read or write that raises is not in that list because `extract_slide` catches both, logs the
+exception object with the slide id and the coordinates, and counts the patch as a
 `read_failure`. The status such a traceback exits with is 1, the same status
 `EXIT_BLANK_SLIDE` uses, so a caller that has to tell the two apart reads stderr: the
 blank-slide message names the specimens that yielded nothing, and a traceback names a file
