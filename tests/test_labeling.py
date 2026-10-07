@@ -727,12 +727,18 @@ def test_cli_refuses_a_paths_slides_config_path_refuses(
     # R6-1 and R6-2, and the only half of round 5's mechanism this program never got.
     # `prepare_output` resolves the paths it guards the delete against through
     # `_protected_paths`, off the *default* configuration rather than the `cfg` this run
-    # loaded, so a `paths.slides` that `load` accepted because it validates nothing past
-    # a key's presence but `Config.path` refused reached this program from inside its own
-    # guard. `main` caught `OutputPathError` and `LabelingInputError`, so it left as a
-    # traceback and the process exited 1 — which this file defines as
+    # loaded, so a `paths.slides` whose value `Config.path` refused reached this program from
+    # inside its own guard. `main` caught `OutputPathError` and `LabelingInputError`, so it
+    # left as a traceback and the process exited 1 — which this file defines as
     # `EXIT_CONTRADICTORY`, "the labels contradicted themselves", reported to a caller
     # over a hand-edited configuration string.
+    #
+    # The type of `paths.slides` is no longer part of this: `load` types every `paths.*` key
+    # as `str`, so a number under one is refused there, before any `Config` exists and long
+    # before this program's own guard runs. What reaches the guard from a *file* is a value
+    # of the declared type that `Config.path` still refuses, and the assertion below is
+    # about that arm surviving — it is not dead, and the round that made it unreachable from
+    # the CLI did not remove it.
     #
     # The stale label is the assertion that matters, and it is the same one the extract
     # side makes: `_protected_paths` runs before `shutil.rmtree`, so a refusal here

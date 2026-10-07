@@ -398,9 +398,25 @@ class Config:
         raise ConfigError(f"unknown key '{key}' in {self._describe()}")
 
     def set(self, key: str, value: Any) -> None:
-        """Write `value` at the dotted `key`, under the same check `load` applies."""
+        """Write `value` at the dotted `key`, under both of the checks `load` applies.
+
+        The key is checked against `KNOWN_KEYS` and the value's type against `KEY_TYPES`,
+        through the same `_check_value_type` the file path uses, so the two routes a caller
+        can write a value into a configuration cannot disagree about what a declared key
+        holds. That was not true of `set` before: it validated the key and not the value, so
+        `default_config().set("training.pretrained", 1)` inverted a run in a process holding a
+        long-lived config, in exactly the way `training.pretrained: 1` written into the file
+        used to.
+
+        **The value is checked before it is written, so a refused `set` leaves the
+        configuration exactly as it was** — the same order `load` uses, and the reason a
+        caller can retry with a corrected value without reloading. There is no source path
+        to name beyond `self._describe()`, so the refusal identifies its origin as the file
+        this config was loaded from, or as an in-memory configuration when there is no file,
+        which is the same string every other refusal on a `Config` uses.
+        """
         _validate_key(key, self._describe())
-        _set_dotted(self._data, key, value)
+        _set_dotted(self._data, key, _check_value_type(key, value, self._describe()))
         self._read.add(key)
 
     def path(self, key: str) -> Path:
@@ -411,6 +427,15 @@ class Config:
         against the project root. A POSIX-absolute value on a non-POSIX platform
         is read as an absolute path on the current drive, which is the only
         interpretation that yields a `Path` able to open, create, or stat.
+
+        **The two refusals here are about the value and not about its type, and the
+        non-string arm is no longer reachable from a command line.** `load` types every
+        `paths.*` key as `str`, so a number under one is a `ConfigError` naming the key at
+        load, before any `Config` exists; both CLIs resolve their path keys inside the arm
+        that catches it. The arm stays because a `Config` is constructible in memory from any
+        mapping and need not come from a file — `Config({"paths": {"slides": 7}})` is the
+        shape, and `tests/test_config.py` builds it. The blank-string arm is reachable either
+        way: an empty string is the declared type and `load` makes no claim about values.
         """
         raw = self.get(key)
         if not isinstance(raw, str):

@@ -179,6 +179,93 @@ def test_set_rejects_an_undeclared_key():
         cfg.set("training.never_read_by_code", 1)
 
 
+# `set` is the second route into a configuration, and it typed nothing at all before this
+# group: `_validate_key` and `_set_dotted`, so `default_config().set("training.pretrained",
+# 1)` inverted a run in a process holding a long-lived config in exactly the way the file
+# path used to. These are the same properties the file path holds down above, reached the
+# other way round.
+
+
+def test_set_refuses_a_value_whose_type_is_not_the_declared_one():
+    cfg = load()
+    with pytest.raises(ConfigError, match="has type"):
+        cfg.set("training.pretrained", 1)
+
+
+def test_a_bool_declared_key_refuses_an_int_through_set():
+    # The measured inversion, on the route that has no file. `int` is truthy, so this used
+    # to write a value that `build_model` would read as "train from ImageNet weights" and
+    # say nothing at all — the defect the file path was closed for, still open one function
+    # to the right.
+    cfg = load()
+    with pytest.raises(ConfigError) as caught:
+        cfg.set("augmentation.horizontal_flip", 1)
+    message = str(caught.value)
+    assert "has type int" in message, message
+    assert "as bool" in message, message
+
+
+def test_the_set_refusal_names_the_key_the_type_found_and_the_remedy():
+    cfg = load()
+    with pytest.raises(ConfigError) as caught:
+        cfg.set("extraction.patch_size", "big")
+    message = str(caught.value)
+    # The key and both types, exactly as on the file path: a refusal is a refusal whichever
+    # route delivered the value, and a caller reading one has no way to tell which produced
+    # it, so the two messages say the same things.
+    assert "extraction.patch_size" in message, message
+    assert "has type str" in message, message
+    assert "as int" in message, message
+    assert "supply a value of type int" in message, message
+
+
+def test_a_refused_set_leaves_the_configuration_unchanged():
+    # `set` checks the value before it writes, so a caller can retry with a corrected value
+    # without reloading — and a refused `set` does not half-apply. Without this the type
+    # check could be added to the wrong side of the write and every refusal would leave the
+    # bad value in place.
+    cfg = load()
+    before = cfg.get("training.pretrained")
+    with pytest.raises(ConfigError):
+        cfg.set("training.pretrained", 1)
+    assert cfg.get("training.pretrained") is before
+
+
+def test_set_and_load_refuse_the_same_value_the_same_way(tmp_path):
+    # One rule, two routes. `set` calls the same `_check_value_type` the file path does, so a
+    # value the file refuses cannot be written by hand into a loaded config, and the two
+    # routes cannot drift into disagreeing about what a declared key holds.
+    with pytest.raises(ConfigError) as from_file:
+        load(_config_with_one_value_edited("training.batch_size", "big", tmp_path))
+    with pytest.raises(ConfigError) as from_set:
+        load().set("training.batch_size", "big")
+    file_message = str(from_file.value)
+    set_message = str(from_set.value)
+    for text in ("has type str", "as int", "training.batch_size"):
+        assert text in file_message, file_message
+        assert text in set_message, set_message
+
+
+def test_set_widens_an_int_under_a_declared_float_as_the_file_path_does():
+    # The one admitted pair, admitted on both routes. A `set` that refused it would make the
+    # two routes disagree about `blobs.area_um2_max = 125`, which the override path accepts.
+    cfg = load()
+    cfg.set("blobs.area_um2_max", 125)
+    value = cfg.get("blobs.area_um2_max")
+    assert value == 125.0
+    assert type(value) is float
+
+
+def test_set_accepts_a_value_of_the_declared_type_whatever_it_means():
+    # The negative space again, on this route. `set` is a type check and not a value check,
+    # so the caller who turns a knob past its range writes it successfully and the reading
+    # function refuses it — which is where that refusal belongs, and is what
+    # `tests/test_labeling.py` pins for `blobs.gray_percentile: 150`.
+    cfg = load()
+    cfg.set("blobs.gray_percentile", 150)
+    assert cfg.get("blobs.gray_percentile") == 150
+
+
 @pytest.mark.parametrize(
     "override",
     [
@@ -424,10 +511,19 @@ def test_both_input_paths_refuse_the_same_value_the_same_way(tmp_path):
         assert text in override_message, override_message
 
 
-def test_the_default_file_itself_is_accepted(tmp_path):
-    # The tautology this mechanism has to avoid becoming. If `load` refused the shipped file,
-    # nothing would run; if it measured the shipped file against itself, a hand-edit would
-    # pass. This is the assertion that says the table is doing the work.
+def test_a_hand_edited_value_of_the_declared_type_is_accepted(tmp_path):
+    # **A copy of the shipped file with one value replaced, which is what this test loads** —
+    # it does not load `configs/default.yaml` itself, so it says nothing about that file
+    # being accepted and used to be named as though it did. The check it does make is the one
+    # that matters for the tautology: a value of the declared `str` where the shipped file
+    # has a different `str` is accepted, so the type check is not a comparison of values and
+    # is not a rule about how a value is spelled.
+    #
+    # That the shipped file itself loads is covered by every other test in this file that
+    # calls `load()` with no argument — `test_loads_declared_value` first among them — and
+    # that its types match the table is `test_key_types_agree_with_default_yaml_in_both_
+    # directions` above. The stronger claim, that a hand-edit to *that* file is refused, is
+    # `test_the_declared_types_are_not_read_from_the_file_being_validated`.
     cfg = load(_config_with_one_value_edited("project.name", "x", tmp_path))
     assert cfg.get("project.name") == "x"
 
@@ -468,14 +564,54 @@ def test_a_thresholds_key_that_is_not_a_list_is_refused(tmp_path):
         load(_config_with_one_value_edited("ablation.thresholds", b"35", tmp_path))
 
 
+def _config_missing_a_required_key_and_mistyped(tmp_path):
+    """Return a path to a file that is wrong in both ways at once.
+
+    `training.architecture` is dropped, which is a key in `REQUIRED_KEYS`, and
+    `training.epochs` is written as a string, which is the wrong type for a key declared
+    `int`. A file wrong in one way only cannot say anything about which of two checks runs
+    first, which is what the test below needs.
+    """
+    data = yaml.safe_load((PROJECT_ROOT / "configs" / "default.yaml").read_text(encoding="utf-8"))
+    del data["training"]["architecture"]
+    data["training"]["epochs"] = "ten"
+    path = tmp_path / "wrong-in-both-ways.yaml"
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    return path
+
+
 def test_a_typed_file_key_refuses_before_a_missing_required_key(tmp_path):
-    # The order of the two checks is a claim: a file that is wrong in both ways is reported
-    # for the key it got wrong first, and a reader fixing one error at a time is not sent
-    # back to `load` twice for one mistake. Here the value is the wrong type and no required
-    # key is missing, so this asserts the type check is the one that fires; the missing-key
-    # case is covered by `test_missing_required_key_is_refused` above.
-    with pytest.raises(ConfigError, match="has type"):
-        load(_config_with_one_value_edited("training.batch_size", "big", tmp_path))
+    # **The order of the two checks, pinned on a file that is wrong in both ways.** An
+    # earlier version of this test asserted the same thing on a file whose only fault was the
+    # type, and its own comment admitted no required key was missing — so moving the type
+    # loop below the missing-key check would have left it green and this claim held down by
+    # nothing. This file drops a required key *and* mistypes another, so the two checks
+    # compete and only one can report.
+    #
+    # The order is the type check first, and the reason is what a caller does with the
+    # answer: the message names the key and the two types and how to fix them, so a reader
+    # fixes one line and is done, where a missing-key message names a key whose line is
+    # present and correctly spelled and reads as a puzzle. The two faults are independent
+    # and both real, so this only says which is reported; it does not say the other is not
+    # there. Fixing the first mistake and reloading surfaces the second.
+    with pytest.raises(ConfigError) as caught:
+        load(_config_missing_a_required_key_and_mistyped(tmp_path))
+    message = str(caught.value)
+    assert "has type" in message, message
+    assert "training.epochs" in message, message
+    assert "missing required keys" not in message, message
+
+
+def test_a_missing_required_key_is_still_refused_when_no_value_is_mistyped(tmp_path):
+    # The other direction of the same pair, so neither test can pass while the other order
+    # holds: a file that only omits a required key is reported for the omission, which is
+    # what `test_missing_required_key_raises` above already says for every required key.
+    data = yaml.safe_load((PROJECT_ROOT / "configs" / "default.yaml").read_text(encoding="utf-8"))
+    del data["training"]["architecture"]
+    path = tmp_path / "missing-only.yaml"
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    with pytest.raises(ConfigError, match="missing required keys"):
+        load(path)
 
 
 def test_override_without_equals_raises():

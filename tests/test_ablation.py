@@ -1118,9 +1118,11 @@ def test_thresholds_refuses_a_key_that_is_not_a_sequence_of_thresholds(value, as
     # Writing the value into a YAML file was the only way to deliver it to `_thresholds`
     # while `load` typed overrides only; that hole is closed, so the check is exercised
     # through the one route that still reaches it, and a reader wanting to know what a
-    # hand-edit does today reads the test named `test_load_refuses_a_thresholds_key_that_is
-    # _not_a_list`. `_thresholds` keeps its own check because a `Config` can be built in
-    # memory by anything holding a mapping, which `test_config.py:249` does.
+    # hand-edit does today reads
+    # `tests/test_config.py::test_a_thresholds_key_that_is_not_a_list_is_refused`.
+    # `_thresholds` keeps its own check because a `Config` is constructible in memory from
+    # any mapping and need not come from a file: `tests/test_config.py:157,164,169` and
+    # `:569,575` build one that way, as does the memoryview test two below.
     from blobcount import ablation
     from blobcount.config import Config
 

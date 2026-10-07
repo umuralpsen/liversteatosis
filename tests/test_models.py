@@ -193,10 +193,11 @@ def test_the_unsupported_message_names_supported_and_every_name_in_it():
 
 
 # A name that is not a `str` at all is refused by the same refusal rather than by the hash
-# of a `dict` lookup: `training.architecture` is a key `load` checks is declared and
-# nothing about its value, so a list or a mapping is a value a hand-edited
-# `configs/default.yaml` can hold, and `TypeError: unhashable type` would name neither the
-# rule nor the remedy.
+# of a `dict` lookup. A file holding a list under `training.architecture` is now refused
+# earlier, by `load`'s type check, since `KEY_TYPES` declares that key a `str` — so this guard
+# is not reachable from a configuration file and is here for the route that still reaches it,
+# a `Config` built in memory from any mapping. Without it, `TypeError: unhashable type` would
+# name neither the rule nor the remedy.
 
 
 @pytest.mark.parametrize(
