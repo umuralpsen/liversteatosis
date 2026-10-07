@@ -32,10 +32,10 @@ always an answer about what the caller pointed at. Seven of them can reach it, i
 groups, and nothing this program does does:
 
 - **A configuration.** One that cannot be loaded — missing, unreadable, not a mapping, a
-  key the code does not declare, a required key the file does not declare — and a
-  `paths.labels` that `load` accepted because it validates nothing past the key's
-  presence but `Config.path` refuses, because it is not a path string or is empty. Both
-  arrive as a `ConfigError`, and both are caught here.
+  key the code does not declare, a required key the file does not declare, or a value for a
+  declared key whose type this project does not read it as — and a `paths.labels` whose
+  *value* `Config.path` refuses because it is empty, the type of that key being `load`'s
+  business now. Both arrive as a `ConfigError`, and both are caught here.
 - **An output target.** A target `prepare_output` will not clear: the project root,
   `paths.slides` or `paths.manifest` themselves, a directory holding either, anything not
   strictly below the project root, and an existing path that is a file rather than a
@@ -205,8 +205,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         out_dir: Path = args.out if args.out is not None else cfg.path("paths.labels")
     except ConfigError as error:
         # A configuration that is missing, unreadable or not a mapping, one that does not
-        # declare a key the run reads, and a `paths.labels` `load` accepted because it
-        # validates nothing past the key's presence but `Config.path` refused. The
+        # declare a key the run reads, one whose value for a declared key has the wrong
+        # type, and a `paths.labels` whose empty *value* `Config.path` refused. The
         # override the threshold produces cannot be the cause: the parser has already
         # typed it as the `int` the key is configured as, and `--out` has already been
         # typed as a `Path`.

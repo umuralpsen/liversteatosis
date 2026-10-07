@@ -858,8 +858,14 @@ def _thresholds(cfg: Config) -> tuple[int, ...]:
     swept: `!!binary 'MzU='` is a `bytes`, which is a `Sequence` and iterated as the two
     thresholds 51 and 53, and a `!!set {3, 5}` iterated in an order YAML did not choose —
     while the same bytes value was refused as an *entry*, which is the inconsistency this
-    check ends. `load` accepts any of it, having validated that the key is declared and
-    nothing about its value. `str` and `bytes` are excluded by name because they are
+    check ends. **`load` refuses both of these now** — `ablation.thresholds` is declared
+    `list` in `blobcount.config.KEY_TYPES`, so `!!binary` and `!!set` are refused there with
+    a `ConfigError` naming the key before this function is reached, and
+    `tests/test_config.py::test_a_thresholds_key_that_is_not_a_list_is_refused` is the test
+    that says so. This check is what remains for a `Config` built in memory, which is public
+    and constructible, and `tests/test_ablation.py` now reaches this function that way
+    because the file route no longer does. `str` and `bytes` are excluded by name because
+    they are
     sequences — of characters, and of each other — so a `Sequence` test alone would sweep
     `'35'` the way it sweeps `b"35"`; a `set` and a mapping are not sequences at all and
     are refused by the same test. **This is not a YAML type policy**, which no caller
@@ -891,13 +897,14 @@ drawing does, so one predicate covering both would throw away a threshold the sw
 exactly. The two tests that pin the split are named at the end of `plot`'s docstring.
 
 
-    **The caller reports it, and it does not reach the interpreter.** The standing limit
-    `bin/extract_patches.py` records is that `load` checks that a key is declared and
-    nothing about its value, so a conversion this project does not wrap is reported as a
-    traceback. That limit covers `extraction.patch_size`, a value this project chose not
-    to validate, and it does not transfer to a function written to reject a value: a
-    validator that validates and then reports by traceback looks like a check and is not
-    one. `bin/ablate_threshold.py` therefore calls this function itself, before it reads a
+    **The caller reports it, and it does not reach the interpreter.** `load` types its
+    inputs and declares `ablation.thresholds` as a `list`, so the shapes above are refused
+    there — and the `ValueError` and `TypeError` this function raises for what gets *inside*
+    a list are the ones no type check can catch, because `['3', 5]` is a `list` of the
+    declared type and only this function knows what a threshold is. That distinction is why
+    the command line wraps this call and not `ablate`: a validator that validates and then
+    reports by traceback looks like a check and is not one.
+    `bin/ablate_threshold.py` therefore calls this function itself, before it reads a
     patch, and returns `EXIT_REFUSED` on its answer. The catch there is around that one
     call and not around `ablate`, so it is too narrow to hold a defect in the counting.
     The `TypeError` it also catches is the check on the key itself, and not an entry,
@@ -906,10 +913,11 @@ exactly. The two tests that pin the split are named at the end of `plot`'s docst
     """
     configured = cfg.get("ablation.thresholds")
     # The key is checked before any entry is, because an entry cannot be checked at all
-    # until the key says what a range is. `load` validated that the key is declared and
-    # nothing about its value, so anything iterable arrived here and was swept: `b"35"`
-    # is a `Sequence` and iterated as the two thresholds 51 and 53, and a `!!set`
-    # iterated in an order YAML did not choose. `str` and the three buffer types are
+    # until the key says what a range is. `load` typed the key as the declared `list`, so a
+    # file cannot deliver a non-list here any more; what still arrives is whatever a `Config`
+    # built in memory carries, and the shapes this loop used to sweep are still swept
+    # without these lines: `b"35"` is a `Sequence` and iterates as the two thresholds 51 and
+    # 53, and a `set` iterates in an order nobody chose. `str` and the three buffer types are
     # excluded by name because they *are* sequences — of characters, and of each other — so
     # a `Sequence` test alone would sweep `'35'` the way it sweeps `b"35"`. A `TypeError`
     # rather than a `ValueError`, because this is the key and not an entry, and

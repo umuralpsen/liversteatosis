@@ -29,10 +29,11 @@ dataset, never about this program:
 
 - **A configuration**, as a `ConfigError`, and this is the one arm that carries two.
   `load` refusing the file: it is not there, its top level is not a mapping, it declares
-  a key this project does not, or it omits one the project requires. And a
-  `paths.results` that `load` accepted because it validates nothing past the key's
-  presence but `Config.path` refused, because it is not a path string or is empty. Both
-  are refused before a patch is read.
+  a key this project does not, it omits one the project requires, or a value for a declared
+  key has a type this project does not read it as. And a `paths.results` whose *value*
+  `Config.path` refused because it is empty — the type of that key is `load`'s business now,
+  and the empty string is a value question that stays here. Both are refused before a patch
+  is read.
 - **The output target**, as two checks this program makes for itself, each run against
   both `paths.results` and `paths.results / "label_analysis"`: one that exists and is a
   file rather than a directory, and one that is not strictly below the project root. Both
@@ -134,18 +135,24 @@ above says is a traceback and not a study-level failure, and a caller that has t
 the two apart reads stderr: a refusal names what it refused, and a traceback names a file
 and a line. The `plot` arm is the one place where a project-raised type is what keeps that
 true: `PlotError` is raised by this project and by nothing in a figure library, so catching
-it says "this value cannot be drawn" and says nothing else. **A mistyped configured value
-is a limit for a value this project chose not
-to validate, and not for one that chose to be validated.** `extraction.patch_size` is
-read and used, never checked, so a hand-edit of it reaches the interpreter as a traceback
-and that is the recorded limit. `ablation.thresholds` is read by a function written to
-reject a value that is not a whole number of blobs, and a validator that validates and
-then reports by traceback looks like a check without being one, so its refusal is caught
-above and reported as a refusal. **The same ruling reaches the drawing path one layer on,
-and stops at the same line:** a threshold the validator is right to accept and a renderer
-is not able to place is a fact about the run's configuration, so it is caught and reported
-as a refusal — while a threshold the validator would have accepted and that a *defect* made
-impossible to place is still a traceback.
+it says "this value cannot be drawn" and says nothing else. **A configured value this
+project does not check is a limit, and a checked one is not — and the two are separated by
+whether a validator exists, not by whether the value is mistyped.** `load` now type-checks
+both of its inputs, so a *mistyped* value anywhere in this project's configuration is a
+refusal before this program reads a patch, and that covers `extraction.patch_size` as much
+as it covers `ablation.thresholds`; the test that says so for this file's own keys is
+`tests/test_config.py::test_a_file_value_whose_type_is_not_the_declared_one_is_refused`.
+What remains outside `load` is a value of the *declared* type that is nonetheless wrong, and
+that splits three ways here. `extraction.patch_size` is read and used, never checked, so a
+hand-edit of it to a negative integer reaches the interpreter as a traceback and that is the
+recorded limit — a type this project checked, a value it did not. `ablation.thresholds` is
+read by a function written to reject a value that is not a whole number of blobs, and a
+validator that validates and then reports by traceback looks like a check without being one,
+so its refusal is caught above and reported as a refusal. **The same ruling reaches the
+drawing path one layer on, and stops at the same line:** a threshold the validator is right
+to accept and a renderer is not able to place is a fact about the run's configuration, so it
+is caught and reported as a refusal — while a threshold the validator would have accepted and
+that a *defect* made impossible to place is still a traceback.
 
 **A summary line, the range coverage, then two tables.** The count distribution comes
 first, because the ratios are ratios of it and a reader who has seen a pooled ratio of 0.9
@@ -412,9 +419,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         cfg = load()
         # Resolved inside the arm, for the reason `bin/label_patches.py` gives: `load`
-        # validates that a key is declared and nothing about its value, so a
-        # `paths.results` that is not a path string is refused by `Config.path`, and
-        # outside this arm that refusal would leave a traceback.
+        # types the key as the declared `str`, but an empty one is a value it makes no
+        # claim about, so `Config.path` is what refuses it — and outside this arm that
+        # refusal would leave a traceback.
         results_dir: Path = cfg.path("paths.results")
         selected = (
             args.selected if args.selected is not None
@@ -448,11 +455,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         swept = list(_thresholds(cfg))
     except (TypeError, ValueError) as error:
         # `ValueError` for a configured entry that is not a plain whole number of blobs —
-        # a fraction, a quoted digit, a `true`, a negative number, a `.inf` or a `.nan` —
-        # and `TypeError` from the key itself not being a sequence, which `load` accepts
-        # because it validates that a key is declared and nothing about its value. Both
-        # are the same hand-edit of the same key, and the catch is around this one call
-        # rather than around
+        # a fraction, a quoted digit, a `true`, a negative number, a `.inf` or a `.nan` — and
+        # `TypeError` from the key itself not being a sequence, which `load` used to accept
+        # and now refuses: `ablation.thresholds` is declared `list` in `KEY_TYPES`, so a
+        # `!!binary` or a `!!set` written into the file is a `ConfigError` on the arm above
+        # and never reaches this call. The `TypeError` is still caught because a `Config` is
+        # constructible in memory and need not come from a file at all. Both are the same
+        # hand-edit of the same key, and the catch is around this one call rather than around
         # `ablate`, so it is too narrow to hold a defect in the counting. This refusal is
         # a statement about the configuration, which is why it is not the `ConfigError` arm
         # above: `load` accepted the file, and `ablation.thresholds` is a key this project
