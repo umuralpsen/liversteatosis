@@ -3,23 +3,31 @@
 **The head is what this module builds and nothing else is.** `build_model` names a backbone
 from `SUPPORTED`, asks torchvision for it with or without its ImageNet weights, and replaces
 the one layer that turns a feature vector into a class count. Nothing here is fitted, no
-device is chosen and no byte is written: training the result, moving it to the device
-`project.device` resolves to and saving it are `blobcount.train`'s, which arrives with the
-cross-validation loop, and a constructor that also did those three things would leave a
-caller no way to ask for one without the others.
+device is chosen and nothing of this project's is written: training the result, moving it to
+the device `project.device` resolves to and saving it are `blobcount.train`'s, which arrives
+with the cross-validation loop, and a constructor that also did those three things would
+leave a caller no way to ask for one without the others. **The one byte this module is the
+cause of writing is torch's own hub cache, and only when `pretrained` is true** — a
+`weights="DEFAULT"` call that cannot reach its checkpoint raises from torch's downloader,
+and a run on a machine that already has the three ImageNet checkpoints cached writes
+nothing at all.
 
 **The three configuration keys behind this factory are `training.architecture`,
 `training.num_classes` and `training.pretrained`, and the caller is what reads them.** The
 signature takes plain values and not a `Config`, so a test builds a model with no
-configuration file at all — which is why every test in `tests/test_models.py` constructs
-`pretrained=False` — and `blobcount.train` is the module that holds the configuration and
-hands these three over, once per fold.
+configuration file at all, and `blobcount.train` is the module that holds the configuration
+and hands these three over, once per fold. **Nothing in `blobcount/models.py`
+calls `Config.get` or `Config.path`** — this paragraph is the reason the scanner in
+`tests/test_config.py` does not report a reader here, and a read of any of the three written
+into this file would shrink `_KEYS_WITHOUT_READER` by three while reading no value a caller
+passed, which is the fake reader that ledger exists to catch. The three stay in it until
+`blobcount.train` reads them to hand over here.
 
 **A class count is refused here rather than by `nn.Linear`, and that is the only validation
 in this module.** Measured on torch 2.10.0: `nn.Linear(512, 0)` builds and warns
 `Initializing zero-element tensors is a no-op`, which the `filterwarnings = ["error"]` in
 `pyproject.toml` turns into a failed run; `nn.Linear(512, -1)` raises
-`RuntimeError: Trying to create tensor with negative dimension -1: [-1, 4]`; and
+`RuntimeError: Trying to create tensor with negative dimension -1: [-1, 512]`; and
 `nn.Linear(512, 2.0)`, `nn.Linear(512, True)` and `nn.Linear(512, "2")` raise the same
 `TypeError: empty() received an invalid combination of arguments`, which names no rule and
 no argument. Every one of those four arrives from a hand-edited `configs/default.yaml` —
@@ -71,7 +79,13 @@ here. **`pretrained` itself is not checked**, and that is the same argument
 `blobcount.data` makes for its two flip keys: `configs/default.yaml` declares a `bool` for
 `training.pretrained`, `load` accepts an override only when its type is exactly the
 configured one, so `training.pretrained=1` is a `ConfigError` at load time and never
-arrives at this function.
+arrives at this function. **A hand-edited file is not that check**, and the limit is stated
+here rather than left for a caller to assume away: `load` types an *override* against the
+configured value and does not type the file, so `training.pretrained: 1` written into
+`configs/default.yaml` arrives here as the integer 1, is truthy, and trains with ImageNet
+weights. That is a class-count mistake reported by this module and a `pretrained` mistake
+left to the reader, and the asymmetry is the price of not validating a key `load` already
+guards on the path a caller actually uses.
 
 **Where a head lives is stated by the row that builds its backbone.** The two ResNets keep
 theirs at `.fc` and EfficientNet keeps it at `.classifier[1]` — measured on this stack, a
@@ -84,6 +98,15 @@ written here, so a head cannot be a different width from the feature vector in f
 namespace at call time. That is what lets `tests/test_models.py` replace one torchvision
 constructor and assert the argument it was handed — with `weights="DEFAULT"` reaching no
 network at all — and it keeps a second name for the same constructor out of this file.
+**It is also what pins the name in a dispatch row to the backbone behind it**, which no
+head-width assertion can do: `resnet101` is 2048-wide at `.fc` exactly as `resnet50` is, so
+a row naming the wrong one builds a model that passes every width and every forward pass and
+is a different backbone than the one `training.architecture` asked for. Measured on this
+stack through `torchvision.models.get_model_weights`, the three names resolve to three
+different checkpoints — `resnet18-f37072fd.pth`, `resnet50-11ad3fa6.pth` and
+`efficientnet_b0_rwightman-7f5810bc.pth` — so which checkpoint a fold trains from is decided
+by the string in the row and by nothing else, and the test replaces all three constructors
+at once and asks for each name in turn.
 
 Declared interface, in `__all__` order:
 
@@ -133,7 +156,9 @@ def _replace_efficientnet_head(model: nn.Module, width: int) -> None:
 # `in_features` is read off the layer each of these replaces rather than written beside the
 # row, so a head cannot be a different width from the feature vector in front of it, and
 # the widths in `tests/test_models.py` are measured off the built model rather than
-# remembered.
+# remembered. The constructor name in the row is the one thing a head width cannot check —
+# `resnet101` is 2048-wide at `.fc` as `resnet50` is — and it is read at call time so the
+# test that names it is one monkeypatch rather than an import.
 _BACKBONES: dict[str, tuple[str, Callable[[nn.Module, int], None]]] = {
     "resnet18": ("resnet18", _replace_resnet_head),
     "resnet50": ("resnet50", _replace_resnet_head),

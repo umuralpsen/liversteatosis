@@ -36,7 +36,8 @@ def test_supported_lists_the_configured_default():
 # the head is the width the caller asked for, an architecture this project does not build
 # is refused, and the shipped `training.architecture` is one this project builds. What
 # follows pins the parts of the interface they leave open: which layer is the head of each
-# of the three backbones and how wide it was to begin with, that nothing else about the
+# of the three backbones and how wide it was to begin with, that the constructor each name
+# reaches is the one torchvision publishes under that name, that nothing else about the
 # model changed, that the names are matched exactly, that a class count is refused by name
 # and with a remedy, that `weights` is the only argument handed to torchvision and that its
 # value is the string alias this stack resolves, and that two calls give two independent
@@ -51,6 +52,15 @@ def test_supported_lists_the_configured_default():
 _RESNET18_FEATURES = 512
 _RESNET50_FEATURES = 2048
 _EFFICIENTNET_B0_FEATURES = 1280
+
+# The same three numbers keyed by the name that asks for them, so a test can loop over
+# `SUPPORTED` without a chain of conditionals and the head it checks is the one belonging to
+# the backbone the caller named.
+_FEATURES = {
+    "resnet18": _RESNET18_FEATURES,
+    "resnet50": _RESNET50_FEATURES,
+    "efficientnet_b0": _EFFICIENTNET_B0_FEATURES,
+}
 
 
 def test_supported_is_exactly_the_three_names_this_project_builds():
@@ -105,6 +115,58 @@ def test_two_calls_give_two_models_that_share_no_parameter():
     assert all(
         a is not b for a, b in zip(first.parameters(), second.parameters(), strict=True)
     )
+
+
+# The one property no head-width assertion can reach: that the name in a dispatch row is the
+# constructor torchvision publishes. Widths do not catch it — `resnet101` is 2048-wide at
+# `.fc` exactly as `resnet50` is, so pointing the `resnet50` row at it builds a model that
+# passes every width and every forward pass above and is a different backbone than the one
+# `training.architecture` asked for. Measured through `torchvision.models.get_model_weights`,
+# the three names resolve to three different checkpoints, so which one a fold starts from is
+# decided by the string in the row and by nothing else.
+#
+# So every torchvision constructor is stubbed at once and the factory is asked for each name
+# in turn: the constructor it reached is the row's own name, and nothing outside `SUPPORTED`
+# was reached at all. Both `pretrained` values run, so the `weights` argument is carried for
+# all three names rather than for the one each of the two tests further down covers.
+
+
+def _record_every_torchvision_constructor(monkeypatch, called):
+    """Replace all three torchvision constructors with stubs that record their keywords.
+
+    The real constructor is captured first and handed back a genuine `weights=None` model, so
+    the factory under test still swaps a real head and the head-width assertion beside it is
+    a measurement rather than a tautology.
+    """
+    for attribute in SUPPORTED:
+        real = getattr(torchvision.models, attribute)
+
+        def stub(*, _real=real, _name=attribute, **kwargs):
+            called.append((_name, kwargs))
+            return _real(weights=None)
+
+        monkeypatch.setattr(torchvision.models, attribute, stub)
+
+
+@pytest.mark.parametrize("pretrained", [True, False])
+def test_a_supported_name_reaches_the_torchvision_constructor_of_that_name(
+    monkeypatch, pretrained
+):
+    called = []
+    _record_every_torchvision_constructor(monkeypatch, called)
+
+    for name in SUPPORTED:
+        model = build_model(name, 3, pretrained=pretrained)
+        head = model.fc if name.startswith("resnet") else model.classifier[1]
+        assert (head.in_features, head.out_features) == (_FEATURES[name], 3)
+
+    # Each name reached its own constructor exactly once, in `SUPPORTED` order, and nothing
+    # else was called at all: a row naming a different backbone of the same width shows up
+    # here and in neither the head-width assertion nor the forward pass.
+    assert [attribute for attribute, _ in called] == list(SUPPORTED), called
+    assert {attribute: kwargs for attribute, kwargs in called} == {
+        name: {"weights": "DEFAULT" if pretrained else None} for name in SUPPORTED
+    }
 
 
 # The cheap failure this names: a configuration hand-edited from `resnet18` to `ResNet18`
@@ -201,33 +263,18 @@ def test_the_architecture_is_refused_before_the_class_count_is_read():
 # deprecated and warns, and `pyproject.toml` turns a warning into a failure.
 
 
-def _stub_constructor(monkeypatch, attribute, handed):
-    """Replace one torchvision constructor with a stub that records its keyword arguments.
-
-    The real constructor is captured first, so the stub can hand back a genuine
-    `weights=None` model and the factory under test still swaps a real head.
-    """
-    real = getattr(torchvision.models, attribute)
-
-    def stub(**kwargs):
-        handed.update(kwargs)
-        return real(weights=None)
-
-    monkeypatch.setattr(torchvision.models, attribute, stub)
-
-
 def test_pretrained_true_hands_torchvision_the_default_weights(monkeypatch):
-    handed = {}
-    _stub_constructor(monkeypatch, "resnet18", handed)
+    called = []
+    _record_every_torchvision_constructor(monkeypatch, called)
     build_model("resnet18", 2, pretrained=True)
-    assert handed == {"weights": "DEFAULT"}
+    assert called == [("resnet18", {"weights": "DEFAULT"})], called
 
 
 def test_pretrained_false_hands_torchvision_no_weights(monkeypatch):
-    handed = {}
-    _stub_constructor(monkeypatch, "efficientnet_b0", handed)
+    called = []
+    _record_every_torchvision_constructor(monkeypatch, called)
     build_model("efficientnet_b0", 2, pretrained=False)
-    assert handed == {"weights": None}
+    assert called == [("efficientnet_b0", {"weights": None})], called
 
 
 # The other half of the order of the two refusals: a class count is refused before the
@@ -237,11 +284,11 @@ def test_pretrained_false_hands_torchvision_no_weights(monkeypatch):
 
 
 def test_a_bad_class_count_is_refused_before_the_backbone_is_built(monkeypatch):
-    handed = {}
-    _stub_constructor(monkeypatch, "resnet18", handed)
+    called = []
+    _record_every_torchvision_constructor(monkeypatch, called)
     with pytest.raises(ValueError, match="num_classes"):
         build_model("resnet18", 0, pretrained=True)
-    assert handed == {}
+    assert called == []
 
 
 # The string alias is the one thing this factory relies on that nothing offline above can
