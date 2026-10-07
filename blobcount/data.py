@@ -97,11 +97,12 @@ through — whole, in range, hashable — accepts it, and `class_weights([0, 1, 
 returned the weights of classes 1 and 0 and said nothing about it. A `bool` is a
 legitimate value for a probability and never a legitimate value for a class, and the two
 have to be told apart by type because Python will not. The flip keys stay uncoerced
-because the parameter is a probability and `configs/default.yaml` states a `bool` for it,
-and because `blobcount.config.load` accepts an override only when its type is exactly the
-configured one, so `augmentation.horizontal_flip: 1` is a `ConfigError` at load time and
-never reaches this function. `bool` subclasses `numbers.Integral` as well as `int`, so the
-`bool` guard is the whole of what keeps it out of the widened type test.
+because the parameter is a probability and `blobcount.config.KEY_TYPES` declares a `bool` for
+each of them, so `load` compares with `type(value) is bool` on both of its input paths and
+`augmentation.horizontal_flip: 1` is a `ConfigError` naming the key before this function is
+reached — from the file as well as from an override, which is the half that used to be
+uncovered. `bool` subclasses `numbers.Integral` as well as `int`, so the `bool` guard is the
+whole of what keeps it out of the widened type test.
 
 **A non-finite label is refused by the predicate and not by `int()` refusing it on the way
 through.** `int(float("inf"))` raises `OverflowError` and `int(float("nan"))` raises

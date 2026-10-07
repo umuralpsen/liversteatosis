@@ -1124,27 +1124,45 @@ def test_cli_force_refuses_a_paths_slides_config_path_refuses(
     assert stale.read_bytes() == b"the previous run"
 
 
-def test_cli_does_not_report_a_mistyped_configuration_value_as_a_refusal(
-    cli, project_scratch, monkeypatch
+def test_cli_reports_a_mistyped_configuration_value_as_a_refusal(
+    cli, project_scratch, monkeypatch, capsys
 ):
-    # A **pin**, not red evidence, and it is here because the module docstring claims the
-    # boundary. `load` checks that a key is declared and nothing at all about its value, so
-    # `extraction.patch_size: big` is a configuration this project accepts and the only
-    # thing that refuses it is the `int()` in `open_info_from_config`. Catching
-    # `ValueError` would also catch a defect in this project's own arithmetic, and reporting
-    # one as a refusal would send the caller to fix a configuration that is fine — the
-    # ruling round 3 recorded for a percentile outside [0, 100] on the labeling side. So it
-    # leaves `main` as the exception it is, and the process status is 1, which the
-    # docstring says a caller separates from `EXIT_BLANK_SLIDE` by reading stderr.
-    module, _ = cli
+    # **The pin inverted, and K10's own ruling said it would be.** This test used to be named
+    # `test_cli_does_not_report_a_mistyped_configuration_value_as_a_refusal` and asserted that
+    # a `ValueError` carrying `invalid literal for int` escapes `main`. K10 held that
+    # deliberately: `load` checked that a key was declared and nothing at all about its value,
+    # so `extraction.patch_size: big` was a configuration this project accepted and the only
+    # thing that refused it was the `int()` in `open_info_from_config`. The reasoning was that
+    # catching `ValueError` in the CLI would also catch a defect in this project's own
+    # arithmetic, and dressing a defect as a refusal would send the caller to fix a
+    # configuration that is fine. That reasoning was about **widening a catch** and it was
+    # right: the four exceptions the module docstring lists stay uncaught, and a real defect
+    # in this project's arithmetic still leaves `main` as a traceback, which is what K10 was
+    # protecting.
+    #
+    # `load` now type-checks the file path, so this value never reaches the `int()` at all.
+    # Nothing was widened: the refusal comes from the same `load` call whose `ConfigError` arm
+    # already existed, on a value it already had to look at. The rule K10 stated — "a future
+    # reader who disagrees removes the pin and widens the catch" — is not what happened here;
+    # nobody disagreed with K10 and nobody widened anything. The pin moved because the
+    # *earlier* check became a type check, which is the same answer arriving sooner.
+    #
+    # What is still pinned, and what this test now holds down, is that a mistyped value is a
+    # `ConfigError` naming the key and the type rather than a `ValueError` from a conversion
+    # four frames down, that it arrives before `main` has deleted or written anything, and
+    # that it is `EXIT_REFUSED` on the arm that already carried every other `load` refusal.
+    module, out = cli
     monkeypatch.setattr(
         "blobcount.config.DEFAULT_CONFIG_PATH",
         _config_with(project_scratch, "config-patch-size-is-a-word.yaml",
-                     project_scratch / "patches",
+                     out,
                      {"extraction": {"patch_size": "big"}}),
     )
-    with pytest.raises(ValueError, match="invalid literal for int"):
-        module.main([])
+    assert module.main([]) == module.EXIT_REFUSED
+    err = capsys.readouterr().err
+    assert "extraction.patch_size" in err, err
+    assert "int" in err and "str" in err, err
+    assert "Traceback" not in err
 
 
 def test_cli_exits_non_zero_when_a_slide_yields_no_tissue(cli, monkeypatch):

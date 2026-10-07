@@ -1091,9 +1091,7 @@ def test_thresholds_accepts_a_count_too_large_to_be_a_float():
         ({3, 5}, "{3, 5}"),
     ],
 )
-def test_thresholds_refuses_a_key_that_is_not_a_sequence_of_thresholds(
-    tmp_path, value, as_repr
-):
+def test_thresholds_refuses_a_key_that_is_not_a_sequence_of_thresholds(value, as_repr):
     # **Red before the fix**, on both rows, and inconsistently with itself: the loop was
     # `for value in cfg.get("ablation.thresholds")`, so anything iterable was swept, and
     # the same bytes value was refused as an *entry* by the type test two lines below.
@@ -1111,19 +1109,24 @@ def test_thresholds_refuses_a_key_that_is_not_a_sequence_of_thresholds(
     # and the two are different answers: the command line's catch is `(TypeError,
     # ValueError)` around this one call and its own docstring already attributes the
     # `TypeError` arm to "a key that is not a sequence" — which was, until this round, a
-    # statement about an accident and not about a check. **Written out as a file, not as
-    # an override:** `load` refuses an override whose type differs from the configured
-    # one, so `!!binary` and `!!set` can only arrive the way a hand-edit delivers them.
+    # statement about an accident and not about a check.
+    #
+    # **Built through `Config` directly, and the way it used to be built is why.**
+    # `ablation.thresholds` is declared `list`, so `load` refuses both of these as a
+    # `ConfigError` naming the key before `_thresholds` is reached — the test at the bottom
+    # of this file now pins *that* refusal instead, and it is the earlier and better one.
+    # Writing the value into a YAML file was the only way to deliver it to `_thresholds`
+    # while `load` typed overrides only; that hole is closed, so the check is exercised
+    # through the one route that still reaches it, and a reader wanting to know what a
+    # hand-edit does today reads the test named `test_load_refuses_a_thresholds_key_that_is
+    # _not_a_list`. `_thresholds` keeps its own check because a `Config` can be built in
+    # memory by anything holding a mapping, which `test_config.py:249` does.
     from blobcount import ablation
+    from blobcount.config import Config
 
-    path = _cfg(
-        tmp_path,
-        "not_a_list.yaml",
-        results=tmp_path / "results",
-        ablation={"thresholds": value},
-    )
+    cfg = Config({"ablation": {"thresholds": value}})
     with pytest.raises(TypeError) as refused:
-        ablation._thresholds(load(path))
+        ablation._thresholds(cfg)
     message = str(refused.value)
     # The value as it reads, and its type, because the YAML tag the user wrote is not what
     # they see back and `b'35'` names the shape where `!!binary 'MzU='` does not.
@@ -1142,10 +1145,10 @@ def test_thresholds_refuses_a_buffer_view_the_exclusion_tuple_missed():
     # **Unreachable from a YAML file, and that is stated rather than used as the reason to
     # skip it.** PyYAML emits `bytes` for `!!binary` and refuses `!!python` tags, and
     # `yaml.safe_dump` cannot represent a memoryview at all — which is why this row is *not*
-    # in the parametrised test above, since that one writes the value out as a file and
-    # `_cfg` dumps through `safe_dump`. So it is built through `Config` directly, which is
-    # the only way the class arrives, and it is refused because the exclusion means what it
-    # says rather than because the shape is a live hole.
+    # in the parametrised test above. That test builds through `Config` for the reason given
+    # there, and this one builds the same way for a different one: a memoryview is the only
+    # value of the set that `safe_dump` cannot even write. It is refused because the exclusion
+    # means what it says rather than because the shape is a live hole.
     #
     # The fix is the tuple, not a list of every buffer type in the standard library: the
     # predicate is a `Sequence` test, and the exclusions are the sequence types that carry
@@ -1523,6 +1526,14 @@ def test_cli_refuses_a_configured_range_that_is_not_a_sequence(
     # int where a list was configured — and that file's docstring already attributed the
     # arm to "a key that is not a sequence". The key check is that shape, so this pins
     # the claim at the boundary that makes it.
+    #
+    # **The message this asserts is no longer the one a hand-edit produces**, and the test
+    # says so rather than being deleted: `ablation.thresholds` is declared `list`, so
+    # `load` refuses `!!binary` as a type before `ablate_threshold` reaches its own check,
+    # and the run is refused earlier with the earlier message. Both are `EXIT_REFUSED`, no
+    # patch is read, and neither names 51 — the property the test was written to hold still
+    # holds, and it now holds earlier. What moved is *which* refusal says it, so the
+    # assertion is on the properties rather than on one function's wording.
     from blobcount import ablation
 
     module, index, results = cli
@@ -1544,8 +1555,13 @@ def test_cli_refuses_a_configured_range_that_is_not_a_sequence(
     assert module.main(["--index", str(index)]) == module.EXIT_REFUSED
     err = capsys.readouterr().err
     # The rule, and not the range the bytes spelled: a message naming 51 would be a
-    # report of a sweep nobody configured.
-    assert "not a sequence of thresholds" in err
+    # report of a sweep nobody configured. Either rule names it — `load`'s type refusal
+    # today, `_thresholds`' own `not a sequence of thresholds` for a `Config` built in
+    # memory — and the run must be refused before a patch is read either way.
+    assert "ablation.thresholds" in err, err
+    assert ("not a sequence of thresholds" in err) or (
+        "type bytes" in err and "as list" in err
+    ), err
     assert "51" not in err
     assert "Traceback" not in err
     assert not (results / "label_analysis").exists()
@@ -1685,11 +1701,22 @@ def test_cli_refuses_a_results_path_outside_the_project(cli, monkeypatch, tmp_pa
     assert not outside.exists()
 
 
-def test_cli_refuses_a_results_path_config_path_refuses(cli, monkeypatch, tmp_path, capsys):
-    # `load` validates that the key is declared and nothing about its value, so a
-    # `paths.results` that is a number reaches `Config.path` and is refused there. It is
-    # caught on the configuration arm rather than left to a traceback, which is the same
-    # shape the labeling CLI's `paths.labels` refusal took.
+def test_cli_refuses_a_results_path_that_is_not_a_string(
+    cli, monkeypatch, tmp_path, capsys
+):
+    # **The pin moved, and the name moved with it.** This test used to be named
+    # `..._config_path_refuses` and asserted `"path string"`, which is what `Config.path`
+    # says when it is handed a number. `load` now type-checks the file path too, so
+    # `paths.results: 7` is refused before a `Config` exists and the message names the type
+    # instead. That is the better of the two answers and it is the earlier one: the refusal
+    # now comes from the same line that refuses an undeclared key, rather than from a second
+    # function reached later on a value the first one had already been asked about.
+    #
+    # `Config.path`'s own check is not dead and is not what this test covers any more: it
+    # still refuses a value that is not a string in a `Config` built in memory, which
+    # `tests/test_config.py::test_path_rejects_a_non_string_value` covers, and it still
+    # refuses a blank string, which is a value question `load` deliberately makes no claim
+    # about.
     from blobcount import ablation
 
     module, index, _ = cli
@@ -1709,7 +1736,10 @@ def test_cli_refuses_a_results_path_config_path_refuses(cli, monkeypatch, tmp_pa
 
     monkeypatch.setattr(ablation, "load_patch", _boom)
     assert module.main(["--index", str(index)]) == module.EXIT_REFUSED
-    assert "path string" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "paths.results" in err, err
+    assert "int" in err and "str" in err, err
+    assert "Traceback" not in err
 
 
 def test_cli_refuses_a_results_path_that_is_an_existing_file(cli, monkeypatch, capsys):

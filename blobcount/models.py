@@ -30,11 +30,12 @@ in this module.** Measured on torch 2.10.0: `nn.Linear(512, 0)` builds and warns
 `RuntimeError: Trying to create tensor with negative dimension -1: [-1, 512]`; and
 `nn.Linear(512, 2.0)`, `nn.Linear(512, True)` and `nn.Linear(512, "2")` raise the same
 `TypeError: empty() received an invalid combination of arguments`, which names no rule and
-no argument. Every one of those four arrives from a hand-edited `configs/default.yaml` —
-`blobcount.config.load` checks that a key is declared and nothing about its value — and a
-refusal here names the condition the value broke instead of sending the reader into torch's
-initialiser, which is the "looks validated and is not" state `blobcount.data._class_index`
-is written to end for the same reason.
+no argument. **`blobcount.config.KEY_TYPES` declares `training.num_classes` as an `int`, so
+the last three of those never arrive here at all** — `load` refuses them at the key, naming
+the type it read, and what is left for this function is the first two: a count of the right
+type that no width can be built for. A refusal here names the condition the value broke
+instead of sending the reader into torch's initialiser, which is the "looks validated and is
+not" state `blobcount.data._class_index` is written to end for the same reason.
 
 **The refusal is a `ValueError`, and no command line in the tree catches it yet.** The
 declared interface below declares no exception type of this project's own, and a
@@ -75,17 +76,16 @@ value for a declared key and a list under `training.architecture` would otherwis
 **`weights` is the only keyword handed to torchvision, and its value is the string alias
 `"DEFAULT"` or `None`.** torchvision deprecated the `pretrained=` spelling and warns for it,
 and `pyproject.toml` promotes a warning to a failure, so `weights=` is not a style choice
-here. **`pretrained` itself is not checked**, and that is the same argument
-`blobcount.data` makes for its two flip keys: `configs/default.yaml` declares a `bool` for
-`training.pretrained`, `load` accepts an override only when its type is exactly the
-configured one, so `training.pretrained=1` is a `ConfigError` at load time and never
-arrives at this function. **A hand-edited file is not that check**, and the limit is stated
-here rather than left for a caller to assume away: `load` types an *override* against the
-configured value and does not type the file, so `training.pretrained: 1` written into
-`configs/default.yaml` arrives here as the integer 1, is truthy, and trains with ImageNet
-weights. That is a class-count mistake reported by this module and a `pretrained` mistake
-left to the reader, and the asymmetry is the price of not validating a key `load` already
-guards on the path a caller actually uses.
+here. **`pretrained` itself is not checked here**, and that is the same argument
+`blobcount.data` makes for its two flip keys: `blobcount.config.KEY_TYPES` declares a `bool`
+for `training.pretrained`, so `load` compares with `type(value) is bool` on **both** of its
+input paths and `training.pretrained: 1` is a `ConfigError` naming the key before this
+function is reached — whether it arrives as an override or as a line in `configs/default.yaml`.
+That is the check that closes the silent-inversion hole, and it is why `pretrained` reaches
+this function as the `bool` the configuration declares rather than as something truthy.
+**This is a type check and not a value check**, so `training.pretrained` is refused for being
+the wrong type and not for being `true`: a caller who wants no ImageNet weights writes
+`false`, which is a different value and a perfectly good one.
 
 **Where a head lives is stated by the row that builds its backbone.** The two ResNets keep
 theirs at `.fc` and EfficientNet keeps it at `.classifier[1]` — measured on this stack, a

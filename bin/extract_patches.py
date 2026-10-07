@@ -38,12 +38,14 @@ left is `paths.slides` refused from inside the guard, which now arrives on the
 `OutputPathError` arm below rather than on an arm of its own:
 
 - **A configuration**, as a `ConfigError`. `load` refusing the file: it is not there, its
-  top level is not a mapping, it declares a key this project does not, or it omits one the
-  project requires. And a `paths.*` that `load` accepted because it validates nothing past
-  the key's presence but `Config.path` refused, because it is not a path string or is
-  empty: `paths.patches` for this program's own output target, and `paths.manifest`
-  inside `load_registry`. Every one of them is refused before a patch is written or a file
-  is removed.
+  top level is not a mapping, it declares a key this project does not, it omits one the
+  project requires, or a value for a declared key has a type this project does not read it
+  as — `extraction.patch_size: big` is the shape, and the message names the key, the type
+  found and the type read. And a `paths.*` whose *value* `Config.path` refused because it
+  is empty: `paths.patches` for this program's own output target, and `paths.manifest`
+  inside `load_registry`. The last paragraph of this docstring is about the four exceptions
+  that are still tracebacks. Every one of the eight is refused before a patch is written or
+  a file is removed.
 - **The dataset manifest**, as a `RegistryError`. A manifest that is not there, cannot be
   read, is not a mapping, holds a `specimens` that is not a list, holds an entry that is
   not a mapping or carries a key this project does not declare, is missing a required
@@ -89,23 +91,32 @@ program deletes anything. The test that holds that line down is
 `test_cli_force_refuses_before_clearing_when_a_key_extract_slide_reads_is_missing` in
 `tests/test_extract.py`.
 
-**A mistyped value is not a refusal, and that is a limit rather than a gap.** `load`
-checks that a key is declared and nothing at all about its value, so
-`extraction.patch_size: big` is a configuration this project accepts and the only thing
-that refuses it is the `int()` in `open_info_from_config`. A `ValueError` from a conversion
-like that, a `TypeError` or `ValueError` out of planning a read, an `OSError` out of the
-index write, and a `PermissionError` out of listing or clearing a directory are all left
-to the interpreter to report as tracebacks. A per-patch read or write that raises is not in
-that list because `extract_slide` catches both, logs the exception object with the slide
-id and the coordinates, and counts the patch as a `read_failure`. A catch wide enough to
-hold the four would also hold a defect in this project's own arithmetic, and reporting a
-defect as a refusal would send the caller to fix a configuration that is fine — the ruling
-`bin/label_patches.py` records for a `blobs.gray_percentile` outside [0, 100]. The status
-such a traceback exits with is 1, the same status `EXIT_BLANK_SLIDE` uses, so a caller that
-has to tell the two apart reads stderr: the blank-slide message names the specimens that
-yielded nothing, and a traceback
-names a file and a line. `main`'s *return value* is the contract, and an exception never
-returns one.
+**A mistyped value is now a refusal, and it arrives from `load` before this program has
+touched anything.** `load` types both of its inputs, so `extraction.patch_size: big` is
+refused at load as a `ConfigError` naming the key, the type found and the type read — on the
+`ConfigError` arm above, before a slide is opened, a directory is listed, or a byte is
+written. That check is a *type* check and nothing more: a `patch_size` of `-1` is the
+declared `int` and passes, and a `target_mpp` of `.inf` is the declared `float` and passes,
+because what a value has to mean is the reading function's business and
+`blobcount.slides.plan_resolution` still refuses both. The test is
+`test_cli_reports_a_mistyped_configuration_value_as_a_refusal` in `tests/test_extract.py`,
+which used to pin the opposite outcome and says in its own prose why the pin moved.
+
+**Four exceptions are still left to the interpreter, and that is the K10 ruling standing.**
+A `ValueError` from a conversion inside a value that passed the type check, a `TypeError` or
+`ValueError` out of planning a read, an `OSError` out of the index write, and a
+`PermissionError` out of listing or clearing a directory are all still tracebacks. Nothing
+was widened to reach the paragraph above: the refusal there comes from the `load` call
+whose `ConfigError` arm already existed, on a value that call already had to look at. A catch
+wide enough to hold these four would also hold a defect in this project's own arithmetic, and
+reporting a defect as a refusal would send the caller to fix a configuration that is fine —
+the ruling `bin/label_patches.py` records for a `blobs.gray_percentile` outside [0, 100]. A
+per-patch read or write that raises is not in that list because `extract_slide` catches both,
+logs the exception object with the slide id and the coordinates, and counts the patch as a
+`read_failure`. The status such a traceback exits with is 1, the same status
+`EXIT_BLANK_SLIDE` uses, so a caller that has to tell the two apart reads stderr: the
+blank-slide message names the specimens that yielded nothing, and a traceback names a file
+and a line. `main`'s *return value* is the contract, and an exception never returns one.
 """
 
 from __future__ import annotations
@@ -205,13 +216,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ConfigError as error:
         # Two refusals, one exception. `load` refusing the file — it is not there, its top
         # level is not a mapping, it declares a key this project does not, it omits one the
-        # project requires — and a `paths.patches` that `load` accepted because it
-        # validates nothing past the key's presence but `Config.path` refused, because it
-        # is not a path string or is empty. Both are answers about the configuration, and
-        # both are reached before a patch is written or a file is removed. Neither was
-        # wrapped: a `ConfigError` left `main` as a traceback, and the process exited 1,
-        # which is `EXIT_BLANK_SLIDE` — so a broken configuration reported to any caller
-        # reading the exit code as "no tissue was found in any specimen".
+        # project requires, or a value for a declared key has a type this project does not
+        # read it as — and a `paths.patches` whose *value* `Config.path` refused, because
+        # it is empty. The type of that key is `load`'s business now, not this arm's; the
+        # empty string is a value question and stays here. Both are answers about the
+        # configuration, and both are reached before a patch is written or a file is
+        # removed. Neither was wrapped: a `ConfigError` left `main` as a traceback, and the
+        # process exited 1, which is `EXIT_BLANK_SLIDE` — so a broken configuration
+        # reported to any caller reading the exit code as "no tissue was found in any
+        # specimen".
         print(f"extract_patches: {error}", file=sys.stderr)
         return EXIT_REFUSED
 
