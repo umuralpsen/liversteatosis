@@ -46,10 +46,21 @@ _KEY_READ = re.compile(r"""\.(?:get|path)\(\s*["']([A-Za-z_]\w*(?:\.[A-Za-z_]\w*
 # consumes the value — the interval `medical_metrics.json` records is the configured one —
 # and the test that says so is
 # `tests/test_evaluate.py::test_the_intervals_are_read_from_the_configuration_rather_than_written_into_the_script`.
+#
+# **`gradcam.alpha` and `gradcam.colormap` were Task 13's two, and `blobcount/interpret.py`
+# reads them** in `overlay_from_config` rather than in `bin/gradcam.py`, for the same
+# reason. The read consumes the value — the blend is drawn at the configured weight, in
+# the configured colour map — and the test that says so is
+# `tests/test_interpret.py::test_overlay_reads_the_two_gradcam_keys_from_the_configuration`,
+# which holds both by setting `gradcam.alpha=0` (the blend then *is* the image) and by
+# asking for a second map (the two blends then differ).
+#
+# **`project.name` is what is left, and it is unreadable by construction**: it names the
+# study and no module in the pipeline is a function of the study's name. A read written
+# only to clear this entry would be the fake reader this list exists to catch, in the one
+# place the list has a last entry.
 _KEYS_WITHOUT_READER: frozenset[str] = frozenset(
     {
-        "gradcam.alpha",
-        "gradcam.colormap",
         "project.name",
     }
 )
