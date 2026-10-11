@@ -39,10 +39,15 @@ _KEY_READ = re.compile(r"""\.(?:get|path)\(\s*["']([A-Za-z_]\w*(?:\.[A-Za-z_]\w*
 # same handoff — a reader in each place would be one answer to the CSV contract written
 # twice, and a read written into `blobcount/train.py` for no other reason than to clear a
 # name in this set would be the fake reader this list exists to catch.
+#
+# **`evaluation.bootstrap_samples` and `evaluation.confidence_level` were Task 12's two, and
+# `blobcount/evaluate.py` reads them** in `bootstrap_metric_intervals` rather than in
+# `bin/evaluate.py`, for the same reason: a read in `bin/` is outside this scan. The read
+# consumes the value — the interval `medical_metrics.json` records is the configured one —
+# and the test that says so is
+# `tests/test_evaluate.py::test_the_intervals_are_read_from_the_configuration_rather_than_written_into_the_script`.
 _KEYS_WITHOUT_READER: frozenset[str] = frozenset(
     {
-        "evaluation.bootstrap_samples",
-        "evaluation.confidence_level",
         "gradcam.alpha",
         "gradcam.colormap",
         "project.name",
