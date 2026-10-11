@@ -19,6 +19,7 @@ therefore measured over synthetic patches.
 import csv
 import importlib.util
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -34,6 +35,7 @@ from blobcount.labeling import LABEL_COLUMNS
 from blobcount.splits import SplitError, loso_folds
 from blobcount.train import (
     EpochRecord,
+    read_labels,
     run_cross_validation,
     select_epoch,
     summarise_folds,
@@ -499,6 +501,46 @@ def test_a_cohort_of_one_specimen_is_refused_before_anything_is_written(tmp_path
     assert not (tmp_path / "out").exists()
 
 
+def test_the_handoff_reader_is_in_the_package_and_reads_the_configured_label_root(tmp_path):
+    # The reader is here and not in `bin/train.py` because `bin/` is a directory of scripts
+    # loaded by path: a read of `paths.labels` in there is outside the ledger scan in
+    # `tests/test_config.py`, which then reports a declared key nothing under `blobcount/`
+    # reads. Task 12 reads the same handoff, so one reader rather than two copies.
+    rows = list(_ROWS)
+    index = _write_labels_csv(tmp_path / "handoff", rows)
+    cfg = _cfg()
+    cfg.set("paths.labels", str(tmp_path / "labels"))
+
+    paths, labels, specimens = read_labels(index, cfg)
+
+    assert specimens == ["A", "A", "B", "B"]
+    assert labels == [0, 1, 0, 0]
+    assert paths == [tmp_path / "labels" / row[5] for row in rows]
+    # The key is read and not merely named: `Config` records every value it serves, so a
+    # `paths.labels` this call did not use is the one still missing from the ledger.
+    assert "paths.labels" not in cfg.unknown_keys()
+
+
+def test_a_run_given_no_output_directory_writes_into_the_configured_one(tmp_path, monkeypatch):
+    # `out_dir` is an argument so a caller can put a run somewhere else, and its absence
+    # is the shipped case: the directory is the configured `paths.results`.
+    _stand_in(monkeypatch, _StandIn(positive=True))
+    cfg = _cfg()
+    cfg.set("paths.results", str(tmp_path / "results"))
+    paths, labels, specimens = _cohort(
+        tmp_path / "patches", [("A", 1), ("A", 1), ("B", 0), ("B", 0)]
+    )
+    summary = run_cross_validation(paths, labels, specimens, cfg)
+
+    out = tmp_path / "results"
+    assert summary["n_folds"] == 2
+    assert (out / "fold_summary.csv").is_file()
+    assert (out / "training_log_fold0.csv").is_file()
+    assert (out / "training_log_fold1.csv").is_file()
+    assert (out / "best_model_fold0.pth").is_file()
+    assert "paths.results" not in cfg.unknown_keys()
+
+
 def test_the_folds_are_numbered_from_zero_in_sorted_order_of_the_specimen_ids():
     # The numbers a run writes into a file name and a column, read here from `loso_folds`
     # itself rather than restated.
@@ -560,7 +602,7 @@ def _label_row(specimen, label, relative):
 
 
 _ROWS = [
-    _label_row("A", 1, "steatosis/A_0.png"),
+    _label_row("A", 0, "normal/A_0.png"),
     _label_row("A", 1, "steatosis/A_1.png"),
     _label_row("B", 0, "normal/B_2.png"),
     _label_row("B", 0, "normal/B_3.png"),
@@ -568,12 +610,16 @@ _ROWS = [
 
 
 @pytest.fixture
-def cli(tmp_path, monkeypatch):
+def cli(project_scratch, tmp_path, monkeypatch):
     """The entry point, a `labels.csv` beside no patches at all, and two output roots.
 
-    The patches are written under `paths.labels` and the handoff sits in a sibling
-    directory holding nothing else, so every run below resolves a row's path against the
-    configured label root or fails to find the patch at all.
+    The patches are written under `paths.labels` and the handoff sits in a directory
+    holding nothing else, so every run below resolves a row's path against the configured
+    label root or fails to find the patch at all. **`results` is inside the project**,
+    because this command line refuses an output target that is not strictly below the
+    project root and pytest's `tmp_path` is outside it — the reason
+    `tests/conftest.py`'s `project_scratch` exists, and the reason the handoff and the
+    label root stay in `tmp_path`: nothing this program writes goes there.
     """
     module = _load_cli(monkeypatch)
     label_root = tmp_path / "labels"
@@ -582,12 +628,100 @@ def cli(tmp_path, monkeypatch):
         patch.parent.mkdir(parents=True, exist_ok=True)
         _write_patch(patch, size=32, seed=number)
     index = _write_labels_csv(tmp_path / "handoff", _ROWS)
-    results = tmp_path / "results"
+    results = project_scratch / "results"
     monkeypatch.setattr(
         "blobcount.config.DEFAULT_CONFIG_PATH",
         _cli_config(tmp_path, label_root, results),
     )
     return module, index, label_root, results
+
+
+def _printed_tables(printed: str) -> list[tuple[list[str], list[list[str]]]]:
+    """Return `(header, rows)` for each table the command line printed.
+
+    The tables are the only thing this program puts on stdout, and their shape is the one
+    `bin/ablate_threshold.py` writes: two or more spaces between columns, a rule of dashes
+    under the header, and a blank line between tables. Cells are split on two or more
+    spaces rather than one so a specimen name carrying a space stays in one cell, and a
+    block of one cell is not a table — which is how the closing sentence is skipped.
+    """
+    tables: list[tuple[list[str], list[list[str]]]] = []
+    block: list[list[str]] = []
+    for line in [*printed.splitlines(), ""]:
+        if line.strip():
+            block.append([cell for cell in re.split(r"\s{2,}", line.strip()) if cell])
+            continue
+        rows = [row for row in block if not all(set(cell) <= {"-"} for cell in row)]
+        if rows and len(rows[0]) > 1:
+            tables.append((rows[0], rows[1:]))
+        block = []
+    return tables
+
+
+def test_the_printed_fold_table_carries_the_numbers_its_csv_row_holds(cli, capsys, monkeypatch):
+    # **The table is the human-facing report, and a swapped column misreports the study
+    # while every artifact on disk stays correct.** So the numbers are asserted as values,
+    # twice: once against what this cohort is known to produce and once against the
+    # `fold_summary.csv` row the same run wrote.
+    #
+    # A stand-in backbone predicting class 1 for every patch is what makes them known.
+    # Fold 0 holds out specimen A — one class-0 row and one class-1 row — so precision is
+    # 1/2 and recall is 1/1, which are different numbers; fold 1 holds out two class-0 rows
+    # and so reports zero for all four. Every cell therefore differs from at least one
+    # other cell in the column it is in, and no swap can land on an equal value.
+    _stand_in(monkeypatch, _StandIn(positive=True))
+    module, index, _label_root, results = cli
+    assert module.main(["--labels", str(index), "--out", str(results)]) == 0
+
+    tables = _printed_tables(capsys.readouterr().out)
+    assert len(tables) == 2, "the per-fold table and the mean table"
+    header, printed = tables[0]
+    assert tuple(header) == ("fold", "specimen", "epoch", "accuracy", "precision",
+                             "recall", "f1", "lr")
+
+    assert [cells[1] for cells in printed] == ["A", "B"]
+    assert [cells[2] for cells in printed] == ["1", "1"]
+    assert [cells[3] for cells in printed] == ["0.500", "0.000"]
+    assert [cells[4] for cells in printed] == ["0.500", "0.000"]
+    assert [cells[5] for cells in printed] == ["1.000", "0.000"]
+    assert [cells[6] for cells in printed] == ["0.667", "0.000"]
+
+    written = _read_csv(results / "fold_summary.csv")
+    assert len(printed) == len(written) == 2
+    for cells, row in zip(printed, written):
+        assert cells[0] == row["fold"]
+        assert cells[1] == row["held_out"]
+        assert cells[2] == row["epoch"]
+        for position, field in ((3, "val_accuracy"), (4, "precision"),
+                                (5, "recall"), (6, "val_f1")):
+            assert cells[position] == f"{float(row[field]):.3f}", field
+        assert cells[7] == f"{float(row['lr']):.6f}"
+
+
+def test_the_printed_mean_table_carries_the_summary_numbers(cli, capsys, monkeypatch):
+    # The mean table is rendered out of the summary dict rather than out of the file, so
+    # what it prints is pinned twice: against the dict `training_summary.json` carries and
+    # against the values this cohort is known to produce. **The row order is asserted too**
+    # — a reordering of the metric literal still prints each number under its own name, so
+    # only the order tells a reader which metric a row is.
+    _stand_in(monkeypatch, _StandIn(positive=True))
+    module, index, _label_root, results = cli
+    assert module.main(["--labels", str(index), "--out", str(results)]) == 0
+
+    tables = _printed_tables(capsys.readouterr().out)
+    header, printed = tables[1]
+    assert tuple(header) == ("metric", "mean", "population std")
+    assert [cells[0] for cells in printed] == ["accuracy", "precision", "recall", "f1"]
+
+    summary = json.loads((results / "training_summary.json").read_text(encoding="utf-8"))
+    for cells in printed:
+        assert cells[1] == f"{summary['summary']['mean_' + cells[0]]:.3f}"
+        assert cells[2] == f"{summary['summary']['mean_' + cells[0] + '_std']:.3f}"
+
+    # Two folds at 0.5 and 0.0 for accuracy and precision, at 1.0 and 0.0 for recall, and at
+    # 0.6667 and 0.0 for F1; the population deviation of each pair is its half-range.
+    assert [cells[1] for cells in printed] == ["0.250", "0.250", "0.500", "0.333"]
+    assert [cells[2] for cells in printed] == ["0.250", "0.250", "0.500", "0.333"]
 
 
 def test_the_command_line_writes_the_logs_the_summary_and_the_json(cli, capsys):
@@ -639,6 +773,53 @@ def test_a_row_path_that_leaves_the_label_root_is_refused(cli, capsys):
     assert module.main(["--labels", str(index), "--out", str(results)]) == 2
     assert "label root" in capsys.readouterr().err
     assert not results.exists()
+
+
+def test_an_output_target_that_is_a_file_is_refused(cli, capsys):
+    # `paths.results` is a hand-edited string and `--out` is typed by hand too, and a run
+    # writes one 45 MB checkpoint per fold into whatever it is given. A target that exists
+    # as a file is reported as the typo it is, before a patch is read.
+    module, index, _label_root, results = cli
+    occupied = results / "occupied.txt"
+    occupied.parent.mkdir(parents=True, exist_ok=True)
+    occupied.write_text("x", encoding="utf-8")
+    assert module.main(["--labels", str(index), "--out", str(occupied)]) == 2
+    assert "refusing to write" in capsys.readouterr().err
+    assert occupied.read_text(encoding="utf-8") == "x"
+    assert not (results / "fold_summary.csv").exists()
+
+
+def test_an_output_target_outside_the_project_is_refused(cli, tmp_path, capsys):
+    # The containment predicate is `blobcount.extract._is_below`, the one both sibling
+    # entry points use: `Proje-backup` starts with the characters of `Proje` and is a
+    # different directory, and the project root itself is not strictly below itself.
+    module, index, _label_root, _results = cli
+    outside = tmp_path / "escape"
+    outside.mkdir()
+    assert module.main(["--labels", str(index), "--out", str(outside)]) == 2
+    assert "project root" in capsys.readouterr().err
+    assert sorted(path.name for path in outside.iterdir()) == []
+
+
+def test_the_project_root_is_not_an_output_target(cli, capsys):
+    module, index, _label_root, _results = cli
+    assert module.main(["--labels", str(index), "--out", str(PROJECT_ROOT)]) == 2
+    assert "project root" in capsys.readouterr().err
+
+
+def test_an_empty_label_root_is_refused_by_the_command_line(cli, tmp_path, monkeypatch, capsys):
+    # `read_labels` is what resolves every row against `paths.labels`, so `Config.path`'s
+    # refusal of an empty value arrives out of the read rather than out of the arm around
+    # `load`. The refusal is the same either way — an answer about the configuration, on
+    # `EXIT_REFUSED`, with no traceback — and this pins which arm it arrives from.
+    module, index, _label_root, results = cli
+    data = yaml.safe_load(DEFAULT_CONFIG_PATH.read_text(encoding="utf-8"))
+    data["paths"]["labels"] = ""
+    empty = tmp_path / "empty_label_root.yaml"
+    empty.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+    monkeypatch.setattr("blobcount.config.DEFAULT_CONFIG_PATH", empty)
+    assert module.main(["--labels", str(index), "--out", str(results)]) == 2
+    assert "paths.labels" in capsys.readouterr().err
 
 
 def test_a_labels_file_that_is_not_there_is_refused(cli, capsys):
@@ -694,12 +875,15 @@ def test_a_label_outside_the_class_range_is_refused_by_the_command_line(cli, cap
 
 
 def test_a_class_count_the_head_cannot_be_built_for_is_refused(cli, tmp_path, monkeypatch, capsys):
-    module, index, label_root, _results = cli
+    module, index, label_root, results = cli
+    # The output target is the fixture's, which is inside the project: this test is about
+    # the class count, and a `--out` outside the project would be refused earlier and for
+    # an unrelated reason.
     monkeypatch.setattr(
         "blobcount.config.DEFAULT_CONFIG_PATH",
-        _cli_config(tmp_path / "other", label_root, tmp_path / "results", num_classes=0),
+        _cli_config(tmp_path / "other", label_root, results, num_classes=0),
     )
-    assert module.main(["--labels", str(index), "--out", str(tmp_path / "results")]) == 2
+    assert module.main(["--labels", str(index), "--out", str(results)]) == 2
     assert "num_classes" in capsys.readouterr().err
 
 

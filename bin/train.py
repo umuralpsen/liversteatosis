@@ -15,16 +15,29 @@ naming it on the command line says which run's labels are being trained on. **`-
 overrides `paths.results`** and defaults to it, and is never cleared: a checkpoint and a
 log per fold, `fold_summary.csv` and `training_summary.json` are written into it, a file of
 the same name is rewritten in place, and a file a run with fewer folds does not produce is
-left where the last run put it.
+left where the last run put it. **It is refused if it exists as a file or is not strictly
+below the project root**, for the reason the output-target group below gives.
 
 **The `path` cell of a row is resolved against `paths.labels`, not against the directory
 the `labels.csv` sits in and not against the working directory.** This is the ruling
 `blobcount.labeling` writes those cells under — a path relative to the label root,
 separated by `/` whatever the platform — so a row resolves to the patch that root names,
-and a run started from another directory resolves the same rows to the same files. A
-`path` cell that is absolute or that carries a `..` is refused rather than resolved: a
-hand-edited `labels.csv` cannot send a run outside the label root the configuration gave
-it.
+and a run started from another directory resolves the same rows to the same files. The read
+itself is `blobcount.train.read_labels`, not a copy in this file: `bin/` is a directory of
+scripts loaded by path, a read here is outside the source scan in `tests/test_config.py`,
+and Task 12 reads the same handoff. A `path` cell that is absolute or that carries a `..`
+is refused rather than resolved: a hand-edited `labels.csv` cannot send a run outside the
+label root the configuration gave it.
+
+**The handoff must be one a labeling run wrote without `--out`, and nothing here can check
+that.** `blobcount/labeling.py:584` writes `target.relative_to(out)` and this project's
+`bin/label_patches.py:205` sets `out` to `--out` when it is given one, so a handoff from
+`label_patches --out somewhere` carries paths relative to *that* directory: every row here
+resolves against the wrong root and the run dies on the first patch with a missing-file
+`OSError` naming a path that looks right and is not. **Run `bin/label_patches.py` without
+`--out`, or point `paths.labels` at the directory you passed to it.** The format is Task 6's
+and is not changed here; this is an inherited precondition, stated in the module docstring,
+in `read_labels`'s own docstring and here.
 
 **`training.pretrained` is `true` in `configs/default.yaml`, so a run that finds a cohort
 will download the ImageNet weights the backbone was fitted with.** That is the shipped
@@ -34,25 +47,37 @@ and points `TORCH_HOME` at an empty directory to show that a run built the other
 downloads nothing.
 
 **Two outcomes, two codes.** A run that completed is `EXIT_OK = 0`. A refusal is
-`EXIT_REFUSED = 2`, and a refusal is always an answer about the configuration or the
-handoff and never about this program. Eleven reach it, in three groups, and nothing this
-program does does:
+`EXIT_REFUSED = 2`, and a refusal is always an answer about the configuration, the
+handoff or the output target and never about this program. Fourteen reach it, in four
+groups, and nothing this program does does:
 
 - **A configuration**, as a `ConfigError`, and this is the one arm that carries two: the
   file `load` refuses — missing, unreadable, not a mapping, a key the code does not
   declare, a required key the file omits, or a value for a declared key whose type this
-  project does not read it as — and a `paths.labels` or a `paths.results` whose *value*
-  `Config.path` refuses because it is empty. The path keys are resolved inside the arm
-  that catches this, for the reason `bin/label_patches.py` gives: `load` types them as the
-  declared `str` and an empty one is a value question that stays here.
-- **The handoff**, as an `OSError`, a `csv.Error` or a `ValueError`: a file that is not
-  there or cannot be opened; a cell longer than `csv.field_size_limit`, which
-  `csv.DictReader` raises rather than truncating; a header that does not carry every
+  project does not read it as — and a `paths.results` whose *value* `Config.path` refuses
+  because it is empty. `paths.results` is resolved inside the arm that catches this, for
+  the reason `bin/label_patches.py` gives: `load` types it as the declared `str` and an
+  empty one is a value question that stays here.
+- **The handoff**, as a `ConfigError`, an `OSError`, a `csv.Error` or a `ValueError`: a
+  file that is not there or cannot be opened; a cell longer than `csv.field_size_limit`,
+  which `csv.DictReader` raises rather than truncating; a header that does not carry every
   column in `blobcount.labeling.LABEL_COLUMNS`; a row with no cell for one of the three
-  columns this run reads; a `label` cell that is not a whole number; and a `path` cell
-  that is absolute or that leaves the label root. Each of the last four names the file,
-  the line and what was wrong with the cell, because a hand-edited handoff is otherwise a
-  run that fails on the second specimen.
+  columns this run reads; a `label` cell that is not a whole number; a `path` cell that is
+  absolute or that leaves the label root; and a `paths.labels` whose value `Config.path`
+  refuses, which arrives out of `read_labels` because the reader is what resolves every row
+  against it. Each of the four row-level refusals names the file, the line and what was
+  wrong with the cell, because a hand-edited handoff is otherwise a run that fails on the
+  second specimen.
+- **The output target**, as this program's own check, and it is the same one
+  `bin/ablate_threshold.py` makes: a target that exists and is a file rather than a
+  directory, and a target that is not strictly below the project root. **A run writes one
+  45 MB checkpoint per fold into whatever path it is given**, so a `--out` typo or a
+  hand-edited `paths.results` is how a study's weights end up somewhere this repository is
+  not responsible for. Nothing is deleted — this run clears no tree, which is a smaller
+  blast radius than `bin/label_patches.py`'s and not a reason to be the one entry point
+  that does not check. The predicate is `blobcount.extract._is_below`, so "is this ours"
+  has one implementation in this project and not one per guard, and the check runs before
+  the handoff is read so a mistyped target costs a message rather than a training run.
 - **The cohort and the model**, as a `SplitError` or a `ValueError`: a specimen column
   with fewer than two distinct ids, or one that is a sequence of characters rather than of
   ids, is `blobcount.splits.loso_folds`'s refusal and reaches here as itself; a `label`
@@ -62,7 +87,7 @@ program does does:
   types because none of them declares a project exception type, and this file is where
   catching them belongs.
 
-All eleven are printed on stderr behind this program's name, and none of them is a
+All fourteen are printed on stderr behind this program's name, and none of them is a
 traceback.
 
 **There is no `EXIT_CONTRADICTORY` here, and that is a decision rather than an omission.**
@@ -74,7 +99,7 @@ defines two codes, and a status of 1 means the interpreter reported a traceback,
 fact about this project's code rather than about the study. `main`'s *return value* is the
 contract, and an exception never returns one.
 
-**A bad argument is not one of the eleven, and not one of this program's outcomes at all.**
+**A bad argument is not one of the fourteen, and not one of this program's outcomes at all.**
 `argparse` refuses an option this program does not declare, one given no value, and one
 given no `--labels`, by printing its own message and calling `sys.exit(2)` inside
 `parse_args`, before the first statement of `main` runs. `--labels` and `--out` are both
@@ -84,7 +109,7 @@ parser's status is the same number as `EXIT_REFUSED` and no code can tell the tw
 the separation is on stderr, where the parser names the argument and its usage and none of
 the four names either.
 
-**A patch file that is not there is not one of the four, and is deliberate.**
+**A patch file that is not there is not one of the fourteen, and is deliberate.**
 `blobcount.data.PatchDataset` opens one patch and refuses nothing about it, so a row
 naming a file that does not exist raises the `OSError` out of the loader, and that error
 names the full resolved path — which is the whole fact a caller needs and better than a
@@ -98,8 +123,13 @@ first because the mean table is a mean *of it* and a reader who has seen a mean 
 no fold behind it has been told the wrong thing by the mean alone. Every row of both tables
 names the specimen it is about, because a fold number means nothing to a reader who does
 not know which patient it was, and every metric of the mean table carries its population
-standard deviation beside it. The run then writes `training_summary.json` into `out_dir`,
-holding the same summary the mean table prints and the selected record of every fold.
+standard deviation beside it. **The first table is rendered out of `fold_summary.csv` and the
+second out of the summary dict**, which is what makes `tests/test_train.py` assert the
+printed numbers against the file and the dict they came from rather than against the
+characters this file formats: a swapped column is a misreport of the study that leaves
+every artifact on disk correct, and a test that asserts a column *name* cannot see it. The
+run then writes `training_summary.json` into `out_dir`, holding the same summary the mean
+table prints and the selected record of every fold.
 
 **The numbers here are from synthetic patches.** The extraction that would produce a
 `labels.csv` has never been run on this cohort, so nothing in `results/` has been
@@ -115,24 +145,15 @@ import json
 import logging
 import sys
 from collections.abc import Sequence
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
-from blobcount.config import ConfigError, load
-from blobcount.labeling import LABEL_COLUMNS
+from blobcount.config import PROJECT_ROOT, ConfigError, load
+from blobcount.extract import _is_below
 from blobcount.splits import SplitError
-from blobcount.train import run_cross_validation
+from blobcount.train import read_labels, run_cross_validation
 
 EXIT_OK = 0
 EXIT_REFUSED = 2
-
-# The three columns of `labels.csv` this command line reads: the specimen a patch came
-# from, the class it was labelled, and where the patch is. The other three — `patch_id`,
-# `blob_count` and `mpp` — belong to the stages that wrote the file and to the artifact's
-# auditability rather than to this run; the header is still required to carry all six, for
-# the reason `blobcount.labeling.read_index` requires all of the index's: a truncated or
-# reordered handoff is a defect in the labeling run that produced it, and it belongs on the
-# file that has it rather than on the training that read it.
-_READ_COLUMNS = ("slide_id", "label", "path")
 
 # Where the artifacts go and what they are called, under `out_dir`. One place, so the
 # writer and the tests that read them back name the same file.
@@ -194,94 +215,40 @@ def _print_table(headers: Sequence[str], rows: Sequence[Sequence[object]]) -> No
         print("  ".join(str(cell).ljust(widths[index]) for index, cell in enumerate(row)))
 
 
-def _row(index: Path, line: int, row: dict, label_root: Path) -> tuple[str, Path, int]:
-    """Return `(specimen, patch path, label)` for one `labels.csv` row, or refuse it.
+def _refuse_output_target(target: Path) -> str | None:
+    """Return why this program will not write its artifacts into `target`, or None.
 
-    **Three refusals, each naming the file, the line and the cell**, because a handoff is a
-    file a user can edit and a run that stops on the second specimen with a message naming
-    neither is the failure this command line exists not to have. A missing cell is a short
-    line — `csv.DictReader` fills the absent columns with `None` — a `label` that is not a
-    whole number is a quoted digit or a class name where a class index belongs, and a `path`
-    that leaves the label root is a hand-edited cell that would otherwise send the run
-    outside the directory the configuration named.
+    **The same two refusals `bin/ablate_threshold.py` makes, for the same reason, on one
+    path rather than two.** That program writes two files into a directory it does not own
+    and tests both the results directory and the subdirectory it puts them in; this one
+    writes into a single directory and deletes nothing in it, so the blast radius is
+    smaller — but a run writes one 45 MB checkpoint per fold into whatever path it is given,
+    and a `--out` typo or a hand-edited `paths.results` is how 135 MB lands somewhere this
+    repository is not responsible for. "Smaller" is not a reason for this entry point to be
+    the one that does not check.
 
-    **The class range is not checked here.** A `label` of `5` under a two-class run is
-    refused by `blobcount.data.class_weights` in the fold that holds that row, with the one
-    message this project has for a label against a class count; a second rule written here
-    would be a second answer to a question `blobcount.data` already answers.
+    **The file test runs before the containment test, so a file is reported as the typo it
+    is.** A `paths.results` that is a regular file makes `out_dir` un-creatable — the
+    `mkdir` would raise `NotADirectoryError` — and the project root itself is not strictly
+    below itself, which `_is_below` answers rather than a string comparison here: "is this
+    ours" has one implementation in this project and not one per guard, and the two
+    entry points that differ in what they *do* to a target do not differ in what they
+    decide is a target.
 
-    The row is read from `label_root` rather than from the directory the file is in, and a
-    `path` cell is a POSIX-separated relative path because that is what
-    `blobcount.labeling._write_labels` writes — `PurePosixPath` is what turns those
-    separators into this platform's on a machine whose filesystem separator is not `/`.
+    The check returns a message and raises nothing, and it runs before the handoff is read,
+    so a mistyped `--out` costs a message rather than a training run.
     """
-    for name in _READ_COLUMNS:
-        if not row.get(name):
-            # No field count in the message: `csv.DictReader` has already filled the absent
-            # columns with `None`, so the row is indistinguishable here from one whose cell
-            # is present and empty, and a count would have to be the header's rather than
-            # the row's.
-            raise ValueError(
-                f"{index} line {line} carries no {name!r} cell: the cell is empty or the "
-                f"row has fewer fields than the header, which carries "
-                f"{', '.join(LABEL_COLUMNS)}. Fix the row, or the labeling run that wrote it"
-            )
-    try:
-        label = int(row["label"])
-    except ValueError as error:
-        raise ValueError(
-            f"{index} line {line} has label {row['label']!r}, which is not a whole number: "
-            f"the label column holds the class a labelling run wrote for a patch — 0 for "
-            f"normal and 1 for steatosis — and a quoted digit, a class name or a fraction "
-            f"reaches CrossEntropyLoss as a target it cannot score, which reports the "
-            f"mistake against the loss rather than against the cell"
-        ) from error
-    relative = PurePosixPath(row["path"])
-    if relative.is_absolute() or ".." in relative.parts:
-        raise ValueError(
-            f"{index} line {line} has path {row['path']!r}, which is not a path inside "
-            f"the label root: blobcount.labeling writes each row's path relative to "
-            f"paths.labels, so an absolute path or one holding '..' would send this run "
-            f"outside the directory the configuration gave it. Fix the cell, or re-run the "
-            f"labeling that wrote it"
+    if target.exists() and not target.is_dir():
+        return (
+            f"refusing to write {target}: it exists and is a file rather than a directory, "
+            f"so it is a typo in --out or in paths.results and not a previous run"
         )
-    return row["slide_id"], label_root / relative, label
-
-
-def _read_labels(index: Path, label_root: Path) -> tuple[list[Path], list[int], list[str]]:
-    """Return `(paths, labels, specimen_ids)` for the handoff at `index`, in row order.
-
-    The three come back in dataset order and one entry per row, which is the order
-    `blobcount.splits.loso_folds` indexes into and the order `PatchDataset` pairs each path
-    with its own label. Read as UTF-8 with `newline=""` for the reasons
-    `blobcount.labeling.read_index` gives: a slide id in this project is a specimen name and
-    has to survive a Turkish-locale machine, and `csv` writes its own line endings.
-
-    The header must carry every name in `blobcount.labeling.LABEL_COLUMNS`, checked here
-    rather than left to a `KeyError` on the first row, so that a truncated or reordered
-    handoff is reported as the wrong file it is.
-    """
-    target = Path(index)
-    with target.open(encoding="utf-8", newline="") as handle:
-        reader = csv.DictReader(handle)
-        header = reader.fieldnames or []
-        missing = [name for name in LABEL_COLUMNS if name not in header]
-        if missing:
-            raise ValueError(
-                f"{target} is not a labels.csv: its header carries "
-                f"{', '.join(header) or 'nothing'}, and a labelling run writes "
-                f"{', '.join(LABEL_COLUMNS)}. Missing: {', '.join(missing)}. Fix the file, "
-                f"or pass the labels.csv another labelling run wrote"
-            )
-        paths: list[Path] = []
-        labels: list[int] = []
-        specimens: list[str] = []
-        for line, row in enumerate(reader, start=2):
-            specimen, path, label = _row(target, line, row, label_root)
-            specimens.append(specimen)
-            paths.append(path)
-            labels.append(label)
-    return paths, labels, specimens
+    if not _is_below(target, PROJECT_ROOT):
+        return (
+            f"refusing to write {target}: it is not strictly below the project root "
+            f"{PROJECT_ROOT}, so it is not a directory this project owns"
+        )
+    return None
 
 
 def _document(summary: dict, per_fold: Sequence[dict], labels: Path) -> dict:
@@ -341,26 +308,40 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         cfg = load()
         # Resolved inside the arm, for the reason `bin/label_patches.py` gives: `load`
-        # types these two keys as the declared `str`, and an empty one is a value it makes
-        # no claim about, so `Config.path` is what refuses it and outside this arm that
-        # refusal would leave a traceback.
-        label_root: Path = cfg.path("paths.labels")
+        # types this key as the declared `str`, and an empty one is a value it makes no
+        # claim about, so `Config.path` is what refuses it and outside this arm that refusal
+        # would leave a traceback. `paths.labels` is **not** resolved here: `read_labels`
+        # reads it, which is what puts that read under `blobcount/` where the ledger scan
+        # in `tests/test_config.py` can see it.
         out_dir: Path = args.out if args.out is not None else cfg.path("paths.results")
     except ConfigError as error:
-        # The two shapes this arm carries: the file `load` refuses, and a `paths.labels` or
-        # a `paths.results` `Config.path` refuses. The override the parser produced cannot
-        # be the cause — `--labels` and `--out` have already been typed as `Path`.
+        # The two shapes this arm carries: the file `load` refuses, and a `paths.results`
+        # `Config.path` refuses. The override the parser produced cannot be the cause —
+        # `--labels` and `--out` have already been typed as `Path`.
         print(f"train: {error}", file=sys.stderr)
         return EXIT_REFUSED
 
+    refused = _refuse_output_target(out_dir)
+    if refused is not None:
+        # Before the handoff is read and before a model is built, so a mistyped `--out`
+        # costs a message rather than a training run. `EXIT_REFUSED` and not
+        # `EXIT_CONTRADICTORY`: nothing here finished, so there is no run whose outcome is
+        # being reported, and the two codes mean different things to whoever reads them.
+        print(f"train: {refused}", file=sys.stderr)
+        return EXIT_REFUSED
+
     try:
-        paths, labels, specimen_ids = _read_labels(args.labels, label_root)
-    except (OSError, csv.Error, ValueError) as error:
+        paths, labels, specimen_ids = read_labels(args.labels, cfg)
+    except (ConfigError, OSError, csv.Error, ValueError) as error:
         # The handoff, as the module docstring groups it: a file that is not there or
         # cannot be opened, a cell longer than `csv.field_size_limit`, a header that is not
         # the handoff's, a row with no cell for a column this run reads, a `label` that is
-        # not a whole number, and a `path` that leaves the label root. The catch is around
-        # this one read, so it is too narrow to hold a defect in the loop below.
+        # not a whole number, and a `path` that leaves the label root. `ConfigError` is in
+        # this tuple for one shape, not because the arm is wide: `read_labels` resolves
+        # every row against `paths.labels`, so `Config.path`'s refusal of an empty value
+        # arrives out of it, and it is an answer about the configuration in a place where
+        # the configuration is what was being read. The catch is around this one call, so
+        # it is too narrow to hold a defect in the loop below.
         print(f"train: {error}", file=sys.stderr)
         return EXIT_REFUSED
 

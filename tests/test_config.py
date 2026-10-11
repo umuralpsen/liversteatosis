@@ -30,21 +30,21 @@ _KEY_READ = re.compile(r"""\.(?:get|path)\(\s*["']([A-Za-z_]\w*(?:\.[A-Za-z_]\w*
 # regression in either one: a key that gains a reader is named as a stale entry to
 # delete, and a key that loses one is named as an unread declared key.
 #
-# **`paths.labels` and `paths.results` are read by `bin/train.py` and not by anything under
-# `blobcount/`, so they are here for a reason no other entry shares.** The loop takes its
-# output directory as an argument — that is what lets a test write into `tmp_path` instead
-# of into this repository's `results/` — and reads no key to find one, and a read of either
-# key written into `blobcount/train.py` to clear a name in this set would be exactly the
-# fake reader this list exists to catch. `bin/` is outside the scan, which is the same
-# reason `bin/ablate_threshold.py`'s reads of `paths.results` are not counted here.
+# **`paths.labels` and `paths.results` were read by `bin/train.py` alone and are read by
+# `blobcount/train.py` now**, because `bin/` is a directory of scripts loaded by path and a
+# read there is outside this scan: `read_labels` resolves every `labels.csv` row against
+# `paths.labels` and `run_cross_validation` defaults its output directory to
+# `paths.results`, so both keys have a reader under `blobcount/` and consume the value. The
+# entry point kept `--out` and the two moved under the package because Task 12 reads the
+# same handoff — a reader in each place would be one answer to the CSV contract written
+# twice, and a read written into `blobcount/train.py` for no other reason than to clear a
+# name in this set would be the fake reader this list exists to catch.
 _KEYS_WITHOUT_READER: frozenset[str] = frozenset(
     {
         "evaluation.bootstrap_samples",
         "evaluation.confidence_level",
         "gradcam.alpha",
         "gradcam.colormap",
-        "paths.labels",
-        "paths.results",
         "project.name",
     }
 )
