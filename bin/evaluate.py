@@ -20,7 +20,12 @@ from the checkpoint's file name nor from the specimens left over in the handoff 
 states it, and `blobcount.evaluate.assert_disjoint` refuses the run when the two lists share a
 name. **`--specimens` is not required, and its default is every specimen the handoff holds**,
 which is the cohort a study run means; the guard applies to the default exactly as it does to
-a named list.
+a named list. **A specimen the caller names and the handoff holds no row of is dropped from
+the run and named in the report**: `medical_metrics.json`'s `evaluated_specimens` is the cohort
+that was actually scored, its `requested_specimens` is what was asked for, and its
+`not_evaluated` names the difference, and the closing sentence says it too. The provenance
+record of a leave-one-specimen-out study has to be the cohort the numbers are about and not
+the one a command line hoped for.
 
 **The handoff is read by `blobcount.train.read_labels`, not here.** `bin/` is a directory of
 scripts loaded by path rather than a package, so a copy of the CSV contract in this file would
@@ -343,7 +348,9 @@ def _document(
     metrics: Metrics,
     per_specimen: Sequence[tuple[str, Metrics]],
     intervals: Intervals,
+    requested: Sequence[str],
     evaluated: Sequence[str],
+    absent: Sequence[str],
     trained: Sequence[str],
     checkpoint: Path,
     labels: Path,
@@ -354,10 +361,15 @@ def _document(
     `extract.write_index` and `labeling._write_labels` give: a specimen name has to survive a
     Turkish-locale machine unchanged.
 
-    **The two cohorts are in the document and not only on the command line**, so an artifact
-    cannot be read as though the set that was scored and the set the model was trained on were
-    the same by accident. `provenance` is the module's own sentence, so a reader of the file
-    alone learns where its numbers came from without having read this module.
+    **The cohorts are three fields and not two.** `evaluated_specimens` is the cohort the run
+    scored and `metrics` is the measurement of it, so the two cannot disagree; `requested` is
+    what the command line asked for, so a caller who named a specimen the handoff holds no row
+    of can see in the artifact that they asked and it was not there; and `not_evaluated`
+    names those specimens outright, which is what makes the first field's silence about them
+    legible rather than merely quiet. **`train_specimens` is beside them** so an artifact cannot
+    be read as though the set that was scored and the set the model was trained on were the same
+    by accident. `provenance` is the module's own sentence, so a reader of the file alone learns
+    where its numbers came from without having read this module.
 
     **The interval conditions come out of the `Intervals` record rather than off the
     configuration**, and that is the whole reason that record exists: reading either
@@ -369,7 +381,9 @@ def _document(
         "provenance": _PROVENANCE,
         "labels": str(labels),
         "checkpoint": str(checkpoint),
+        "requested_specimens": list(requested),
         "evaluated_specimens": list(evaluated),
+        "not_evaluated": list(absent),
         "train_specimens": list(trained),
         "bootstrap": {
             "n_samples": intervals.n_samples,
@@ -476,6 +490,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         for path, label, specimen in zip(paths, labels, specimen_ids, strict=True)
         if specimen in wanted
     ]
+    # **The cohort the run scored is read off `cohort` and not off `wanted`**, because a
+    # specimen the caller named and the handoff holds no row of is silently dropped by the
+    # filter above, and a document whose `evaluated_specimens` still names it is a provenance
+    # record of a cohort that was never scored. In a leave-one-specimen-out study that field is
+    # the one a reader checks first — it is what says which patients these numbers are about —
+    # and this project moved `read_labels` into the package for exactly this reason. Measured
+    # before the fix: `--specimens A Z` with `Z` absent from the handoff wrote
+    # `"evaluated_specimens": ["A", "Z"]` and printed two specimens beside `metrics.n == 2`.
+    evaluated = sorted({specimen for _path, _label, specimen in cohort})
+    requested = sorted(wanted)
+    absent = [name for name in requested if name not in set(evaluated)]
+
     if not cohort:
         # The caller named a specimen this handoff holds no row of, or every specimen it
         # named is one of those. Refused rather than scored, because six `0.0` rates beside an
@@ -483,7 +509,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         # later reader cannot tell apart from a report of a model that scored nothing.
         print(
             f"evaluate: none of the specimens named has a row in {args.labels}"
-            + (f": {', '.join(sorted(wanted))}" if args.specimens else "")
+            + (f": {', '.join(requested)}" if args.specimens else "")
             + f". The handoff holds {sorted(set(specimen_ids))} — score a specimen it holds "
             f"a row of, or pass --labels the handoff that holds one",
             file=sys.stderr,
@@ -540,11 +566,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     intervals = bootstrap_metric_intervals(
         [record for _specimen, record in per_specimen], cfg, int(cfg.get("project.seed"))
     )
-    evaluated = sorted(wanted)
 
     target.mkdir(parents=True, exist_ok=True)
     document = _document(
-        pooled, per_specimen, intervals, evaluated, trained, args.checkpoint, args.labels
+        pooled, per_specimen, intervals, requested, evaluated, absent,
+        trained, args.checkpoint, args.labels,
     )
     (target / _METRICS_NAME).write_text(
         json.dumps(document, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
@@ -567,9 +593,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             for name in _TABLE_ROWS
         ],
     )
+    # **A specimen the caller named and the handoff holds no row of is said so here**, because
+    # the document records it and a sentence is the only place a person reads. Without this
+    # sentence the run is silent about `Z`: the table shows one specimen, `metrics["n"]` is
+    # that specimen's rows, and the only record that `Z` was asked for is a JSON field.
+    dropped = (
+        f" {', '.join(absent)} {'were' if len(absent) > 1 else 'was'} requested and is not in "
+        f"the handoff, so {'they were' if len(absent) > 1 else 'it was'} not scored."
+        if absent else ""
+    )
     print(
         f"\n{pooled.n} patch(es) of {len(evaluated)} specimen(s) "
-        f"({', '.join(evaluated)}) scored with {args.checkpoint}; each interval is "
+        f"({', '.join(evaluated)}) scored with {args.checkpoint}.{dropped} Each interval is "
         f"{intervals.n_samples} bootstrap resamples of the per-specimen values at the "
         f"configured level of {intervals.level:.0%}, so it is about the specimens rather "
         f"than about the patches. The specimens this model was trained on were "

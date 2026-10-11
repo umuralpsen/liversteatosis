@@ -29,6 +29,7 @@ from blobcount.config import DEFAULT_CONFIG_PATH, PROJECT_ROOT, load
 from blobcount.evaluate import (EvaluationIntegrityError, Metrics, assert_disjoint,
                                  bootstrap_ci, bootstrap_metric_intervals,
                                  evaluate_specimens, quadratic_weighted_kappa)
+from blobcount.extract import _is_below
 from blobcount.labeling import LABEL_COLUMNS
 
 # The shipped `training.*` values, every one of them replaced for a test. `pretrained` is
@@ -465,6 +466,39 @@ def test_the_auc_is_computed_from_the_probability_of_the_positive_class(tmp_path
     assert metrics.auc != pytest.approx(0.5), "the probabilities would carry no ranking"
 
 
+def test_the_auc_is_a_number_for_two_classes_whichever_two_they_are(tmp_path):
+    # **The guard asks whether more than one class is present, and not whether the classes
+    # present are a particular pair.** Measured on scikit-learn 1.6.1,
+    # `roc_auc_score([0, 2], [0.1, 0.9])` is a number and not a refusal — two distinct labels
+    # are binary whatever their values — so a cohort labelled 0 and 2 is scored and gets an
+    # AUC. A guard written as an identity check against `LABEL_BY_CLASS`'s values returns
+    # `None` here, and the way that guard goes wrong in production is worse than this example:
+    # **add a third class to that table and every AUC in the project becomes `None` in
+    # silence.** So the property under test is `isinstance(auc, float)`, which is the only
+    # thing that separates the two guards on this cohort.
+    paths, _labels, specimens = _cohort(tmp_path / "p", [("A", 0, _BLACK), ("A", 2, _WHITE)])
+    metrics = evaluate_specimens(
+        _StandIn(scored=True), paths, [0, 2], specimens, ["B"], _cfg()
+    )
+    assert isinstance(metrics.auc, float)
+    assert 0.0 <= metrics.auc <= 1.0
+    # The four counts still reduce to the positive class and the rest: `2` is not
+    # `_POSITIVE_CLASS`, so a row labelled 2 is a negative whatever was predicted for it.
+    assert metrics.n == 2
+    assert metrics.tp + metrics.fp + metrics.fn + metrics.tn == 2
+
+    # And three classes are a loud failure rather than a quiet `None`: sklearn refuses them
+    # with `ValueError: multi_class must be in ('ovo', 'ovr')`, which reaches the caller
+    # naming the cause instead of producing a document with no AUC in it.
+    paths, _labels, specimens = _cohort(
+        tmp_path / "q", [("A", 0, _BLACK), ("A", 1, _WHITE), ("A", 2, 200)]
+    )
+    with pytest.raises(ValueError, match="multi_class"):
+        evaluate_specimens(
+            _StandIn(scored=True), paths, [0, 1, 2], specimens, ["B"], _cfg()
+        )
+
+
 def test_the_cohort_scored_is_the_cohort_handed_over(tmp_path):
     # Three rows over two specimens and a training list that excludes neither, so the guard
     # passes. `n == 3` is what says the loop scored what it was given and not a wider file.
@@ -476,6 +510,64 @@ def test_the_cohort_scored_is_the_cohort_handed_over(tmp_path):
     )
     assert metrics.n == 3
     assert (metrics.tp, metrics.fp, metrics.fn, metrics.tn) == (2, 1, 0, 0)
+
+
+def test_sklearn_was_imported_before_torch():
+    # The remedy for a native fault, asserted rather than described. `tests/conftest.py` imports
+    # `sklearn.metrics` before anything can pull torch in, and this is the state that import
+    # left: sklearn loaded, torch not. **Delete the preload and this goes red**, which is the
+    # point — the comment above the import is a breadcrumb, and this is the gate.
+    #
+    # Why it has to be pinned rather than left to the comment: the fault is *recovered* by
+    # pytest, so without this assertion the suite is green on a machine where the native fault
+    # prints and green on one where it does not, and the only difference anyone sees is a line
+    # of stderr that looks the same as any other native trace. Measured on this stack, removing
+    # the preload costs nothing a test can see and restores `1` line containing
+    # `access violation` in every run.
+    from conftest import SKLEARN_IMPORTED_BEFORE_TORCH
+
+    assert SKLEARN_IMPORTED_BEFORE_TORCH, (
+        "tests/conftest.py must import sklearn.metrics before torch is imported anywhere; "
+        "pyarrow's C extension faults on load once torch is resident in the process"
+    )
+    assert "sklearn.metrics" in sys.modules
+    assert "torch" in sys.modules, "the whole suite imports it, just later"
+
+
+def test_precision_recall_and_f1_come_from_the_one_definition_in_blobcount_train(
+    tmp_path, monkeypatch
+):
+    # **This module has no second copy of precision, recall or F1.** They are
+    # `blobcount.train._rates`, and this test drives that one and watches the record follow, so
+    # a formula written back into `blobcount/evaluate.py` leaves the spy uncalled and goes red.
+    # A mutation harness cannot catch that on its own: measured, writing the formulas inline
+    # again is *behaviourally equivalent* today — the two definitions agree exactly over every
+    # `(tp, fp, fn)` in `0..39` cubed, maximum difference `0.0` — so it survives every test
+    # that checks the arithmetic. The harm is structural, three of six rates living in two
+    # files, and only a test of the delegation can see it.
+    #
+    # The arithmetic itself is pinned separately, against the record's own integers, by
+    # `test_every_rate_is_the_formula_over_the_four_counts_it_reports`.
+    seen: list[tuple[int, int, int]] = []
+
+    def spy(tp, fp, fn):
+        seen.append((tp, fp, fn))
+        return 0.11, 0.22, 0.33
+
+    monkeypatch.setattr("blobcount.evaluate._train_rates", spy)
+    paths, labels, specimens = _cohort(
+        tmp_path / "p", [("A", 0, 250), ("A", 1, _BLACK), ("A", 0, 150), ("A", 1, 200),
+                         ("A", 0, _BLACK)]
+    )
+    metrics = evaluate_specimens(
+        _StandIn(scored=True), paths, labels, specimens, ["B"], _cfg()
+    )
+    assert seen == [(1, 2, 1)], f"the shared definition was called with {seen}"
+    assert (metrics.precision, metrics.recall, metrics.f1) == (0.11, 0.22, 0.33)
+    # And the three this module *does* define are unaffected by the substitution.
+    assert metrics.accuracy == pytest.approx((metrics.tp + metrics.tn) / metrics.n)
+    assert metrics.specificity == pytest.approx(metrics.tn / (metrics.tn + metrics.fp))
+    assert metrics.npv == pytest.approx(metrics.tn / (metrics.tn + metrics.fn))
 
 
 def test_a_cohort_of_no_rows_is_scored_and_reported_rather_than_refused(tmp_path):
@@ -717,6 +809,24 @@ def test_the_kappa_refuses_two_sequences_of_different_lengths():
     # function was handed half of, and say nothing about the rest.
     with pytest.raises(ValueError, match="different lengths"):
         quadratic_weighted_kappa([0, 1, 2, 3], [0, 1], 3)
+
+
+@pytest.mark.parametrize(
+    ("truth", "predicted", "scale"),
+    [([0, -3], [0, 3], 3), ([0, -1], [0, 1], 3), ([-1, 0], [-1, 0], 1), ([-2, 1], [-2, 1], 3)],
+)
+def test_the_kappa_refuses_a_rating_below_zero(truth, predicted, scale):
+    # **A negative rating is not an exception today; it is a wrong answer.** Measured before the
+    # fix on this stack: `quadratic_weighted_kappa([0, -3], [0, 3], 3)` returned
+    # `0.42857142857142855` and `quadratic_weighted_kappa([0, -1], [0, 1], 3)` returned `1.0`,
+    # because `size` floors at 2 and `rows[-3]` indexes from the end of the margin array — so
+    # a `-3` becomes row 1 and the function returns a confident number about the wrong ratings.
+    # The remedy is named: a scale that starts at 1 has to be shifted down before it is scored.
+    with pytest.raises(ValueError, match="below zero") as caught:
+        quadratic_weighted_kappa(truth, predicted, scale)
+    message = str(caught.value)
+    assert "a rating is a position on the scale" in message, message
+    assert "shift a 1-based scale down by one" in message, message
 
 
 # ---------------------------------------------------------------------------
@@ -1041,6 +1151,49 @@ def test_a_specimen_the_handoff_holds_no_row_of_is_refused(cli, capsys):
     assert not (results / "evaluation").exists()
 
 
+def test_a_specimen_the_handoff_holds_no_row_of_is_dropped_and_named(cli, capsys):
+    # `--specimens A Z` with `Z` absent from the handoff. The run scores A and says so: the
+    # document's `evaluated_specimens` is the cohort it measured, `requested_specimens` is
+    # what the command line asked for, `not_evaluated` names the difference, and the closing
+    # sentence says it out loud. **Before the fix the document read `["A", "Z"]` and the
+    # sentence said two specimens** while `metrics["n"]` covered A alone — a provenance record
+    # of a cohort nobody scored, in a study where that field is the first thing a reader checks.
+    # `--specimens A Z` with `Z` absent from the handoff, trained on `W` so the run is coherent
+    # — a specimen that is both asked for and declared trained on would be a different test.
+    module, index, results, checkpoint = cli
+    assert module.main(_argv(index, checkpoint, specimens=("A", "Z"), train=("W",))) == 0
+
+    document = _document(results)
+    assert document["evaluated_specimens"] == ["A"]
+    assert document["requested_specimens"] == ["A", "Z"]
+    assert document["not_evaluated"] == ["Z"]
+    assert document["train_specimens"] == ["W"]
+    assert document["metrics"]["n"] == 3
+    assert [entry["specimen"] for entry in document["per_specimen"]] == ["A"]
+    assert [row["specimen"] for row in
+            _read_csv(results / "evaluation" / "per_specimen_metrics.csv")] == ["A"]
+
+    printed = capsys.readouterr().out
+    assert "Z was requested and is not in the handoff, so it was not scored." in printed, printed
+    assert "1 specimen(s) (A)" in printed, printed
+
+
+def test_a_run_that_named_every_specimen_it_scored_says_nothing_about_dropping(cli, capsys):
+    # The other half: the sentence must not appear when nothing was dropped, or a reader has
+    # to check a line that is always there to learn whether it is empty this time.
+    module, index, _results, checkpoint = cli
+    assert module.main(_argv(index, checkpoint)) == 0
+    printed = capsys.readouterr().out
+    assert "not in the handoff" not in printed, printed
+    document = _document(_results_of(cli))
+    assert document["not_evaluated"] == []
+    assert document["evaluated_specimens"] == document["requested_specimens"] == ["A", "B"]
+
+
+def _results_of(cli) -> Path:
+    return cli[2]
+
+
 def test_scoring_a_specimen_that_was_trained_on_is_refused(cli, capsys):
     # The refusal this command line exists to make, and the one its required
     # `--train-specimens` makes a caller state rather than have inferred. The artifact directory
@@ -1110,6 +1263,78 @@ def test_an_architecture_this_project_does_not_build_is_refused(cli, tmp_path, m
     assert "ResNet18" in capsys.readouterr().err
 
 
+def _directory_link(target: Path, link: Path) -> bool:
+    """Make `link` a directory link to `target`; report whether this platform allowed it.
+
+    `os.symlink` is the portable form and needs a privilege on Windows that a test suite
+    should not assume; `mklink /J` is the Windows form that needs none. Measured on this
+    stack: `mklink /J` succeeds, and `_is_below` resolves the junction, so `link.exists()` is
+    `True`, `link.is_dir()` is `True` and `link.resolve()` is the target — which is the whole
+    reason the link is worth making.
+    """
+    target.mkdir(parents=True, exist_ok=True)
+    try:
+        link.symlink_to(target, target_is_directory=True)
+        return True
+    except (OSError, NotImplementedError, AttributeError):
+        pass
+    if sys.platform.startswith("win"):
+        import subprocess
+
+        # **`stdout`/`stderr` are discarded rather than captured as text:** `mklink` echoes the
+        # two paths back, and the project root holds `Masaüstü`, which `subprocess` decodes
+        # with this machine's cp1254 — measured, that raises `UnicodeDecodeError` inside the
+        # reader thread and surfaces as a `PytestUnhandledThreadExceptionWarning`, which
+        # `filterwarnings = ["error"]` turns into a failed run. Only the status is wanted.
+        made = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+        )
+        return made.returncode == 0
+    return False
+
+
+def test_the_evaluation_subdirectory_is_refused_when_it_resolves_outside_the_project(
+    cli, project_scratch, tmp_path, monkeypatch, capsys
+):
+    # The second half of what guarding both paths buys, and the half a plain `paths.results`
+    # cannot reach: `_is_below` resolves before it compares, so a `results/evaluation` that is
+    # a link pointing out of the project is a target this project does not own while the
+    # directory above it is one. Without the subdirectory in the loop the run would write
+    # `medical_metrics.json` and `per_specimen_metrics.csv` **through the link** into a
+    # directory this repository is not responsible for.
+    #
+    # **This test was deleted once and put back.** It was removed after it made the native
+    # fault in `tests/conftest.py`'s comment above appear, and the reasoning was that the
+    # environment was at fault. The environment is now fixed there instead, because a native
+    # fault does not get to decide what this suite is allowed to check.
+    module, index, _results, checkpoint = cli
+    results = project_scratch / "results"
+    results.mkdir()
+    outside = tmp_path / "elsewhere"
+    if not _directory_link(outside, results / "evaluation"):
+        pytest.skip("this platform refused to make a directory link")
+    assert not _is_below(results / "evaluation", PROJECT_ROOT), "the link is the point"
+    assert _is_below(results, PROJECT_ROOT), "the directory above it is still ours"
+
+    monkeypatch.setattr(
+        "blobcount.config.DEFAULT_CONFIG_PATH",
+        # The **real** label root beside the real checkpoint, so a run that gets past the
+        # guard has a cohort to score and the assertion that fires is the one about the link
+        # rather than a missing patch.
+        _write_config(
+            project_scratch / "cfg", Path(checkpoint).parent / "labels", results
+        ),
+    )
+    assert module.main(_argv(index, checkpoint)) == 2
+    captured = capsys.readouterr().err
+    assert "refusing to write" in captured, captured
+    assert "project root" in captured, captured
+    assert sorted(path.name for path in outside.iterdir()) == [], (
+        "nothing was written through the link"
+    )
+
+
 def test_the_results_directory_itself_is_refused_when_it_is_a_file(cli, project_scratch, monkeypatch, capsys):
     # `paths.results` is a hand-edited string, and a file there makes `results/evaluation`
     # un-creatable — the `mkdir` would raise `NotADirectoryError`, so the guard turns a
@@ -1122,7 +1347,9 @@ def test_the_results_directory_itself_is_refused_when_it_is_a_file(cli, project_
     occupied.write_text("x", encoding="utf-8")
     monkeypatch.setattr(
         "blobcount.config.DEFAULT_CONFIG_PATH",
-        _write_config(project_scratch / "cfg", project_scratch / "labels", occupied),
+        _write_config(
+            project_scratch / "cfg", Path(checkpoint).parent / "labels", occupied
+        ),
     )
     assert module.main(_argv(index, checkpoint)) == 2
     captured = capsys.readouterr().err
@@ -1143,7 +1370,9 @@ def test_the_evaluation_subdirectory_is_refused_when_it_is_a_file(cli, project_s
     (results / "evaluation").write_text("x", encoding="utf-8")
     monkeypatch.setattr(
         "blobcount.config.DEFAULT_CONFIG_PATH",
-        _write_config(project_scratch / "cfg", project_scratch / "labels", results),
+        _write_config(
+            project_scratch / "cfg", Path(checkpoint).parent / "labels", results
+        ),
     )
     assert module.main(_argv(index, checkpoint)) == 2
     captured = capsys.readouterr().err

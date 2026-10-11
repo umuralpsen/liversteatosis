@@ -1,8 +1,43 @@
 import shutil
+import sys
 import tempfile
 from collections import namedtuple
 from collections.abc import Iterator
 from pathlib import Path
+
+# **`sklearn.metrics` is imported here, before anything below it can pull torch in, and the
+# line must not be moved down.** Measured on this machine, with each of these as the whole
+# body of a one-test file run under pytest: `import torch` followed by
+# `import sklearn.metrics` prints `Windows fatal exception: access violation` and every run;
+# `import sklearn.metrics` followed by `import torch`, and `import torch` followed by
+# `import pyarrow` or `import pandas` or `import numpy`, are all clean. **The chain is
+# `sklearn.metrics` -> `sklearn.utils._array_api` -> `sklearn/utils/fixes.py:20`
+# (`import pandas as pd`) -> pandas' own `pandas.compat.pyarrow` -> `import pyarrow`, and it
+# is pyarrow's C extension load that faults once torch is already resident in the process.**
+#
+# **Two reasons this line belongs here rather than in the module that needs it.** `conftest.py`
+# is imported by pytest before any test module, so it is the only place in this suite that can
+# guarantee the order; and `pyarrow` is an **undeclared transitive** — it is in neither
+# `pyproject.toml` nor `requirements.txt`, it arrives only because `pandas` is declared and
+# `pandas` reaches for it — so whether this suite runs at all depends on whether an undeclared
+# package happens to be installed on the machine. Delete this line and the fault comes back as
+# a mystery on a machine that has pyarrow and stays silent on one that does not.
+#
+# **A recovered native fault prints once per process and every test still passes**, which is
+# the second cost and the reason this is not merely cosmetic: a suite that emits one on every
+# run has no way to distinguish it from a *real* fault later in the same run, because both
+# print the same shape and both are swallowed the same way. That is how the junction test in
+# `tests/test_evaluate.py` was deleted once already, on the grounds that the environment fault
+# made it flaky. It was put back; the environment fault is fixed here instead.
+import sklearn.metrics  # noqa: F401  (the import IS the point; see above)
+
+# **The order the import above produced, recorded rather than described.** The fault is in the
+# sequence and a sequence is gone by the time a test runs, so the state that sequence left is
+# what is asserted: `sklearn.metrics` is loaded and torch is not, which is exactly the order
+# that measures clean. Deleting the preload makes this `False` and
+# `tests/test_evaluate.py::test_sklearn_was_imported_before_torch` goes red — the remedy is
+# pinned, not only commented.
+SKLEARN_IMPORTED_BEFORE_TORCH = "sklearn.metrics" in sys.modules and "torch" not in sys.modules
 
 import numpy as np
 import pytest

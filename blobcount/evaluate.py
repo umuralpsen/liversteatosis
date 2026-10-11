@@ -168,6 +168,11 @@ from torch.utils.data import DataLoader
 from blobcount.config import Config, get_device
 from blobcount.data import PatchDataset, build_loader, build_transforms
 from blobcount.labeling import CLASS_STEATOSIS, LABEL_BY_CLASS
+# `_rates` is private and imported anyway, for the reason `bin/ablate_threshold.py` imports
+# `blobcount.ablation._thresholds`: precision, recall and F1 have exactly one answer in this
+# project and a second copy in this file would be a second answer. The leading underscore is
+# about this module not being the function's caller, not about the function being single-use.
+from blobcount.train import _rates as _train_rates
 
 __all__ = [
     "Metrics",
@@ -186,11 +191,6 @@ __all__ = [
 # answer to a question the labelling run already answers. `blobcount.train` reads the same
 # constant the same way.
 _POSITIVE_CLASS = LABEL_BY_CLASS[CLASS_STEATOSIS]
-
-# The classes a `labels.csv` holds, as the labelling run's table states them. Read for one
-# purpose: the AUC is a number over two classes and is `None` wherever the scored cohort does
-# not hold both of them, so this is the set the check is made against rather than a length.
-_BOTH_CLASSES = frozenset(LABEL_BY_CLASS.values())
 
 # The six rates `bootstrap_metric_intervals` puts an interval around, in the order the printed
 # table carries them. `auc` is not among them and the module docstring says why: it is `None`
@@ -403,7 +403,8 @@ def quadratic_weighted_kappa(
 
     Two sequences of different lengths are refused by name and by both lengths, rather than
     by a `zip` that stops at the shorter one: pairing up to the shorter would score a cohort
-    this function was handed half of, and say nothing about the rest.
+    this function was handed half of, and say nothing about the rest. A rating below zero is
+    refused for the measured reason the code carries.
     """
     truth = [int(rating) for rating in y_true]
     predicted = [int(rating) for rating in y_pred]
@@ -419,6 +420,23 @@ def quadratic_weighted_kappa(
             f"{len(truth)} rating(s) and {len(predicted)}. They are one rating per "
             f"observation, so a shorter one would be scored against the ratings the other "
             f"has no observation for"
+        )
+    lowest = min(min(truth), min(predicted))
+    if lowest < 0:
+        # **A negative rating is refused rather than folded, and the reason is measured.** With
+        # the check below absent, `size` floors at 2 and `rows[-3]` indexes from the *end* of
+        # the margin array, so nothing raises and nothing is refused: measured on this stack
+        # before the change, `quadratic_weighted_kappa([0, -3], [0, 3], 3)` returned
+        # `0.42857142857142855` and `quadratic_weighted_kappa([0, -1], [0, 1], 3)` returned
+        # `1.0` — a confident answer to a question nobody asked, out of an agreement computed
+        # against the wrong ratings. A rating is a position on the scale, the scale starts at
+        # zero, and the remedy is a rating this scale can hold.
+        raise ValueError(
+            f"quadratic_weighted_kappa was given the rating {lowest}, which is below zero: a "
+            f"rating is a position on the scale and the scale starts at 0, so there is no "
+            f"position {lowest} for a disagreement to be measured from. This function scores "
+            f"the classes blobcount.labeling.LABEL_BY_CLASS writes, which are 0 and 1 — pass "
+            f"those, or shift a 1-based scale down by one before scoring it"
         )
     size = max(max(max(truth), max(predicted)) + 1, 2)
     if max_rating > 1:
@@ -469,28 +487,35 @@ def _confusion(actual: np.ndarray, predicted: np.ndarray) -> tuple[int, int, int
     )
 
 
-def _rates(
-    tp: int, fp: int, fn: int, tn: int, n: int
-) -> tuple[float, float, float, float, float, float]:
+def _rates(tp: int, fp: int, fn: int, tn: int, n: int) -> tuple[float, ...]:
     """Return `(accuracy, precision, recall, specificity, f1, npv)` from the four counts.
 
-    **A rate with no denominator is `0.0` rather than a division**, for all six of them, and
-    the module docstring says why the state is reachable rather than hypothetical.
+    **Precision, recall and F1 are not written here.** They are
+    `blobcount.train._rates(tp, fp, fn)`, imported under the name `_train_rates`, and this
+    module has no second copy of them: the confusion matrix a fold validates on and the one a
+    run scores on are the same four integers, so a copy here is three of six rates living in
+    two files that have to change together — the same thing `blobcount.train.read_labels` was
+    moved into the package to stop, and the precedent `blobcount.blobs` importing
+    `blobcount.extract._grayscale` and `blobcount.ablation` importing
+    `blobcount.extract._row_numbers` set twice already. Measured before the change: the two
+    definitions agree **exactly** over every `(tp, fp, fn)` in `0..39` cubed — 64000 triples,
+    maximum difference `0.0` — so nothing diverges today; the reason to import rather than to
+    copy is the day one of them changes and the other does not.
 
-    **F1 is derived from precision and recall rather than from `2 * tp / (2 * tp + fp + fn)`
-    so that this module and `blobcount.train._rates` answer the same question the same way on
-    the same four integers.** Measured on `(tp, fp, fn)`: the two formulas agree exactly at
-    `(1, 0, 1)` and at `(0, 2, 0)`, and at `(3, 1, 2)` they differ in the sixteenth digit —
-    `0.6666666666666665` through precision and recall against `0.6666666666666666` through
-    the counts — which is the rounding of two different divisions rather than a different
-    statistic, and is the reason one of the two had to be chosen.
+    **A rate with no denominator is `0.0` rather than a division**, and `blobcount.train._rates`
+    is the three of the six that say so for itself; this function keeps the rule for the other
+    three and the module docstring says why the state is reachable rather than hypothetical.
+
+    F1 therefore arrives from `blobcount.train` through precision and recall rather than
+    through `2 * tp / (2 * tp + fp + fn)`. Measured on `(3, 1, 2)` the two formulas differ in
+    the sixteenth digit — `0.6666666666666665` through precision and recall against
+    `0.6666666666666666` through the counts — which is the rounding of two different divisions
+    rather than a different statistic, and is why the choice had to be made once.
     """
+    precision, recall, f1 = _train_rates(tp, fp, fn)
     accuracy = (tp + tn) / n if n else 0.0
-    precision = tp / (tp + fp) if tp + fp else 0.0
-    recall = tp / (tp + fn) if tp + fn else 0.0
     specificity = tn / (tn + fp) if tn + fp else 0.0
     npv = tn / (tn + fn) if tn + fn else 0.0
-    f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
     return accuracy, precision, recall, specificity, f1, npv
 
 
@@ -583,9 +608,19 @@ def evaluate_specimens(
     tp, fp, fn, tn = _confusion(actual, predicted)
     n = int(actual.size)
     accuracy, precision, recall, specificity, f1, npv = _rates(tp, fp, fn, tn, n)
+    # **The AUC guard asks whether more than one class is present, and not whether the
+    # classes present are a particular pair.** A frozenset identity check against
+    # `LABEL_BY_CLASS`'s values reads better and is a trap: adding a third class to that table
+    # would leave every cohort's set unequal to it, and every AUC in the project would become
+    # `None` in silence — a study that stopped reporting an AUC and nothing anywhere said so.
+    # Measured on scikit-learn 1.6.1, `roc_auc_score` treats *two* distinct labels as binary
+    # whatever their values — `roc_auc_score([0, 2], [0.1, 0.9])` is `1.0`, not a refusal —
+    # and raises `ValueError: multi_class must be in ('ovo', 'ovr')` at *three*. So the
+    # predicate below is the whole of the condition, and a labelling run that grows a third
+    # class fails loudly here instead of going quiet.
     auc = (
         float(roc_auc_score(actual, probabilities))
-        if set(actual.tolist()) == _BOTH_CLASSES
+        if len(set(actual.tolist())) > 1
         else None
     )
     return Metrics(
