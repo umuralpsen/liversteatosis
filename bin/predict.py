@@ -250,6 +250,20 @@ def _load_weights(model, checkpoint: Path) -> None:
     `bin/evaluate.py` gives: that type is what `main`'s arm catches and a second type
     would be a second answer to what a checkpoint is; only the message is added, because
     the torch message names its own policy and not the path the caller typed.
+
+    **This body is a verbatim third copy, kept rather than shared, and the reason is the
+    one `_print_table` above states for its own five.** `bin/` is a directory of scripts
+    loaded by path rather than a package: importing a sibling's private name would mean
+    reaching into another entry point by path, and `bin/` exists so that each of its files
+    can be read one at a time without having read the others. **The fix would be to move
+    this into `blobcount/`, where `blobcount.extract._is_below` is the precedent for a
+    predicate every entry point shares** — not to import it across `bin/`, which the
+    `_print_table` docstring rules out and which this one follows.
+
+    The cost of keeping it is real and is what the tests are for:
+    `tests/test_interpret.py::test_predict_refuses_a_checkpoint_it_cannot_load` covers this
+    copy on its own, so one that drifts is a red test in the file that owns it rather than
+    a silent difference between two entry points.
     """
     try:
         state = torch.load(checkpoint, map_location="cpu", weights_only=True)

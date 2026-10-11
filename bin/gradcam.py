@@ -246,6 +246,23 @@ def _load_weights(model, checkpoint: Path) -> None:
     `bin/evaluate.py` gives: that type is what `main`'s arm catches and a second type
     would be a second answer to what a checkpoint is; only the message is added, because
     the torch message names its own policy and not the path the caller typed.
+
+    **This body is a verbatim third copy, kept rather than shared, and the reason is the
+    one `_print_table` above states for its own five.** `bin/` is a directory of scripts
+    loaded by path rather than a package: importing a sibling's private name would mean
+    reaching into another entry point by path, and `bin/` exists so that each of its files
+    can be read one at a time without having read the others. **The fix would be to move
+    this into `blobcount/`, where `blobcount.extract._is_below` is the precedent for a
+    predicate every entry point shares** — not to import it across `bin/`, which the
+    `_print_table` docstring rules out and which this one follows.
+
+    The cost of keeping it is real and is what the tests are for: if a later change to the
+    message or the exception lands here and not in the other two copies, each copy is
+    covered on its own —
+    `tests/test_interpret.py::test_gradcam_refuses_a_checkpoint_it_cannot_load` for this
+    one and `tests/test_evaluate.py::test_a_checkpoint_that_is_not_a_torch_file_is_refused`
+    for `bin/evaluate.py`'s — so a copy that drifts is a red test in the file that owns it
+    rather than a silent difference between two entry points.
     """
     try:
         state = torch.load(checkpoint, map_location="cpu", weights_only=True)
@@ -434,10 +451,17 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.n < 1:
         print(
+            # **The remedy names values this run accepts and never the one it refused.**
+            # `--n` is one whole number of patches to draw per class, so `1` is the least
+            # it can be and leaving the argument off is `_DEFAULT_N`; the refused value is
+            # named in the first clause, where it is the thing that was refused. The line
+            # this replaced interpolated `args.n` into the remedy as well, so `--n 0` was
+            # told `Fix: pass a positive --n — 0 draws one of each`, and a caller following
+            # the fix passed the argument they had just been refused.
             f"gradcam: --n is {args.n}, and a run draws at least one patch of each class "
             f"or it draws nothing: a summary grid of no rows reports no map at all. Fix: "
-            f"pass a positive --n — {args.n} draws one of each, and the default is "
-            f"{_DEFAULT_N}",
+            f"pass --n 1 to draw one patch of each class, or --n 2, or leave --n off "
+            f"altogether for {_DEFAULT_N}",
             file=sys.stderr,
         )
         return EXIT_REFUSED

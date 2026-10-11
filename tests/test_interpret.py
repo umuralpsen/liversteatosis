@@ -35,6 +35,7 @@ from PIL import Image
 from torch import nn
 
 from blobcount.config import DEFAULT_CONFIG_PATH, load
+from blobcount.interpret import overlay_from_config
 from blobcount.labeling import CLASS_NAMES, LABEL_BY_CLASS, LABEL_COLUMNS
 from blobcount.models import build_model
 
@@ -549,10 +550,87 @@ def test_the_figure_carries_the_map_it_was_given(gradcam_cli, tmp_path):
     random = np.random.default_rng(0)
     pixels = random.random((32, 32, 3)).astype(np.float32)
     heatmap = random.random((32, 32)).astype(np.float32)
+    assert not np.allclose(heatmap, heatmap[::-1]), "the map has to differ from its flip"
     straight, flipped = tmp_path / "straight.png", tmp_path / "flipped.png"
     module._figure(straight, pixels, heatmap, pixels.copy(), "the same title")
     module._figure(flipped, pixels, heatmap[::-1], pixels.copy(), "the same title")
     assert straight.read_bytes() != flipped.read_bytes()
+
+
+def test_the_blend_carries_the_blend_it_was_given(gradcam_cli, tmp_path):
+    # **The same four-line shape as the map's test, with the other panel's argument
+    # flipped.** The third panel has to carry the blend `main` computed: a drawing that
+    # substituted the patch, the map or a re-blend of the map would still write a
+    # well-formed PNG under the right name, and the CLI tests assert the name and the file
+    # and nothing else. **This is what caught the one mutation that survived the first
+    # round** — `main` handing `overlay_from_config` a flipped map — and it needed no PNG
+    # decoding and no knowledge of the layout: what differs is the argument.
+    module, *_ = gradcam_cli
+    random = np.random.default_rng(1)
+    pixels = random.random((32, 32, 3)).astype(np.float32)
+    heatmap = random.random((32, 32)).astype(np.float32)
+    # **A random map and not a constant one, and the reason is the assertion rather than
+    # the drawing**: a uniform heat map blends to a uniform picture, so flipping it changes
+    # nothing and the two files would be identical whatever the drawing did with the blend.
+    assert not np.allclose(heatmap, heatmap[::-1]), "the map has to differ from its flip"
+    cfg = load()
+    straight, flipped = tmp_path / "blend.png", tmp_path / "blend_flipped.png"
+    module._figure(
+        straight, pixels, heatmap, module.overlay_from_config(pixels, heatmap, cfg), "same"
+    )
+    module._figure(
+        flipped, pixels, heatmap, module.overlay_from_config(pixels, heatmap[::-1], cfg), "same"
+    )
+    assert straight.read_bytes() != flipped.read_bytes()
+
+
+def test_the_blend_is_over_the_map_shown_beside_it(gradcam_cli, monkeypatch, tmp_path):
+    # **The other half of the property, and the one the figure test cannot reach.** Two
+    # separate facts are involved: `_figure` renders the blend it is handed (the test
+    # above), and `main` hands it the blend of the map it displays beside. A run that
+    # blended one map and displayed another would write a perfectly well-formed figure in
+    # which the third panel and the middle panel disagree, and nothing that looks at a PNG
+    # as a PNG would notice.
+    #
+    # **The check is on the arrays, not on the pixels.** `_figure` is wrapped to record
+    # what it was handed and then to do its real work, so the assertions are about the two
+    # arrays `main` computed — the real `overlay_from_config`, the real map, the real
+    # patch — rather than about anything this file drew. The blend a given map must produce
+    # is recomputed here with the same configuration the run used, so the test cannot pass
+    # by agreeing with a wrong blend.
+    module, handoff, _checkpoint, _results = gradcam_cli
+    # **The fixture's checkpoint is the wrong one for this test, and using it here is what
+    # let M32 survive a first attempt.** `_write_checkpoint` zeroes `fc.weight` so the
+    # prediction is arithmetic, and a head with no weights sends **no gradient** to the
+    # last stage: measured, the map is identically zero over a whole patch and therefore
+    # identical to its own vertical flip, so a run that blended the flipped map and one
+    # that did not wrote byte-identical figures. An ordinary initialised head is what a
+    # trained model would have, and its map is not flip-invariant: measured over the same
+    # patch, `cam max = 1.0000` and `allclose(heat, heat[::-1])` is `False`.
+    checkpoint = tmp_path / "ordinary_head.pth"
+    torch.save(build_model("resnet18", 2, pretrained=False).state_dict(), checkpoint)
+    calls: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
+    real_figure = module._figure
+
+    def recording(path, pixels, heatmap, blended, title):
+        calls.append((pixels, heatmap, blended))
+        real_figure(path, pixels, heatmap, blended, title)
+
+    monkeypatch.setattr(module, "_figure", recording)
+    assert module.main([
+        "--labels", str(handoff), "--slide", "A", "--n", "2", "--checkpoint", str(checkpoint),
+    ]) == 0
+
+    assert len(calls) == 3, "two patches of slide A's normal class and one steatotic"
+    cfg = load()
+    for pixels, heatmap, blended in calls:
+        np.testing.assert_allclose(
+            blended, overlay_from_config(pixels, heatmap, cfg), atol=1e-6
+        )
+        # And the two arrays are of one field of view, which is what makes "over it" a
+        # question with an answer: a map at the model's size over a patch at another one
+        # could not be blended at all.
+        assert heatmap.shape == pixels.shape[:2]
 
 
 def test_predict_sorts_the_directory_it_scans(predict_cli, monkeypatch):
@@ -694,12 +772,137 @@ def test_gradcam_refuses_a_slide_the_handoff_holds_no_row_of(gradcam_cli, capsys
     assert not (results / "gradcam").exists(), "a refused run wrote nothing"
 
 
-def test_gradcam_refuses_an_n_below_one(gradcam_cli, capsys):
+def _broken_checkpoints(tmp_path: Path, checkpoint: Path) -> dict[str, Path]:
+    """Return the three ways a `--checkpoint` cannot be loaded, one path each.
+
+    **All three are real files on disk and all three go through `torch.load` for real** —
+    none is a mock and none is a monkeypatch of the library. The first is a path nothing
+    wrote; the second is a file that exists and is not a torch archive, which is the shape
+    a `--checkpoint` typo produces and the one `_load_weights` exists to name; the third is
+    a real state dict whose head is 4-wide against the 2 the configuration declares, which
+    is what `load_state_dict` refuses with a size mismatch.
+    """
+    junk = tmp_path / "junk.pth"
+    junk.write_bytes(b"not a torch file at all")
+    wrong = tmp_path / "wrong_head.pth"
+    wrong_model = build_model("resnet18", 4, pretrained=False)
+    torch.save(wrong_model.state_dict(), wrong)
+    return {"absent": tmp_path / "absent.pth", "junk": junk, "wrong": wrong}
+
+
+# What each broken checkpoint's refusal says, as the words to look for. A refusal is
+# only useful to a caller who can act on it, so each of these is the fact the arm has to
+# carry: which file, or which disagreement.
+_BROKEN_EXPECTATION = {
+    "absent": "absent.pth",
+    "junk": "junk.pth",
+    "wrong": "size mismatch",
+}
+
+
+@pytest.mark.parametrize("shape", ["absent", "junk", "wrong"])
+def test_predict_refuses_a_checkpoint_it_cannot_load(
+    predict_cli, capsys, tmp_path, shape
+):
+    # **The checkpoint arm, in all three shapes the module docstring promises.** Measured:
+    # a missing file raises `FileNotFoundError` (an `OSError`); a file that is not a torch
+    # archive raises `pickle.UnpicklingError`, whose bases are `PickleError, Exception,
+    # BaseException, object` — neither an `OSError` nor a `ValueError`, so an arm holding
+    # only those two would let a `--checkpoint` naming the wrong file reach the caller as a
+    # traceback; and weights that do not fit the head raise `RuntimeError: Error(s) in
+    # loading state_dict ... size mismatch`. Each has to arrive as a refusal naming the
+    # file or the disagreement, and **none of the three may leave a CSV behind**, because a
+    # half-written report of a run that refused is worse than no report.
+    module, images, checkpoint, results = predict_cli
+    broken = _broken_checkpoints(tmp_path, checkpoint)[shape]
+    assert module.main(["--dir", str(images), "--checkpoint", str(broken)]) == 2
+    error = capsys.readouterr().err
+    assert _BROKEN_EXPECTATION[shape] in error, error
+    assert not (results / "predictions.csv").exists()
+
+
+@pytest.mark.parametrize("shape", ["absent", "junk", "wrong"])
+def test_gradcam_refuses_a_checkpoint_it_cannot_load(
+    gradcam_cli, capsys, tmp_path, shape
+):
+    # The same three shapes on the figure side, for the reasons the predictor's three
+    # comments give. **No figure is written and the hook-bearing model is never built**, so
+    # a refused run leaves `results/gradcam/` exactly as the previous one left it.
+    module, handoff, _checkpoint, results = gradcam_cli
+    broken = _broken_checkpoints(tmp_path, _checkpoint)[shape]
+    assert module.main([
+        "--labels", str(handoff), "--slide", "A", "--n", "1", "--checkpoint", str(broken),
+    ]) == 2
+    error = capsys.readouterr().err
+    assert _BROKEN_EXPECTATION[shape] in error, error
+    assert not (results / "gradcam").exists()
+
+
+@pytest.mark.parametrize(
+    ("section", "key", "value", "expected"),
+    [
+        ("training", "architecture", "ResNet18", "ResNet18"),
+        ("training", "num_classes", 0, "class count"),
+    ],
+)
+def test_predict_refuses_a_configuration_no_model_can_be_built_from(
+    predict_cli, capsys, tmp_path, monkeypatch, section, key, value, expected
+):
+    # **The two refusals `blobcount.models.build_model` makes for itself, reached through
+    # this command line rather than through a traceback out of `main`.** They are stdlib
+    # types — `models.py` declares no exception type of its own — so this file is where
+    # catching them belongs, and the configuration the caller loaded is not the one the
+    # run used, which is what makes it a message worth reading.
+    module, images, checkpoint, _results = predict_cli
+    data = yaml.safe_load(DEFAULT_CONFIG_PATH.read_text(encoding="utf-8"))
+    data[section][key] = value
+    broken = tmp_path / "broken.yaml"
+    broken.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+    monkeypatch.setattr("blobcount.config.DEFAULT_CONFIG_PATH", broken)
+    assert module.main(["--dir", str(images), "--checkpoint", str(checkpoint)]) == 2
+    assert expected in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("section", "key", "value", "expected"),
+    [
+        ("training", "architecture", "ResNet18", "ResNet18"),
+        ("training", "num_classes", 0, "class count"),
+    ],
+)
+def test_gradcam_refuses_a_configuration_no_model_can_be_built_from(
+    gradcam_cli, capsys, tmp_path, monkeypatch, section, key, value, expected
+):
+    module, handoff, checkpoint, _results = gradcam_cli
+    data = yaml.safe_load(DEFAULT_CONFIG_PATH.read_text(encoding="utf-8"))
+    data[section][key] = value
+    broken = tmp_path / "broken.yaml"
+    broken.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+    monkeypatch.setattr("blobcount.config.DEFAULT_CONFIG_PATH", broken)
+    assert module.main([
+        "--labels", str(handoff), "--slide", "A", "--n", "1", "--checkpoint", str(checkpoint),
+    ]) == 2
+    assert expected in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("refused", ["0", "-3"])
+def test_gradcam_refuses_an_n_below_one_naming_one_it_accepts(gradcam_cli, capsys, refused):
+    # **The remedy has to name a value this run would accept, and the refused one has to be
+    # named only as the thing that was refused.** Every refusal in this project says what to
+    # do next; this one used to say `--n is 0 ... Fix: pass a positive --n — 0 draws one of
+    # each`, so the fix a caller followed was the argument they had just been refused. The
+    # two assertions are the property and neither is the other's restatement: the first says
+    # the refused value is stated up front, the second says it never reappears after
+    # `Fix:`.
     module, handoff, checkpoint, _results = gradcam_cli
     assert module.main([
-        "--labels", str(handoff), "--slide", "A", "--n", "0", "--checkpoint", str(checkpoint),
+        "--labels", str(handoff), "--slide", "A", "--n", refused, "--checkpoint", str(checkpoint),
     ]) == 2
-    assert "--n" in capsys.readouterr().err
+    error = capsys.readouterr().err
+    assert f"--n is {refused}" in error, error
+    remedy = error.partition("Fix:")[2]
+    assert refused not in remedy, f"the remedy offers the refused value back: {remedy}"
+    assert "--n 1" in remedy, f"the remedy names no value this run accepts: {remedy}"
 
 
 def test_gradcam_releases_the_hooks_when_the_drawing_raises(gradcam_cli, monkeypatch):
