@@ -941,7 +941,14 @@ def cli(project_scratch, tmp_path, monkeypatch):
     table it only reads the shape of.
     """
     module = _load_cli(monkeypatch)
-    label_root = tmp_path / "labels"
+    # One level below `tmp_path` rather than directly in it, so the label root the
+    # configuration names is a *tree* (`tmp_path/owned/labels`) and a test can stage
+    # a target beside that tree. Under the config-derived containment rule the parent
+    # of a configured value is an owned root, so anything directly under `tmp_path`
+    # is owned the moment a `paths.*` key names something there; a tree one level
+    # down keeps a refusable sibling (`tmp_path/owned-typo`) inside this test's own
+    # `tmp_path`.
+    label_root = tmp_path / "owned" / "labels"
     rows = []
     for specimen, label, relative, value in _COHORT:
         patch = label_root / relative
@@ -1304,6 +1311,15 @@ def test_the_evaluation_subdirectory_is_refused_when_it_resolves_outside_the_pro
     # `medical_metrics.json` and `per_specimen_metrics.csv` **through the link** into a
     # directory this repository is not responsible for.
     #
+    # **Re-pointed at the sibling invariant, and the refusal is the same one.** The
+    # link now resolves to a *sibling* of the tree the same configuration says the
+    # project owns — `tmp_path/owned-typo`, beside the owned `tmp_path/owned` — rather
+    # than an arbitrary directory under `tmp_path`, which the config-derived roots
+    # own as soon as a `paths.*` key names something there. The old staging encoded
+    # "everything outside the checkout is refused", the invariant K14 replaced; a
+    # link to the near-miss beside the owned tree is the mistyped `--out` the guard
+    # exists for, and naming it is stronger than naming an arbitrary location.
+    #
     # **This test was deleted once and put back.** It was removed after it made the native
     # fault in `tests/conftest.py`'s comment above appear, and the reasoning was that the
     # environment was at fault. The environment is now fixed there instead, because a native
@@ -1311,7 +1327,7 @@ def test_the_evaluation_subdirectory_is_refused_when_it_resolves_outside_the_pro
     module, index, _results, checkpoint = cli
     results = project_scratch / "results"
     results.mkdir()
-    outside = tmp_path / "elsewhere"
+    outside = tmp_path / "owned-typo"
     if not _directory_link(outside, results / "evaluation"):
         pytest.skip("this platform refused to make a directory link")
     assert not _is_below(results / "evaluation", PROJECT_ROOT), "the link is the point"
@@ -1323,7 +1339,9 @@ def test_the_evaluation_subdirectory_is_refused_when_it_resolves_outside_the_pro
         # guard has a cohort to score and the assertion that fires is the one about the link
         # rather than a missing patch.
         _write_config(
-            project_scratch / "cfg", Path(checkpoint).parent / "labels", results
+            project_scratch / "cfg",
+            Path(checkpoint).parent / "owned" / "labels",
+            results,
         ),
     )
     assert module.main(_argv(index, checkpoint)) == 2
@@ -1381,18 +1399,41 @@ def test_the_evaluation_subdirectory_is_refused_when_it_is_a_file(cli, project_s
     assert (results / "evaluation").read_text(encoding="utf-8") == "x"
 
 
-def test_an_output_target_outside_the_project_is_refused(cli, tmp_path, monkeypatch, capsys):
+def test_an_output_target_outside_the_project_is_refused(
+    cli, project_scratch, tmp_path, monkeypatch, capsys
+):
+    # Re-pointed at the invariant that survives K14, in the shape the results
+    # directory itself allows (K19): `paths.results` is *written inside the
+    # checkout* as a junction and resolves to a *sibling* of the tree the same
+    # configuration says the project owns — `tmp_path/owned-typo`, beside the
+    # owned `tmp_path/owned` that holds the real cohort — so it is neither the
+    # owned path itself nor below it, and the guard refuses it after resolving
+    # it. The old staging pointed `paths.results` at `tmp_path` directly, which
+    # made the refused target one the configuration had just named — owned by
+    # definition — and the assertion encoded the superseded invariant
+    # "everything outside the checkout is refused". A results directory that
+    # resolves beside the owned tree is the hand-edit the guard exists for, and
+    # under K19 a value written inside the checkout cannot smuggle the guard to
+    # where it points.
     module, index, _results, checkpoint = cli
-    outside = tmp_path / "escape"
-    outside.mkdir()
+    outside = tmp_path / "owned-typo"
+    if not _directory_link(outside, project_scratch / "results-link"):
+        pytest.skip("this platform refused to make a directory link")
     monkeypatch.setattr(
         "blobcount.config.DEFAULT_CONFIG_PATH",
-        _write_config(tmp_path, tmp_path / "labels", outside),
+        _write_config(
+            tmp_path,
+            Path(checkpoint).parent / "owned" / "labels",
+            project_scratch / "results-link",
+        ),
     )
     assert module.main(_argv(index, checkpoint)) == 2
     captured = capsys.readouterr().err
+    assert "refusing to write" in captured, captured
     assert "project root" in captured, captured
-    assert sorted(path.name for path in outside.iterdir()) == []
+    assert sorted(path.name for path in outside.iterdir()) == [], (
+        "nothing was written through the link"
+    )
 
 
 def test_the_project_root_is_not_an_output_target(cli, tmp_path, monkeypatch, capsys):

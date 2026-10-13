@@ -70,12 +70,16 @@ configuration or the input rather than about this program:
   reason `bin/evaluate.py` gives.
 - **The output target**, as this program's own check, against both `paths.results` and
   the `gradcam` subdirectory it puts the figures in: a target that exists and is a file
-  rather than a directory, and a target that is not strictly below the project root.
+  rather than a directory, and a target that is not below a root this project owns — the
+  checkout, or the parent of a configured `paths.*` value.
   **Both paths are tested because both can be the one that is wrong** — a `paths.results`
   that is a regular file makes `results/gradcam` un-creatable, and a `paths.results: .`
   leaves `gradcam/` below the root while putting the results directory *at* it, so a
   guard on the subdirectory alone would write figures into the repository. The predicate
-  is `blobcount.extract._is_below`, and the check runs before the handoff is read and
+  is `blobcount.extract.is_owned_path`, which follows the configuration rather than the
+  checkout alone — a path the configuration names is by definition one this project owns,
+  and a rule written against the checkout alone would refuse the destinations the data
+  move put outside the repository — and the check runs before the handoff is read and
   before a checkpoint is loaded.
 - **The cohort and the count**, as this program's own checks: a `--slide` naming a
   specimen the handoff holds no row of, and a `--n` below one. The first would draw a
@@ -130,7 +134,7 @@ import torch
 
 from blobcount.config import PROJECT_ROOT, ConfigError, get_device, load
 from blobcount.data import build_transforms
-from blobcount.extract import _is_below
+from blobcount.extract import is_owned_path
 from blobcount.interpret import GradCAM, overlay_from_config
 from blobcount.labeling import CLASS_NAMES, LABEL_BY_CLASS, load_patch
 from blobcount.models import build_model
@@ -219,7 +223,11 @@ def _refuse_output_target(results_dir: Path, target: Path) -> str | None:
     directory and the subdirectory they put their artifacts in, and this one writes five
     figures and a grid into a subdirectory of a directory it does not own. The file test
     runs before the containment test for each path, so a file is reported as the typo it
-    is rather than as a containment failure.
+    is rather than as a containment failure. The containment predicate is
+    `blobcount.extract.is_owned_path`, the one the siblings use, and it follows the
+    configuration rather than the checkout alone: a path the configuration names is by
+    definition one this project owns, and a rule written against the checkout alone
+    would refuse the destinations the data move put outside the repository.
 
     The check returns a message and raises nothing, and it runs before the handoff is
     read and before a checkpoint is loaded, so a mistyped `paths.results` costs a message
@@ -231,10 +239,11 @@ def _refuse_output_target(results_dir: Path, target: Path) -> str | None:
                 f"refusing to write {path}: it exists and is a file rather than a "
                 f"directory, so it is a typo in paths.results and not a previous run"
             )
-        if not _is_below(path, PROJECT_ROOT):
+        if not is_owned_path(path):
             return (
                 f"refusing to write {path}: it is not strictly below the project root "
-                f"{PROJECT_ROOT}, so it is not a directory this project owns"
+                f"{PROJECT_ROOT} or the parent of a configured paths.* value, so it is "
+                f"not a directory this project owns"
             )
     return None
 
@@ -252,7 +261,7 @@ def _load_weights(model, checkpoint: Path) -> None:
     loaded by path rather than a package: importing a sibling's private name would mean
     reaching into another entry point by path, and `bin/` exists so that each of its files
     can be read one at a time without having read the others. **The fix would be to move
-    this into `blobcount/`, where `blobcount.extract._is_below` is the precedent for a
+    this into `blobcount/`, where `blobcount.extract.is_owned_path` is the precedent for a
     predicate every entry point shares** — not to import it across `bin/`, which the
     `_print_table` docstring rules out and which this one follows.
 

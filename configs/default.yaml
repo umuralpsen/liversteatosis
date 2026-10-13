@@ -5,8 +5,20 @@ project:
 
 paths:
   slides: data
-  patches: dataset/patches
-  labels: dataset/labels
+  # The generated data moved out of the OneDrive-synchronized tree (Task 14,
+  # 2026-10-13): `dataset/` is 19.3 GB over 82,957 files and OneDrive charges per
+  # file, so it now lives at %LOCALAPPDATA%\UmurOS\dataset. The original relative
+  # values were `patches: dataset/patches` and `labels: dataset/labels`.
+  # `Config.path` expands %VAR% and ~ (blobcount/config.py), so this git-tracked
+  # file names a user-local directory without naming this user's, and the
+  # containment guard derives its allowed roots from these values rather than
+  # from a literal. `slides` and `manifest` stay in the repository:
+  # blobcount/registry.py resolves a specimen's slide against the manifest's own
+  # directory, so the manifest and the staged slides cannot be separated from it.
+  # The value is single-quoted because a plain YAML scalar cannot start with `%`
+  # and a double-quoted one would read `\U` as an escape.
+  patches: '%LOCALAPPDATA%\UmurOS\dataset\patches'
+  labels: '%LOCALAPPDATA%\UmurOS\dataset\labels'
   results: results
   manifest: data/manifest.yaml
 

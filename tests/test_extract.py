@@ -9,14 +9,16 @@ import numpy as np
 import pytest
 import yaml
 
-from blobcount.config import DEFAULT_CONFIG_PATH, PROJECT_ROOT, load
+from blobcount.config import DEFAULT_CONFIG_PATH, PROJECT_ROOT, Config, load
 from blobcount.extract import (
     INDEX_COLUMNS,
     TISSUE_PERCENTILE,
     ExtractionStats,
     OutputPathError,
     _protected_paths,
+    allowed_roots,
     extract_slide,
+    is_owned_path,
     is_tissue,
     patches_dir,
     prepare_output,
@@ -386,6 +388,140 @@ def test_prepare_output_reports_a_config_it_cannot_resolve_as_a_path_refusal(
     # `__cause__` says which key could not be resolved to make that judgement.
     assert isinstance(refused.value.__cause__, ConfigError)
     assert (target / "2_0_0.png").read_bytes() == b"the previous run"
+
+
+# --- The roots the containment guard learns from the configuration (ruling K14) ---
+#
+# `paths.patches` and `paths.labels` are the two keys the generated data moves under,
+# and once they name directories outside the checkout, `_is_below(target, PROJECT_ROOT)`
+# refuses exactly those: the extraction and labelling command lines would refuse their
+# own default destinations and the pipeline could not run at all. The guard therefore
+# derives the roots it enforces from the configuration — the checkout, plus the parent
+# of every configured `paths.*` value — so a path the configuration names is by
+# construction one this project owns, and a path beside it is not. The tests below pin
+# that derivation without naming where the data went: a `tmp_path` subtree stands in
+# for any location, and it is the configuration, not the code, that says where the
+# project's data lives.
+
+
+def test_allowed_roots_contain_the_checkout():
+    # The checkout is owned unconditionally and stays the first root whatever the
+    # `paths.*` keys name: it is where the configuration, the code and the manifest
+    # live. This is also the clause that keeps every target inside the project owned
+    # exactly as the single-root rule owned it, so widening the roots adds locations
+    # rather than moving the boundary.
+    assert PROJECT_ROOT in allowed_roots()
+
+
+def test_allowed_roots_contain_the_parent_of_a_configured_paths_value(tmp_path, monkeypatch):
+    # The parent of the configured value and not the value itself, because
+    # `prepare_output` deletes the directory it is handed: `paths.patches` itself has
+    # to be strictly below an owned root or the guard would refuse the destination
+    # the configuration names. That parent is derived from the configuration, so the
+    # same derivation holds for a relocated data tree and for a `tmp_path` subtree
+    # alike, and the guard follows the data wherever the file says it went.
+    relocated = tmp_path / "dataset" / "patches"
+    relocated.parent.mkdir(parents=True)
+    monkeypatch.setattr(
+        "blobcount.config.DEFAULT_CONFIG_PATH", _config_pointing_patches_at(relocated)
+    )
+    assert relocated.parent in allowed_roots()
+
+
+def test_is_owned_path_accepts_a_directory_strictly_below_an_allowed_root(tmp_path, monkeypatch):
+    # The acceptance the pipeline needs in order to run, on the strongest example: the
+    # configured destination itself, strictly below the parent of itself. Before the
+    # roots were derived this was the refusal that made the whole relocation unusable,
+    # because the command line would not write to the directory the configuration
+    # names for it.
+    relocated = tmp_path / "dataset" / "patches"
+    relocated.parent.mkdir(parents=True)
+    monkeypatch.setattr(
+        "blobcount.config.DEFAULT_CONFIG_PATH", _config_pointing_patches_at(relocated)
+    )
+    assert is_owned_path(relocated)
+
+
+def test_is_owned_path_refuses_a_sibling_of_the_owned_subtree(tmp_path, monkeypatch):
+    # The protection the guard exists for, restated for roots that are not the
+    # checkout: the mistyped `--out` lands *next to* the owned directory, not inside
+    # it. With the patches at `<somewhere>/dataset/patches`, the
+    # `--out <somewhere>/dataset-typo` this test stands in for is a refusal and not an
+    # accident of the wider list, because the sibling is below no allowed root — not
+    # the checkout, not the parent of any configured value.
+    relocated = tmp_path / "dataset" / "patches"
+    relocated.parent.mkdir(parents=True)
+    monkeypatch.setattr(
+        "blobcount.config.DEFAULT_CONFIG_PATH", _config_pointing_patches_at(relocated)
+    )
+    assert not is_owned_path(tmp_path / "dataset-typo")
+
+
+def test_overriding_paths_patches_moves_the_allowed_roots(tmp_path):
+    # The derivation follows the configuration it is handed: the same key under two
+    # locations produces two roots, and neither configuration's root appears in the
+    # other's. Both configurations are passed as `active` rather than loaded through
+    # `DEFAULT_CONFIG_PATH`, because `default_config()` caches the first file it reads
+    # for the rest of the test and the point here is the change, not the loading.
+    def _with_patches_at(value: Path) -> Config:
+        data = yaml.safe_load(DEFAULT_CONFIG_PATH.read_text(encoding="utf-8"))
+        data["paths"]["patches"] = str(value)
+        return Config(data, source=DEFAULT_CONFIG_PATH)
+
+    one = allowed_roots(_with_patches_at(tmp_path / "one" / "patches"))
+    two = allowed_roots(_with_patches_at(tmp_path / "two" / "patches"))
+    assert (tmp_path / "one") in one
+    assert (tmp_path / "two") in two
+    assert (tmp_path / "one") not in two
+    assert (tmp_path / "two") not in one
+
+
+def test_no_configured_location_is_hardcoded_into_the_package_or_the_entry_points():
+    # The relocation is a configuration fact and not a code fact: `Config.path` expands
+    # `%VAR%` and `~` (`blobcount/config.py`), so the location belongs in
+    # `configs/default.yaml` and nowhere else. A literal in `blobcount/` or `bin/`
+    # would be a root the guard derived from a constant rather than from the
+    # configuration — the coupling the derivation exists to remove, because it would
+    # make the guard blind to the next move. This is
+    # `grep -rn "LOCALAPPDATA" blobcount/ bin/` pinned as a test, so the absence
+    # survives the grep being run once.
+    for directory in (PROJECT_ROOT / "blobcount", PROJECT_ROOT / "bin"):
+        for source in sorted(directory.glob("*.py")):
+            assert "LOCALAPPDATA" not in source.read_text(encoding="utf-8"), (
+                f"{source} names a location the configuration owns"
+            )
+
+
+def test_a_configured_value_at_the_checkout_contributes_no_parent(project_scratch, monkeypatch):
+    # **Red before K18, and the red is the hole.** `paths.results: "."` resolves to the
+    # checkout itself — pathlib drops the `.` — so the parent of that configured value
+    # is the checkout's *parent*. Measured against the first derivation, that parent
+    # was admitted as an allowed root, `is_owned_path(PROJECT_ROOT)` was True, and the
+    # evaluate test that stages this hand-edit then wrote `evaluation/` into the
+    # repository root before failing its assertion: the exact catastrophe the guard
+    # exists to refuse, reached through the rule that was meant to widen it.
+    #
+    # K18's correction: a configured value already at or below a held root contributes
+    # nothing, because a value inside the checkout is owned by definition and its
+    # parent would extend the guard *outside* the tree the guard exists to bound. The
+    # checkout stays a target no run may write into or clear, whatever the `paths.*`
+    # keys are hand-edited to name.
+    monkeypatch.setattr(
+        "blobcount.config.DEFAULT_CONFIG_PATH",
+        _config_with(
+            project_scratch,
+            "at-the-checkout.yaml",
+            project_scratch / "patches",
+            {"paths": {"results": "."}},
+        ),
+    )
+    assert PROJECT_ROOT.parent not in allowed_roots()
+    # The behavioural consequence, pinned beside the root list: the checkout itself is
+    # not a target this project owns, so the guard that accepted it before K18 refuses
+    # it now.
+    assert not is_owned_path(PROJECT_ROOT), (
+        "the checkout itself is not a target this project owns"
+    )
 
 
 def test_index_header_is_pinned(tmp_path):

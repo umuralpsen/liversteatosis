@@ -18,7 +18,14 @@ dependencies = [
     "opencv-python>=4.7",
     "matplotlib>=3.7",
     "openslide-python>=1.4.3",
-    "pandas",
+    # pandas is pinned and pyarrow declared rather than transitive: measured on
+    # Windows (Task 12), `import torch` followed by `import sklearn.metrics`
+    # faults in the pyarrow C extension, `tests/conftest.py` preloads sklearn
+    # to avoid it, and an unpinned pandas can pull an ABI-incompatible build
+    # against the installed pyarrow — the same fault by another route. Both
+    # lines make the preload supportable on a declared dependency.
+    "pandas>=2.2.3,<3",
+    "pyarrow>=15",
 ]
 
 [project.optional-dependencies]

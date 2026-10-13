@@ -1212,6 +1212,35 @@ def _load_cli(monkeypatch):
     return module
 
 
+def _directory_link(target: Path, link: Path) -> bool:
+    """Make `link` a directory link to `target`; report whether this platform allowed it.
+
+    The same helper `tests/test_evaluate.py` states for its own junction test, kept
+    here rather than imported across test modules: `os.symlink` needs a privilege a
+    test suite should not assume, and `mklink /J` is the Windows form that needs none.
+    `stdout`/`stderr` are discarded rather than captured as text, for the reason the
+    sibling file measured: `mklink` echoes the two paths back, the project root holds
+    `Masaüstü`, and `subprocess` decodes that with the machine's cp1254 — which raises
+    `UnicodeDecodeError` inside the reader thread and surfaces as a warning
+    `filterwarnings = ["error"]` turns into a failed run.
+    """
+    target.mkdir(parents=True, exist_ok=True)
+    try:
+        link.symlink_to(target, target_is_directory=True)
+        return True
+    except (OSError, NotImplementedError, AttributeError):
+        pass
+    if sys.platform.startswith("win"):
+        import subprocess
+
+        made = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+        )
+        return made.returncode == 0
+    return False
+
+
 @pytest.fixture
 def cli(project_scratch, synthetic_patch, monkeypatch):
     """The entry point, a real index over real patch files, and a results root.
@@ -1681,17 +1710,37 @@ def test_cli_refuses_a_non_finite_configured_threshold(cli, monkeypatch, capsys)
     assert not (results / "label_analysis").exists()
 
 
-def test_cli_refuses_a_results_path_outside_the_project(cli, monkeypatch, tmp_path, capsys):
+def test_cli_refuses_a_results_path_outside_the_project(
+    cli, project_scratch, tmp_path, monkeypatch, capsys
+):
+    # Re-pointed at the invariant that survives K14. The results directory the
+    # configuration names sits inside the checkout, so it is owned; the
+    # `label_analysis` subdirectory this run would write its figure and its JSON
+    # into is a **link** that resolves to a *sibling* of the tree the same
+    # configuration says the project owns — `tmp_path/owned-typo`, beside the
+    # owned `tmp_path/owned` — which is neither the configured path itself nor
+    # below it, so the guard refuses it and nothing is written through the link.
+    # The old staging pointed `paths.results` itself at `tmp_path`, which made the
+    # target one the configuration had just named — owned by definition — and the
+    # refusal asserted the superseded invariant "everything outside the checkout is
+    # refused". A link resolving to the near-miss beside the owned tree is the
+    # mistyped `--out` the guard exists for; the `_boom` canary below still proves
+    # the refusal happens before a single patch is read.
     from blobcount import ablation
 
     module, index, _ = cli
-    outside = tmp_path / "elsewhere"
+    results = project_scratch / "results"
+    results.mkdir()
+    outside = tmp_path / "owned-typo"
+    if not _directory_link(outside, results / "label_analysis"):
+        pytest.skip("this platform refused to make a directory link")
     monkeypatch.setattr(
         "blobcount.config.DEFAULT_CONFIG_PATH",
         _cfg(
-            tmp_path,
-            "outside.yaml",
-            results=outside,
+            project_scratch,
+            "sibling.yaml",
+            results=results,
+            paths={"labels": str(tmp_path / "owned" / "labels")},
             ablation={"thresholds": [2, 3]},
             labeling={"blob_threshold": 3},
         ),
@@ -1702,8 +1751,14 @@ def test_cli_refuses_a_results_path_outside_the_project(cli, monkeypatch, tmp_pa
 
     monkeypatch.setattr(ablation, "load_patch", _boom)
     assert module.main(["--index", str(index)]) == module.EXIT_REFUSED
-    assert str(outside) in capsys.readouterr().err
-    assert not outside.exists()
+    err = capsys.readouterr().err
+    # The guard prints the path it was handed — the link, not where it resolves —
+    # so the assertion names that link and the message it was refused by.
+    assert "label_analysis" in err, err
+    assert "project root" in err, err
+    assert sorted(path.name for path in outside.iterdir()) == [], (
+        "nothing was written through the link"
+    )
 
 
 def test_cli_refuses_a_results_path_that_is_not_a_string(

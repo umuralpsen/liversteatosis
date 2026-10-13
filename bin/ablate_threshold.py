@@ -36,15 +36,18 @@ dataset, never about this program:
   is read.
 - **The output target**, as two checks this program makes for itself, each run against
   both `paths.results` and `paths.results / "label_analysis"`: one that exists and is a
-  file rather than a directory, and one that is not strictly below the project root. Both
+  file rather than a directory, and one that is not below a root this project owns — the
+  checkout, or the parent of a configured `paths.*` value. Both
   paths are tested because a file at the results directory makes the subdirectory
   un-creatable, and because `paths.results: .` puts the results directory itself at the
   project root while leaving the subdirectory below it — so a guard on the subdirectory
   alone writes a figure and a JSON into the repository. `blobcount.extract.prepare_output`
   is the wrong tool for any of them, because it *deletes* and this program writes two files
   into a directory it does not own: it refuses targets it may not clear, and these are
-  targets it may not write. Its `_is_below` is the predicate the containment check uses, so
-  "is this ours" has one implementation in this project and not one per guard.
+  targets it may not write. Its `is_owned_path` is the predicate the containment check
+  uses, so "is this ours" has one implementation in this project and not one per guard,
+  and it follows the configuration rather than the checkout alone, which is what lets a
+  run write to a `paths.*` the data move put outside the repository.
   `paths.results` is a hand-edited string in `configs/default.yaml`, and a
   `paths.results: /` or `..` would put a figure and a JSON somewhere this repository is not
   responsible for.
@@ -196,7 +199,7 @@ from pathlib import Path
 # conversion of `ablation.thresholds` into whole numbers of blobs has exactly one answer in
 # this project, and a second `int()` per entry in this file would be a second answer. The
 # leading underscore is about this file not being the module's caller, not about the
-# function being single-use. `_is_below` is imported the same way, and for the same reason
+# function being single-use. `is_owned_path` is imported the same way, and for the same reason
 # `blobcount.extract.prepare_output` is not: the guard below needs the predicate and not
 # the deletion.
 from blobcount.ablation import (
@@ -208,7 +211,7 @@ from blobcount.ablation import (
     plot,
 )
 from blobcount.config import PROJECT_ROOT, ConfigError, load
-from blobcount.extract import _is_below
+from blobcount.extract import is_owned_path
 from blobcount.labeling import LabelingInputError
 
 EXIT_OK = 0
@@ -385,10 +388,14 @@ def _refuse_output_target(results_dir: Path, target: Path) -> str | None:
     The four refusals the module docstring names, as a message rather than an exception
     because this check is this program's own and it is a judgement about an argument:
     no other caller of `ablate` has an output directory to judge, and a type it alone
-    raises would be a type every caller has to know. `_is_below` is the same predicate
-    `blobcount.extract.prepare_output` uses, imported for the same reason that guard
-    resolves the slides and the manifest through the configuration: one implementation
-    of "is this ours", which collapses a `..` and refuses the project root itself.
+    raises would be a type every caller has to know. `is_owned_path` is the same
+    predicate `blobcount.extract.prepare_output` uses, imported for the same reason that
+    guard resolves the slides and the manifest through the configuration: one
+    implementation of "is this ours", which collapses a `..`, resolves a link before it
+    compares, refuses the project root itself, and follows the configuration rather than
+    the checkout alone — a path the configuration names is by definition one this
+    project owns, and a rule written against the checkout alone would refuse the
+    destinations the data move put outside the repository.
 
     **Both paths are tested, and the results directory is one of them.** Only
     `results_dir / "label_analysis"` was, and a `paths.results: .` then passed: the
@@ -403,7 +410,7 @@ def _refuse_output_target(results_dir: Path, target: Path) -> str | None:
     raise `NotADirectoryError` — so checking only the subdirectory would let a typo reach
     a traceback. The subdirectory is checked too, because that is the path a hand-edited
     `paths.results` most often collides with. The file test runs first for each path and
-    the containment test second for the same path, so a file outside the project is
+    the containment test second for the same path, so a file outside the owned roots is
     reported as the typo it is rather than as a containment failure.
 
     The check returns a message and raises nothing, and it runs before the counts, so a
@@ -416,10 +423,11 @@ def _refuse_output_target(results_dir: Path, target: Path) -> str | None:
                 f"refusing to write {path}: it exists and is a file rather than a "
                 f"directory, so it is a typo in paths.results and not a previous run"
             )
-        if not _is_below(path, PROJECT_ROOT):
+        if not is_owned_path(path):
             return (
                 f"refusing to write {path}: it is not strictly below the project root "
-                f"{PROJECT_ROOT}, so it is not a directory this project owns"
+                f"{PROJECT_ROOT} or the parent of a configured paths.* value, so it is "
+                f"not a directory this project owns"
             )
     return None
 

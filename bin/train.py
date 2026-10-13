@@ -70,13 +70,16 @@ groups, and nothing this program does does:
   second specimen.
 - **The output target**, as this program's own check, and it is the same one
   `bin/ablate_threshold.py` makes: a target that exists and is a file rather than a
-  directory, and a target that is not strictly below the project root. **A run writes one
+  directory, and a target that is not below a root this project owns — the checkout, or
+  the parent of a configured `paths.*` value. **A run writes one
   45 MB checkpoint per fold into whatever path it is given**, so a `--out` typo or a
   hand-edited `paths.results` is how a study's weights end up somewhere this repository is
   not responsible for. Nothing is deleted — this run clears no tree, which is a smaller
   blast radius than `bin/label_patches.py`'s and not a reason to be the one entry point
-  that does not check. The predicate is `blobcount.extract._is_below`, so "is this ours"
-  has one implementation in this project and not one per guard, and the check runs before
+  that does not check. The predicate is `blobcount.extract.is_owned_path`, so "is this
+  ours" has one implementation in this project and not one per guard, and it follows the
+  configuration rather than the checkout alone, which is what lets a run write to a
+  `paths.*` the data move put outside the repository. The check runs before
   the handoff is read so a mistyped target costs a message rather than a training run.
 - **The cohort and the model**, as a `SplitError` or a `ValueError`: a specimen column
   with fewer than two distinct ids, or one that is a sequence of characters rather than of
@@ -148,7 +151,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from blobcount.config import PROJECT_ROOT, ConfigError, load
-from blobcount.extract import _is_below
+from blobcount.extract import is_owned_path
 from blobcount.splits import SplitError
 from blobcount.train import read_labels, run_cross_validation
 
@@ -229,11 +232,21 @@ def _refuse_output_target(target: Path) -> str | None:
 
     **The file test runs before the containment test, so a file is reported as the typo it
     is.** A `paths.results` that is a regular file makes `out_dir` un-creatable — the
-    `mkdir` would raise `NotADirectoryError` — and the project root itself is not strictly
-    below itself, which `_is_below` answers rather than a string comparison here: "is this
-    ours" has one implementation in this project and not one per guard, and the two
-    entry points that differ in what they *do* to a target do not differ in what they
-    decide is a target.
+    `mkdir` would raise `NotADirectoryError` — and the project root itself is not
+    strictly below itself, which `_is_below` answers rather than a string comparison
+    here: "is this ours" has one implementation in this project and not one per guard,
+    and the two entry points that differ in what they *do* to a target do not differ in
+    what they decide is a target.
+
+    **The containment test asks `is_owned_path` rather than `_is_below` against the
+    checkout alone.** The roots a target must lie under are the ones the project owns —
+    the checkout, plus the parent of every configured `paths.*` value, the set
+    `blobcount.extract.allowed_roots` derives from the configuration at call time —
+    because a path the configuration names is by definition one this project owns, and
+    a rule written against the checkout alone would refuse the destinations the data
+    move put outside the repository. The predicate stays strict, so the project root
+    itself and a directory *beside* an owned one are both refusals, which is the
+    mistyped `--out` this check exists to catch.
 
     The check returns a message and raises nothing, and it runs before the handoff is read,
     so a mistyped `--out` costs a message rather than a training run.
@@ -243,10 +256,11 @@ def _refuse_output_target(target: Path) -> str | None:
             f"refusing to write {target}: it exists and is a file rather than a directory, "
             f"so it is a typo in --out or in paths.results and not a previous run"
         )
-    if not _is_below(target, PROJECT_ROOT):
+    if not is_owned_path(target):
         return (
             f"refusing to write {target}: it is not strictly below the project root "
-            f"{PROJECT_ROOT}, so it is not a directory this project owns"
+            f"{PROJECT_ROOT} or the parent of a configured paths.* value, so it is "
+            f"not a directory this project owns"
         )
     return None
 

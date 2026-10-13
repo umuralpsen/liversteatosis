@@ -664,16 +664,39 @@ def test_predict_refuses_a_path_of_the_wrong_kind_for_the_argument(
 
 
 def test_predict_refuses_a_results_directory_outside_the_project(
-    predict_cli, capsys, tmp_path, monkeypatch
+    predict_cli, project_scratch, capsys, tmp_path, monkeypatch
 ):
+    # Re-pointed at the invariant that survives K14, in the one shape this guard's
+    # single target allows (K19): `paths.results` is *written inside the checkout*
+    # as a junction, and it resolves to a *sibling* of the tree the same
+    # configuration says the project owns — `tmp_path/owned-typo`, beside the
+    # owned `tmp_path/owned` — so it is neither the owned path itself nor below
+    # it, and the guard refuses it after resolving it. The old staging pointed
+    # `paths.results` itself at `tmp_path`, which made the refused target one the
+    # configuration had just named — owned by definition — and the assertion
+    # encoded the superseded invariant "everything outside the checkout is
+    # refused". A results directory that resolves beside the owned tree is the
+    # hand-edit the guard exists for, and under K19 a value written inside the
+    # checkout cannot smuggle the guard to where it points.
     module, images, checkpoint, _results = predict_cli
-    outside = tmp_path / "outside"
+    outside = tmp_path / "owned-typo"
+    if not _directory_link(outside, project_scratch / "results-link"):
+        pytest.skip("this platform refused to make a directory link")
     monkeypatch.setattr(
-        "blobcount.config.DEFAULT_CONFIG_PATH", _cli_config(tmp_path, outside)
+        "blobcount.config.DEFAULT_CONFIG_PATH",
+        _cli_config(
+            tmp_path,
+            project_scratch / "results-link",
+            paths={"labels": str(tmp_path / "owned" / "labels")},
+        ),
     )
     assert module.main(["--dir", str(images), "--checkpoint", str(checkpoint)]) == 2
-    assert "project root" in capsys.readouterr().err
-    assert not outside.exists(), "a refused run wrote nothing"
+    err = capsys.readouterr().err
+    assert "refusing to write" in err, err
+    assert "project root" in err, err
+    assert sorted(path.name for path in outside.iterdir()) == [], (
+        "a refused run wrote nothing through the link"
+    )
 
 
 def test_predict_refuses_a_directory_holding_no_images(predict_cli, capsys, tmp_path, monkeypatch):
@@ -712,6 +735,35 @@ _PATCHES = [
     _handoff_row("A", LABEL_BY_CLASS["normal"], "A/normal_2.png"),
     _handoff_row("B", LABEL_BY_CLASS["normal"], "B/normal_3.png"),
 ]
+
+
+def _directory_link(target: Path, link: Path) -> bool:
+    """Make `link` a directory link to `target`; report whether this platform allowed it.
+
+    The same helper `tests/test_evaluate.py` states for its own junction test, kept
+    here rather than imported across test modules: `os.symlink` needs a privilege a
+    test suite should not assume, and `mklink /J` is the Windows form that needs none.
+    `stdout`/`stderr` are discarded rather than captured as text, for the reason the
+    sibling file measured: `mklink` echoes the two paths back, the project root holds
+    `Masaüstü`, and `subprocess` decodes that with the machine's cp1254 — which raises
+    `UnicodeDecodeError` inside the reader thread and surfaces as a warning
+    `filterwarnings = ["error"]` turns into a failed run.
+    """
+    target.mkdir(parents=True, exist_ok=True)
+    try:
+        link.symlink_to(target, target_is_directory=True)
+        return True
+    except (OSError, NotImplementedError, AttributeError):
+        pass
+    if sys.platform.startswith("win"):
+        import subprocess
+
+        made = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+        )
+        return made.returncode == 0
+    return False
 
 
 @pytest.fixture
@@ -927,16 +979,36 @@ def test_gradcam_releases_the_hooks_when_the_drawing_raises(gradcam_cli, monkeyp
 
 
 def test_gradcam_refuses_a_results_directory_outside_the_project(
-    gradcam_cli, capsys, tmp_path, monkeypatch
+    gradcam_cli, project_scratch, capsys, tmp_path, monkeypatch
 ):
+    # Re-pointed at the invariant that survives K14. The results directory the
+    # configuration names sits inside the checkout, so it is owned; the `gradcam`
+    # subdirectory this run would draw its figures into is a **link** that resolves
+    # to a *sibling* of the tree the same configuration says the project owns —
+    # `tmp_path/owned-typo`, beside the owned `tmp_path/owned` — which is neither
+    # the configured path itself nor below it, so the guard refuses it and no figure
+    # is written through the link. The old staging pointed `paths.results` itself at
+    # `tmp_path`, which made the target one the configuration had just named — owned
+    # by definition — and the refusal asserted the superseded invariant "everything
+    # outside the checkout is refused". A link resolving to the near-miss beside the
+    # owned tree is the mistyped `--out` the guard exists for, and resolving before
+    # comparing is what has always made a link unable to point out.
     module, handoff, checkpoint, _results = gradcam_cli
-    outside = tmp_path / "outside"
+    results = project_scratch / "results"
+    results.mkdir()
+    outside = tmp_path / "owned-typo"
+    if not _directory_link(outside, results / "gradcam"):
+        pytest.skip("this platform refused to make a directory link")
     monkeypatch.setattr(
         "blobcount.config.DEFAULT_CONFIG_PATH",
-        _cli_config(tmp_path, outside, paths={"labels": str(tmp_path / "labels")}),
+        _cli_config(tmp_path, results, paths={"labels": str(tmp_path / "owned" / "labels")}),
     )
     assert module.main([
         "--labels", str(handoff), "--slide", "A", "--n", "1", "--checkpoint", str(checkpoint),
     ]) == 2
-    assert "project root" in capsys.readouterr().err
-    assert not outside.exists()
+    err = capsys.readouterr().err
+    assert "refusing to write" in err, err
+    assert "project root" in err, err
+    assert sorted(path.name for path in outside.iterdir()) == [], (
+        "no figure was written through the link"
+    )

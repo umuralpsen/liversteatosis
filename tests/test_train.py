@@ -789,16 +789,28 @@ def test_an_output_target_that_is_a_file_is_refused(cli, capsys):
     assert not (results / "fold_summary.csv").exists()
 
 
-def test_an_output_target_outside_the_project_is_refused(cli, tmp_path, capsys):
-    # The containment predicate is `blobcount.extract._is_below`, the one both sibling
-    # entry points use: `Proje-backup` starts with the characters of `Proje` and is a
-    # different directory, and the project root itself is not strictly below itself.
-    module, index, _label_root, _results = cli
-    outside = tmp_path / "escape"
-    outside.mkdir()
-    assert module.main(["--labels", str(index), "--out", str(outside)]) == 2
+def test_an_output_target_outside_the_project_is_refused(cli, tmp_path, monkeypatch, capsys):
+    # Re-pointed at the invariant that survives K14: a directory that is a *sibling*
+    # of the tree the configuration says this project owns — not the configured path
+    # itself, and not below it — is refused. The old staging refused an arbitrary
+    # directory under pytest's `tmp_path`, which the widened guard now owns, because
+    # the same configuration named a path there; that expectation encoded "everything
+    # outside the checkout is refused", the invariant K14 replaced. The mistyped
+    # `--out` this guard exists for is the near-miss — one directory off the owned
+    # tree — and naming it is a stronger assertion than naming an arbitrary location,
+    # because it pins the edge the widened guard still has to hold.
+    module, index, _label_root, results = cli
+    owned = tmp_path / "owned" / "labels"
+    owned.mkdir(parents=True)
+    monkeypatch.setattr(
+        "blobcount.config.DEFAULT_CONFIG_PATH",
+        _cli_config(tmp_path, owned, results),
+    )
+    sibling = tmp_path / "owned-typo"
+    sibling.mkdir()
+    assert module.main(["--labels", str(index), "--out", str(sibling)]) == 2
     assert "project root" in capsys.readouterr().err
-    assert sorted(path.name for path in outside.iterdir()) == []
+    assert sorted(path.name for path in sibling.iterdir()) == []
 
 
 def test_the_project_root_is_not_an_output_target(cli, capsys):

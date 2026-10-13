@@ -9,7 +9,15 @@ Pillow>=9.0
 opencv-python>=4.7
 matplotlib>=3.7
 
-# Whole-slide image (SVS) reading - required only for patch.py.
+# Pinned and declared rather than transitive: measured on Windows (Task 12),
+# `import torch` followed by `import sklearn.metrics` faults in the pyarrow C
+# extension, tests/conftest.py preloads sklearn to avoid it, and an unpinned
+# pandas can pull an ABI-incompatible build against the installed pyarrow —
+# the same fault by another route.
+pandas>=2.2.3,<3
+pyarrow>=15
+
+# Whole-slide image (SVS) reading - required by blobcount's patch extraction.
 # Note: openslide-python requires the OpenSlide binary library installed on the system.
 # On Windows, the binary can also be installed via "pip install openslide-bin".
 openslide-python>=1.3

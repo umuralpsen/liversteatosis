@@ -68,12 +68,15 @@ the cohort, the checkpoint or the output target, and never about this program. *
 - **The output target**, as this program's own check, and it is the same pair of refusals
   `bin/ablate_threshold.py` makes against both `paths.results` and the subdirectory it puts
   them in: a target that exists and is a file rather than a directory, and a target that is
-  not strictly below the project root. **Both paths are tested because both can be the one
+  not below a root this project owns — the checkout, or the parent of a configured
+  `paths.*` value. **Both paths are tested because both can be the one
   that is wrong** — a `paths.results` that is a regular file makes `results/evaluation`
   un-creatable, and a `paths.results: .` leaves `evaluation/` below the root while putting the
   results directory *at* it, so a guard on the subdirectory alone would write a JSON and a CSV
-  into the repository. The predicate is `blobcount.extract._is_below`, so "is this ours" has
-  one implementation in this project and not one per guard, and the check runs before the
+  into the repository. The predicate is `blobcount.extract.is_owned_path`, so "is this ours" has
+  one implementation in this project and not one per guard, and it follows the configuration
+  rather than the checkout alone, which is what lets a run write to a `paths.*` the data move
+  put outside the repository. The check runs before the
   handoff is read and before a checkpoint is loaded, so a mistyped `paths.results` costs a
   message rather than a run.
 - **The handoff**, as a `ConfigError`, an `OSError`, a `csv.Error` or a `ValueError`: a file
@@ -167,7 +170,7 @@ from blobcount.evaluate import (
     bootstrap_metric_intervals,
     evaluate_specimens,
 )
-from blobcount.extract import _is_below
+from blobcount.extract import is_owned_path
 from blobcount.models import build_model
 from blobcount.train import read_labels
 
@@ -283,10 +286,17 @@ def _refuse_output_target(results_dir: Path, target: Path) -> str | None:
     results end up somewhere this repository is not responsible for.
 
     **The file test runs before the containment test for each path, so a file is reported as
-    the typo it is.** The containment predicate is `blobcount.extract._is_below` rather than a
-    string comparison here: "is this ours" has one implementation in this project and not one
-    per guard, and the entry points that differ in what they *do* to a target do not differ in
-    what they decide is a target.
+    the typo it is.** The containment predicate is `blobcount.extract.is_owned_path` rather
+    than a string comparison here: "is this ours" has one implementation in this project
+    and not one per guard, and the entry points that differ in what they *do* to a target
+    do not differ in what they decide is a target. The roots it enforces are the ones the
+    project owns — the checkout, plus the parent of every configured `paths.*` value, the
+    set `blobcount.extract.allowed_roots` derives from the configuration at call time —
+    because a path the configuration names is by definition one this project owns, and a
+    rule written against the checkout alone would refuse the destinations the data move
+    put outside the repository. A link in the results tree is still resolved before it is
+    compared, so one that points under no owned root is a refusal whichever side of the
+    widen it lands on.
 
     The check returns a message and raises nothing, and it runs before the handoff is read and
     before a checkpoint is loaded, so a mistyped `paths.results` costs a message rather than a
@@ -298,10 +308,11 @@ def _refuse_output_target(results_dir: Path, target: Path) -> str | None:
                 f"refusing to write {path}: it exists and is a file rather than a directory, "
                 f"so it is a typo in paths.results and not a previous run"
             )
-        if not _is_below(path, PROJECT_ROOT):
+        if not is_owned_path(path):
             return (
                 f"refusing to write {path}: it is not strictly below the project root "
-                f"{PROJECT_ROOT}, so it is not a directory this project owns"
+                f"{PROJECT_ROOT} or the parent of a configured paths.* value, so it is "
+                f"not a directory this project owns"
             )
     return None
 

@@ -72,6 +72,7 @@ Declared interface, in `__all__` order:
         read_failures: int
         skipped_blank: bool
     OutputPathError
+    allowed_roots(active: Config | None = None) -> tuple[Path, ...]
     extract_slide(
         specimen: Specimen,
         out_dir: Path,
@@ -79,6 +80,7 @@ Declared interface, in `__all__` order:
         *,
         rows: list[dict],
     ) -> ExtractionStats
+    is_owned_path(target: Path, active: Config | None = None) -> bool
     is_tissue(patch: np.ndarray, threshold: float, gray_max: float) -> bool
     patches_dir(cfg: Config | None = None) -> Path
     prepare_output(
@@ -111,7 +113,9 @@ from blobcount.slides import SlideInfo, iter_coords_from_config, open_info_from_
 __all__ = [
     "ExtractionStats",
     "OutputPathError",
+    "allowed_roots",
     "extract_slide",
+    "is_owned_path",
     "is_tissue",
     "patches_dir",
     "prepare_output",
@@ -418,6 +422,105 @@ def _is_below(target: Path, root: Path) -> bool:
     return Path(root).resolve() in Path(target).resolve().parents
 
 
+def allowed_roots(active: Config | None = None) -> tuple[Path, ...]:
+    """The roots the project owns: the checkout, plus the parent of every
+    configured `paths.*` value the held roots do not already cover. Resolved,
+    deduplicated, order-stable.
+
+    **A path the configuration names is by definition one the project owns, and
+    the guard cannot know that from a constant.** `paths.patches` and `paths.labels`
+    name directories outside the checkout once the generated data moves out of the
+    OneDrive-synchronized tree, and a containment rule written against `PROJECT_ROOT`
+    alone refuses exactly those: the extraction and labelling command lines would
+    refuse their own default destinations and the pipeline could not run. The roots
+    are therefore derived from the configuration at call time rather than read from
+    a literal, so the predicate survives a later move without the location being
+    written into this file. `Config.path` expands `%VAR%` and `~`, which is how a
+    git-tracked YAML can name a user-local directory without naming this user's.
+
+    The *parent* of a configured value that is not already ours, and never the parent
+    of one that is. `prepare_output` deletes the directory it is handed, so
+    `paths.patches` itself has to be strictly below an owned root or the guard would
+    refuse the destination the configuration names for it — that is why the parent and
+    not the value. But a value already at or below a held root is owned by definition,
+    and its parent is one level *wider* than the tree the guard exists to bound:
+    `paths.results: "."` resolves to the checkout itself, the parent of that is the
+    checkout's parent, and the first form of this rule admitted it — measured,
+    `is_owned_path(PROJECT_ROOT)` was then True and a test run wrote `evaluation/` into
+    the repository root. So a configured value at or below a held root contributes
+    nothing, and only a value the held roots do not cover brings its parent in.
+
+    **Subsumption reads the value as the configuration writes it (K19), not as it
+    resolves.** "Inside the checkout" is a fact about what the configuration *says*;
+    where the value points is what the *guard* checks, and the guard still resolves
+    before it compares. The two readings differ only on a value written inside the
+    checkout that resolves outside it, and reading the resolved form there let the
+    configuration smuggle the guard out through a junction, a symlink or a `..`
+    — measured, `paths.results` as a junction inside the checkout resolving to a
+    directory beside the owned tree contributed the junction target's parent as a
+    root, and `paths.results: ".."` contributed OneDrive. The written form admits no
+    either: a value the configuration writes inside the checkout is covered, and the
+    guard then resolves it and refuses the escape. The values the relocation writes
+    *outside* the checkout are exactly the ones subsumption does not cover, so they
+    still bring their parents in and the pipeline still runs (K19's cost, accepted
+    in the ruling: a configuration that legitimately points at a junction inside the
+    checkout is refused rather than followed — visible, and recoverable by naming
+    the real path).
+
+    A `paths.*` key whose value `Config.path` refuses contributes no root rather
+    than raising, so a broken configuration narrows the allow-list instead of
+    widening it: `prepare_output` promises that every refusal arrives as an
+    `OutputPathError`, and a `ConfigError` escaping from here would give that
+    promise a second shape again. The command lines resolve the paths they use
+    inside their own `ConfigError` arms before any target is judged, so the skip
+    never hides a broken key from the run that configured it.
+
+    `active` defaults to the process-wide default configuration, because the guards
+    call this with nothing; a caller that holds its own `Config` passes it, so the
+    roots follow the configuration the run will actually use.
+    """
+    cfg = default_config() if active is None else active
+    # The checkout is the first root unconditionally, and the `paths.*` values are
+    # considered in declaration order so the result cannot depend on dict ordering.
+    roots: list[Path] = [PROJECT_ROOT.resolve()]
+    for key in (
+        "paths.slides",
+        "paths.patches",
+        "paths.labels",
+        "paths.results",
+        "paths.manifest",
+    ):
+        try:
+            written = cfg.path(key)
+        except ConfigError:
+            continue
+        # At-or-below rather than `_is_below`'s strictly-below, and lexical rather
+        # than resolved: a configured value that *is* a held root is as covered as
+        # one below it (K18's `paths.results: "."` is the measured case — the strict
+        # form admitted the checkout's parent for it), and "inside the checkout" is
+        # read as the configuration writes it, so a junction, a symlink or a `..`
+        # written inside the checkout cannot bring its destination's parent in
+        # (K19). `Path.parents` keeps `..` as a segment, so a value that climbs out
+        # is still written *inside* and covered here — the guard resolves it and
+        # refuses the escape.
+        if any(written == root or root in written.parents for root in roots):
+            continue
+        roots.append(written.parent.resolve())
+    return tuple(dict.fromkeys(roots))
+
+
+def is_owned_path(target: Path, active: Config | None = None) -> bool:
+    """True when `target` lies strictly below one of `allowed_roots()`.
+
+    The strictness is `_is_below`'s and is unchanged by the wider list of roots: a
+    root is not below itself, so a call that would delete or write into a root — the
+    checkout, the parent of a configured value — is a refusal and not an accident of
+    ownership. `prepare_output`'s protected-path rules on `paths.slides` and
+    `paths.manifest` sit above this predicate and are untouched by it.
+    """
+    return any(_is_below(target, root) for root in allowed_roots(active))
+
+
 def _protected_paths() -> tuple[tuple[str, Path], ...]:
     """Return the `(name, path)` pairs a run may not delete by clearing a directory.
 
@@ -462,8 +565,10 @@ def prepare_output(
     - the project root itself, and
     - `paths.slides` and `paths.manifest` themselves, and
     - any directory that contains `paths.slides` or `paths.manifest`, and
-    - anything not strictly below the project root, which covers a target outside the
-      project and one reached through a `..` that climbs out of it, and
+    - anything not strictly below an owned root — the checkout, or the parent of a
+      configured `paths.*` value, the set `allowed_roots` derives — which covers a
+      target outside all of them and one reached through a `..` that climbs out of
+      the checkout, and
     - a target that exists and is not a directory, which `shutil.rmtree` would refuse to
       remove. A file named by `--out` or by `paths.patches` is a typo rather than a
       previous run, and refusing it here is what stops a `NotADirectoryError` from
@@ -496,10 +601,12 @@ def prepare_output(
     covered and reaches the delete. That is the same catastrophe, so it is refused
     before the containment test rather than after it.
 
-    `root` defaults to the project root and `protected` to the configured slides and
-    manifest. Both are parameters so a test can state the boundary instead of
-    inheriting the checkout's, and so the containment rule has one implementation
-    rather than one per call site.
+    `root` defaults to the derived owned roots and `protected` to the configured
+    slides and manifest. Both are parameters so a test can state the boundary
+    instead of inheriting the configuration's; an explicit `root` keeps priority over
+    the derived ones and is checked against alone, so a caller that pins a boundary
+    keeps the pin, and the containment rule keeps one implementation rather than one
+    per call site.
     """
     target = Path(out_dir)
     boundary = Path(root) if root is not None else PROJECT_ROOT
@@ -538,10 +645,22 @@ def prepare_output(
                 f"refusing to delete {resolved}: {name} is at {item} and is inside it, so "
                 f"clearing this directory would destroy the source data"
             )
-    if not _is_below(resolved, boundary):
+    if root is not None:
+        # An explicit `root` keeps priority over the derived roots: a test that states
+        # a boundary means it, and that argument is not the configuration's business.
+        # The check is `_is_below` against `root` alone, exactly as it was before the
+        # roots were derived, so a caller that pins the boundary keeps the pin.
+        owned = _is_below(resolved, boundary)
+        detail = f"{boundary}"
+    else:
+        owned = is_owned_path(resolved)
+        detail = (
+            f"the project root {PROJECT_ROOT} or the parent of a configured paths.* value"
+        )
+    if not owned:
         raise OutputPathError(
-            f"refusing to delete {resolved}: it is not strictly below the project root "
-            f"{boundary}, so the target is not one this project owns"
+            f"refusing to delete {resolved}: it is not strictly below {detail}, "
+            f"so the target is not one this project owns"
         )
     if target.exists():
         if not target.is_dir():

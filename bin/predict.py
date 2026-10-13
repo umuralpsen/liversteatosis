@@ -20,8 +20,9 @@ and the guard is about *where*, not about whether.
 
 **The output target is guarded before an image is opened and before the checkpoint is
 read**, with the same two refusals its sibling entry points make and the same predicate,
-`blobcount.extract._is_below`: a target that exists and is a file rather than a directory,
-and a target that is not strictly below the project root. `paths.results` is a hand-edited
+`blobcount.extract.is_owned_path`: a target that exists and is a file rather than a directory,
+and a target that is not below a root this project owns — the checkout, or the parent of a
+configured `paths.*` value. `paths.results` is a hand-edited
 string in `configs/default.yaml` and this program writes a row per image into it, so a
 `paths.results: /` is how a study's predictions end up somewhere this repository is not
 responsible for. **Both refusals are the whole of the guard**, and a file at
@@ -48,7 +49,7 @@ configuration or the input rather than about this program:
   program writes one file into the results directory itself rather than into a
   subdirectory of it, which is the single-path shape `bin/train.py` already guards. A
   `paths.results: .` is refused here for the same reason it is refused there — the
-  directory would be the project root itself, which `_is_below` answers rather than a
+  directory would be the project root itself, which `is_owned_path` answers rather than a
   string comparison.
 - **The checkpoint and the backbone**, as an `OSError`, a `pickle.UnpicklingError`, a
   `RuntimeError` or a `ValueError`: a checkpoint that is not there; one that is not a
@@ -136,7 +137,7 @@ import torch
 
 from blobcount.config import PROJECT_ROOT, ConfigError, get_device, load
 from blobcount.data import build_transforms
-from blobcount.extract import _is_below
+from blobcount.extract import is_owned_path
 from blobcount.labeling import CLASS_NAMES
 from blobcount.models import build_model
 
@@ -223,8 +224,13 @@ def _refuse_output_target(results_dir: Path) -> str | None:
     **The file test runs before the containment test, so a file is reported as the typo
     it is.** A `paths.results` that is a regular file makes the `mkdir` below raise
     `NotADirectoryError`, and the project root itself is not strictly below itself, which
-    `_is_below` answers rather than a string comparison here: "is this ours" has one
-    implementation in this project and not one per guard.
+    `is_owned_path` answers rather than a string comparison here: "is this ours" has one
+    implementation in this project and not one per guard. The roots it enforces are the
+    ones the project owns — the checkout, plus the parent of every configured `paths.*`
+    value, the set `blobcount.extract.allowed_roots` derives from the configuration at
+    call time — because a path the configuration names is by definition one this project
+    owns, and a rule written against the checkout alone would refuse the destinations
+    the data move put outside the repository.
 
     The check returns a message and raises nothing, and it runs before an image is opened
     and before a checkpoint is loaded, so a mistyped `paths.results` costs a message rather
@@ -235,10 +241,11 @@ def _refuse_output_target(results_dir: Path) -> str | None:
             f"refusing to write {results_dir}: it exists and is a file rather than a "
             f"directory, so it is a typo in paths.results and not a previous run"
         )
-    if not _is_below(results_dir, PROJECT_ROOT):
+    if not is_owned_path(results_dir):
         return (
             f"refusing to write {results_dir}: it is not strictly below the project root "
-            f"{PROJECT_ROOT}, so it is not a directory this project owns"
+            f"{PROJECT_ROOT} or the parent of a configured paths.* value, so it is "
+            f"not a directory this project owns"
         )
     return None
 
@@ -256,7 +263,7 @@ def _load_weights(model, checkpoint: Path) -> None:
     loaded by path rather than a package: importing a sibling's private name would mean
     reaching into another entry point by path, and `bin/` exists so that each of its files
     can be read one at a time without having read the others. **The fix would be to move
-    this into `blobcount/`, where `blobcount.extract._is_below` is the precedent for a
+    this into `blobcount/`, where `blobcount.extract.is_owned_path` is the precedent for a
     predicate every entry point shares** — not to import it across `bin/`, which the
     `_print_table` docstring rules out and which this one follows.
 
