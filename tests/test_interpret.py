@@ -1,13 +1,14 @@
 """Tests for Grad-CAM, the overlay it is drawn on, and the two entry points.
 
-**Nothing here has been run against a real patch or a trained checkpoint.**
-`dataset/labels/` does not exist, the extraction that would fill it has never been run,
-and no checkpoint in this project has ever been trained — `bin/train.py` has never
-completed a fold. So `--checkpoint`, `--slide` and `--dir` have never been exercised
-against real input, and every figure and every probability below is computed over
-synthetic patches and a randomly initialised backbone written by this file. A reader
-must not take any property asserted here to mean the study has a result; `blobcount.train`
-and `blobcount.evaluate` say the same about their own numbers.
+**Nothing here reads the real cohort or a checkpoint a training run wrote.**
+The generated data lives outside the checkout — Task 14 moved it under `%LOCALAPPDATA%`
+(the `paths.patches` and `paths.labels` of `configs/default.yaml`) — and this suite does
+not depend on it: every figure and every
+probability below is computed over synthetic patches written into `tmp_path` and a
+randomly initialised backbone this file builds, so a property asserted here is a
+property of the code and not a measurement of a specimen. A reader must not take any
+of it to mean the study has a result; `blobcount.train` and `blobcount.evaluate` say the
+same about their own numbers.
 
 **The hooks this module holds are asserted by behaviour wherever a number can tell them
 apart, and by the hook table where it cannot.** `tests/test_interpret.py` measures that

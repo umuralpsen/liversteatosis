@@ -201,17 +201,20 @@ _ABSENT = "n/a"
 
 # The sentence the artifact carries about where its numbers came from, in the artifact rather
 # than in this file's docstring, where a reader of the file alone would not see it.
-# **It is written so that it is still true after Task 15 regenerates `results/`**: it states
-# what this run read, which is the handoff named beside it, and what this repository has not
-# yet produced. A run that asserts "synthetic" about its own input would be making a claim it
-# cannot check, and would be wrong the day the extraction runs.
+# **It states what this run read and what those labels are, and nothing about the state of
+# the repository**: an earlier draft asserted that no handoff had ever been written and no
+# checkpoint ever trained, which was true until the first real run and false the moment it
+# happened. A run that asserts "synthetic" about its own input would be making a claim it
+# cannot check, and would be wrong the day the extraction runs — the same reasoning, turned
+# on the sentence that coined it.
 _PROVENANCE = (
-    "computed from the patches named by `labels`, which a previous bin/label_patches.py run "
-    "wrote. This repository has never produced one: dataset/labels/ does not exist, the "
-    "extraction that would fill it has never been run, and no checkpoint in this project has "
-    "ever been trained, so unless that changes every number in this document is a function of "
-    "whatever a run was pointed at rather than of a specimen. blobcount.evaluate says the "
-    "same in its own module docstring"
+    "computed from the patches named by `labels` and the weights named by `checkpoint`, so "
+    "every number in this document is a function of those two inputs and of the cohorts "
+    "`evaluated_specimens` and `train_specimens` record. Where `labels` is the handoff "
+    "bin/label_patches.py writes, its labels are morphological blob counts made at the "
+    "configured threshold and not a pathologist's grade, so the ceiling of these numbers is "
+    "agreement with that counter: they are a pipeline verification, not a clinical cohort "
+    "result"
 )
 
 

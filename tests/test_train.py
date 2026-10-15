@@ -10,10 +10,10 @@ methodology this rebuild exists to remove and Task 15 regenerates them, so nothi
 reads or writes them: every run below is handed a directory under `tmp_path`.
 
 The cohort is four rows over two specimens and the patches are real PNGs written by this
-file, because there is no real one to read: `dataset/labels/` does not exist and the
-extraction that would fill it has never been run, so `labels.csv` has never been written
-and nothing has ever been trained against the cohort. Every number this module reports is
-therefore measured over synthetic patches.
+file, because the real handoff lives outside the checkout: Task 14 moved the generated
+data under `%LOCALAPPDATA%` (the `paths.patches` and `paths.labels` of
+`configs/default.yaml`), and a suite that trained on it would depend on gigabytes no clone
+carries. Every number this module reports is therefore measured over synthetic patches.
 """
 
 import csv

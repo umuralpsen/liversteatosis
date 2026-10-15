@@ -1,12 +1,13 @@
 """Tests for the metric record, the integrity guard, the intervals and the entry point.
 
 **Every test here scores a model this file wrote, and none of them reaches the network.**
-`dataset/labels/` does not exist, the extraction that would fill it has never been run and
-no checkpoint has ever been trained, so there is no cohort to evaluate and no weights to
-load: the cohort below is a handful of uniform PNGs written into `tmp_path`, and the backbone
-is a stand-in whose every prediction this file chooses. Every number asserted below is
-measured over those synthetic patches, and a reader of this file must not take any of it for
-a measurement of a specimen.
+The generated data lives outside the checkout — Task 14 moved it under `%LOCALAPPDATA%`
+(the `paths.patches` and `paths.labels` of `configs/default.yaml`) — and a suite that read it
+would depend on gigabytes no clone carries, so the cohort below is a handful of uniform
+PNGs written into `tmp_path`, and the
+backbone is a stand-in whose every prediction this file chooses. Every number asserted
+below is measured over those synthetic patches, and a reader of this file must not take
+any of it for a measurement of a specimen.
 """
 
 import csv
