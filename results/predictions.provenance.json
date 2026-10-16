@@ -1,0 +1,18 @@
+{
+  "artifacts": [
+    "predictions.csv"
+  ],
+  "provenance": "written by bin/predict.py from the images this run was pointed at and the weights named by `checkpoint`, so every row is a function of those two inputs and of the resolved parameters under `config`. `specimen` is what the `labels` handoff records for the patch and is empty for an image the handoff does not describe; `trained_on` marks a row whose specimen the caller stated the checkpoint was fitted on, and such a row is resubstitution over a specimen the model has already seen and not a measurement of one it has not. The probabilities are the softmax of the head this checkpoint carries, and they are the model's confidence and not a measurement of anything",
+  "checkpoint": "C:\\Users\\umura\\OneDrive\\Masaüstü\\Proje\\results\\best_model_fold0.pth",
+  "train_specimens": [
+    "5",
+    "6"
+  ],
+  "scored_specimen": "4",
+  "config": {
+    "project.device": "auto",
+    "training.architecture": "resnet18",
+    "training.num_classes": 2,
+    "training.input_size": 224
+  }
+}

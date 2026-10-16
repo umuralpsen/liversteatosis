@@ -1,11 +1,23 @@
 # --- Data and models (large files, not tracked) ---
-data/
+# `data/*` rather than a bare `data/`: git cannot re-include a file inside an
+# excluded directory, so a bare `data/` plus a negation would leave the manifest
+# ignored and invisible. `data/*` excludes the directory's contents while the one
+# negated path below comes back in. The manifest is the tracked provenance record
+# this project exists around; the six .svs slides beside it stay ignored here and
+# by the `*.svs` rule.
+data/*
+!data/manifest.yaml
 dataset/
 *.svs
 *.pth
 
 # Trained model weights inside the results folder (plots/metrics are kept)
 results/*.pth
+
+# The graduation-project archive: 10.1 GB, its contents were inspected on
+# 2026-09-27 and held no larger cohort, so it must not be committable by
+# accident even if the `*.zip` rule below is ever removed.
+Colab_Proje.zip
 
 # Report / documents (not tracked)
 pdf_output.txt
@@ -35,3 +47,10 @@ venv/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Superpowers SDD scratch workspace (ledger, briefs, review packages)
+.superpowers/
+
+# Test scratch trees: prepare_output refuses a target outside the project root, so
+# the tests that exercise it place their output inside the checkout
+.pytest-tmp/

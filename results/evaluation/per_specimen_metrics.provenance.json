@@ -1,0 +1,14 @@
+{
+  "artifacts": [
+    "medical_metrics.json",
+    "per_specimen_metrics.csv"
+  ],
+  "provenance": "computed from the patches named by `labels` and the weights named by `checkpoint`, so every number in this document is a function of those two inputs and of the cohorts `evaluated_specimens` and `train_specimens` record. Where `labels` is the handoff bin/label_patches.py writes, its labels are morphological blob counts made at the configured threshold and not a pathologist's grade, so the ceiling of these numbers is agreement with that counter: they are a pipeline verification, not a clinical cohort result",
+  "config": {
+    "project.seed": 42,
+    "training.architecture": "resnet18",
+    "training.num_classes": 2,
+    "evaluation.bootstrap_samples": 2000,
+    "evaluation.confidence_level": 0.95
+  }
+}

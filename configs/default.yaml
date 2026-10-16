@@ -1,0 +1,76 @@
+project:
+  seed: 42
+  device: auto
+
+paths:
+  slides: data
+  # The generated data moved out of the OneDrive-synchronized tree (Task 14,
+  # 2026-10-13): `dataset/` is 19.3 GB over 82,957 files and OneDrive charges per
+  # file, so it now lives at %LOCALAPPDATA%\UmurOS\dataset. The original relative
+  # values were `patches: dataset/patches` and `labels: dataset/labels`.
+  # `Config.path` expands %VAR% and ~ (blobcount/config.py), so this git-tracked
+  # file names a user-local directory without naming this user's, and the
+  # containment guard derives its allowed roots from these values rather than
+  # from a literal. `slides` and `manifest` stay in the repository:
+  # blobcount/registry.py resolves a specimen's slide against the manifest's own
+  # directory, so the manifest and the staged slides cannot be separated from it.
+  # The value is single-quoted because a plain YAML scalar cannot start with `%`
+  # and a double-quoted one would read `\U` as an escape.
+  patches: '%LOCALAPPDATA%\UmurOS\dataset\patches'
+  labels: '%LOCALAPPDATA%\UmurOS\dataset\labels'
+  results: results
+  manifest: data/manifest.yaml
+
+extraction:
+  target_mpp: 0.5
+  patch_size: 256
+  step_size: 256
+  tissue_percentile: 5
+  tissue_gray_max: 235
+
+blobs:
+  area_um2_min: 3.1
+  area_um2_max: 125.0
+  circularity_min: 0.6
+  gray_percentile: 95
+  morph_kernel_size: 3
+  morph_iterations: 2
+  stain_normalization: false
+
+labeling:
+  blob_threshold: 5
+
+ablation:
+  thresholds: [3, 5, 7, 10, 15, 20, 25, 30]
+
+training:
+  architecture: resnet18
+  pretrained: true
+  num_classes: 2
+  input_size: 224
+  batch_size: 32
+  epochs: 10
+  learning_rate: 0.0001
+  patience_early_stop: 3
+  patience_lr_scheduler: 3
+  lr_scheduler_factor: 0.5
+  use_weighted_sampler: true
+  num_workers: 4
+
+augmentation:
+  horizontal_flip: true
+  vertical_flip: true
+  rotation_degrees: 15
+  color_jitter_brightness: 0.15
+  color_jitter_contrast: 0.15
+  color_jitter_saturation: 0.1
+  color_jitter_hue: 0.05
+  affine_translate: 0.05
+
+evaluation:
+  bootstrap_samples: 2000
+  confidence_level: 0.95
+
+gradcam:
+  alpha: 0.4
+  colormap: jet

@@ -1,0 +1,134 @@
+{
+  "provenance": "written by bin/train.py by training leave-one-specimen-out over the specimens the handoff holds, so every number in this document is a function of that handoff, of the weights bin/label_patches.py wrote, of the resolved parameters under `config`, and of the seed `config` carries. **Each fold's figure is the epoch with the highest validation F1, and that validation set is the held-out specimen the figure is reported over**: with three specimens there is no third split, so every per-fold metric here is the best of up to `training.epochs` attempts on the very patches it is measured on and is an upper bound rather than an estimate of performance on unseen tissue. `summary.epoch_selection` records how many epochs each fold considered, which it chose and the mean over the ones it did not, and the per-epoch values are in `training_log_fold<n>.csv` beside this file. The labels those figures are measured against are morphological blob counts and not a pathologist's grade, so the ceiling is agreement with a hand-tuned counter",
+  "labels": "C:\\Users\\umura\\AppData\\Local\\UmurOS\\dataset\\labels\\labels.csv",
+  "summary": {
+    "n_folds": 3,
+    "mean_accuracy": 0.7659231855889067,
+    "mean_accuracy_std": 0.034337710091356,
+    "mean_precision": 0.6929019812228411,
+    "mean_precision_std": 0.22109255723311183,
+    "mean_recall": 0.6528260940439022,
+    "mean_recall_std": 0.31155292301611653,
+    "mean_f1": 0.6562586919040619,
+    "mean_f1_std": 0.25262292214171356,
+    "selected_epochs": [
+      {
+        "fold": 0,
+        "epoch": 5
+      },
+      {
+        "fold": 1,
+        "epoch": 2
+      },
+      {
+        "fold": 2,
+        "epoch": 3
+      }
+    ],
+    "epoch_selection": [
+      {
+        "fold": 0,
+        "held_out": "4",
+        "epochs_considered": 8,
+        "selected_epoch": 5,
+        "selected_val_f1": 0.29961089494163423,
+        "mean_val_f1": 0.2485997888739691,
+        "selected_on": "validation F1 on the held-out specimen, which is also the specimen the figure is reported over"
+      },
+      {
+        "fold": 1,
+        "held_out": "5",
+        "epochs_considered": 5,
+        "selected_epoch": 2,
+        "selected_val_f1": 0.8527284681130834,
+        "mean_val_f1": 0.8360908787096722,
+        "selected_on": "validation F1 on the held-out specimen, which is also the specimen the figure is reported over"
+      },
+      {
+        "fold": 2,
+        "held_out": "6",
+        "epochs_considered": 6,
+        "selected_epoch": 3,
+        "selected_val_f1": 0.8164367126574684,
+        "mean_val_f1": 0.5730719159788039,
+        "selected_on": "validation F1 on the held-out specimen, which is also the specimen the figure is reported over"
+      }
+    ],
+    "mean_epoch_val_f1": 0.5525875278541484,
+    "mean_epoch_val_f1_std": 0.2402792164360964
+  },
+  "per_fold": [
+    {
+      "fold": 0,
+      "epoch": 5,
+      "tp": 77,
+      "fp": 116,
+      "fn": 244,
+      "tn": 1398,
+      "train_loss": 0.1233607490497236,
+      "val_loss": 1.038249490589931,
+      "val_f1": 0.29961089494163423,
+      "val_accuracy": 0.8038147138964578,
+      "precision": 0.39896373056994816,
+      "recall": 0.2398753894080997,
+      "lr": 0.0001,
+      "held_out": "4"
+    },
+    {
+      "fold": 1,
+      "epoch": 2,
+      "tp": 1297,
+      "fp": 438,
+      "fn": 10,
+      "tn": 231,
+      "train_loss": 0.17787221017929297,
+      "val_loss": 0.8524359122910086,
+      "val_f1": 0.8527284681130834,
+      "val_accuracy": 0.7732793522267206,
+      "precision": 0.7475504322766571,
+      "recall": 0.9923488905891354,
+      "lr": 0.0001,
+      "held_out": "5"
+    },
+    {
+      "fold": 2,
+      "epoch": 3,
+      "tp": 1361,
+      "fp": 99,
+      "fn": 513,
+      "tn": 218,
+      "train_loss": 0.24088684264570476,
+      "val_loss": 0.6055534981947014,
+      "val_f1": 0.8164367126574684,
+      "val_accuracy": 0.7206754906435417,
+      "precision": 0.9321917808219178,
+      "recall": 0.7262540021344717,
+      "lr": 0.0001,
+      "held_out": "6"
+    }
+  ],
+  "config": {
+    "project.seed": 42,
+    "project.device": "auto",
+    "training.architecture": "resnet18",
+    "training.pretrained": true,
+    "training.num_classes": 2,
+    "training.input_size": 224,
+    "training.batch_size": 32,
+    "training.epochs": 10,
+    "training.learning_rate": 0.0001,
+    "training.patience_early_stop": 3,
+    "training.patience_lr_scheduler": 3,
+    "training.lr_scheduler_factor": 0.5,
+    "training.use_weighted_sampler": true,
+    "training.num_workers": 4,
+    "augmentation.horizontal_flip": true,
+    "augmentation.vertical_flip": true,
+    "augmentation.rotation_degrees": 15,
+    "augmentation.color_jitter_brightness": 0.15,
+    "augmentation.color_jitter_contrast": 0.15,
+    "augmentation.color_jitter_saturation": 0.1,
+    "augmentation.color_jitter_hue": 0.05,
+    "augmentation.affine_translate": 0.05
+  }
+}
