@@ -612,10 +612,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"extraction.patch_size rendered by the eval transform, and the first {args.n} "
         f"rows of each class are the ones taken, in the handoff's own order. The grid of "
         f"them is {target / _SUMMARY_NAME}. A figure says where the model attended for one "
-        f"class and nothing about whether that attention was right, and no checkpoint in "
-        f"this project has ever been trained — dataset/labels/ does not exist and the "
-        f"extraction that would fill it has never been run — so unless that changes these "
-        f"figures are a visualisation of whatever a run was pointed at"
+        f"class and nothing about whether that attention was right; these figures are a "
+        f"function of that checkpoint and of the handoff this run was pointed at"
     )
     return EXIT_OK
 

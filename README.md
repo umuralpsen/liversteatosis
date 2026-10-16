@@ -145,6 +145,57 @@ The configured range does **not** bracket the measured count distribution: 3741 
   <img src="results/label_analysis/threshold_ablation.png" width="85%" alt="Threshold ablation: per-specimen steatosis ratio at every swept threshold"/>
 </p>
 
+## Results
+
+**These numbers are a verification that the rebuilt pipeline runs end to end over the cohort the manifest admits; they are not a clinical cohort result.** Three specimens are cleared for training, which gives three leave-one-specimen-out folds, each training on two specimens and validating on the third. A three-fold mean over three specimens describes how this pipeline behaves on this dataset and nothing beyond it. Every figure below cites the committed artifact it was read from, and `make all` regenerates all of them.
+
+### Leave-one-specimen-out cross-validation
+
+One row per fold at the epoch that fold selected on validation F1, from `results/fold_summary.csv`. The mean and the population standard deviation over the three selected epochs are from `results/training_summary.json`:
+
+| Fold | Held-out specimen | Selected epoch | Accuracy | Precision | Recall | F1 |
+|------|-------------------|----------------|----------|-----------|--------|----|
+| 0 | 4 | 5 | 0.804 | 0.399 | 0.240 | 0.300 |
+| 1 | 5 | 2 | 0.773 | 0.748 | 0.992 | 0.853 |
+| 2 | 6 | 3 | 0.721 | 0.932 | 0.726 | 0.816 |
+| | | **Mean ± std** | **0.766 ± 0.034** | **0.693 ± 0.221** | **0.653 ± 0.312** | **0.656 ± 0.253** |
+
+The per-fold spread is the honest description of a three-specimen cohort. The fold that held out specimen 4 — the slide the labeling rule marks 17.5% steatotic, the lowest of the three — selected an epoch with an F1 of 0.300 (77 true positive, 116 false positive, 244 false negative, 1398 true negative); the folds that held out specimens 5 and 6 selected 0.853 and 0.816. Each fold stopped early past its selected epoch (after 8, 5 and 6 epochs respectively, against a configured maximum of 10), and no metric below is a final-epoch number.
+
+### Held-out evaluation of one fold
+
+`bin/evaluate.py` scores the fold-0 checkpoint — fitted on specimens 5 and 6 — over the specimen that fold held out. From `results/evaluation/medical_metrics.json`, over all 1835 patches of specimen 4:
+
+| Metric | Value |
+|--------|-------|
+| Accuracy | 0.804 |
+| Precision (PPV) | 0.399 |
+| Recall (sensitivity) | 0.240 |
+| Specificity | 0.923 |
+| F1 | 0.300 |
+| NPV | 0.851 |
+| AUC (ROC) | 0.716 |
+
+The bootstrap intervals this artifact carries are degenerate — every bound equals the point estimate — because the interval is drawn over specimens at the configured 2000 resamples and 95% level, and this evaluation scores a single specimen. A one-specimen resample cannot move, and the artifact records that rather than hiding it.
+
+### Grad-CAM
+
+`make gradcam` draws the first four rows of each class of the held-out specimen with the same fold-0 checkpoint (`results/gradcam/`):
+
+<p align="center">
+  <img src="results/gradcam/gradcam_summary.png" width="85%" alt="Grad-CAM overlays for the held-out specimen, from the fold-0 checkpoint"/>
+</p>
+
+A figure says where the model attended for one class and nothing about whether that attention was right.
+
+## Limitations
+
+- **The ground truth is a morphological blob counter, not a pathologist.** Every label — and therefore every number in this README — measures agreement with a hand-tuned counter (area 3.1–125 µm², circularity >= 0.6, at least 5 blobs), not diagnostic accuracy. No specimen in `data/manifest.yaml` carries a pathologist steatosis grade: `label_source` is null for all six.
+- **The ceiling of the reported performance is that counter.** A perfect model of these labels reproduces the counter exactly. Additional data cannot raise the ceiling, because the measured quantity is agreement with a heuristic and not with a grade, and none of these numbers is comparable to a study graded by pathologists.
+- **Three of the six specimens have no recoverable provenance and are excluded from reported results.** Specimens 1–3 were renamed to bare numbers during the graduation project; no case id, licence or ethics approval is recoverable, so `blobcount.registry.usable_for_training` excludes them, the reported pipeline never extracts them, and they remain usable for pipeline smoke tests only.
+- **The cohort is six specimens, three admitted; this is a pilot.** Three leave-one-specimen-out folds cannot support a clinical claim, and the numbers above are labelled a pipeline verification for exactly that reason.
+- **The stain is H&E only.** Every specimen is recorded as H&E in the manifest — a human judgement from the RGB brightfield acquisition, not a metadata value — and no other stain is represented, so nothing here extends to one.
+
 ## Method Details
 
 - **Patches:** 256 x 256 at a fixed 0.5 µm/px, a 128 µm field of view for every slide; an adaptive tissue filter drops background tiles before anything is labelled.

@@ -473,10 +473,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(
         f"\n{len(rows)} image(s) predicted with {args.checkpoint}: {tally}. The rows are "
         f"in {results_dir / _PREDICTIONS_NAME}, one per image in the order above, and the "
-        f"probabilities are the softmax of the head this checkpoint carries. No checkpoint "
-        f"in this project has ever been trained — dataset/labels/ does not exist and the "
-        f"extraction that would fill it has never been run — so unless that changes these "
-        f"rows are a function of whatever a run was pointed at rather than of a specimen"
+        f"probabilities are the softmax of the head this checkpoint carries. Every row is a "
+        f"function of that checkpoint and of the images this run was pointed at, and "
+        f"nothing here says which specimen, if any, the checkpoint was fitted on"
     )
     return EXIT_OK
 

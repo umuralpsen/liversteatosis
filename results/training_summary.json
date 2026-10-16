@@ -1,0 +1,78 @@
+{
+  "labels": "C:\\Users\\umura\\AppData\\Local\\UmurOS\\dataset\\labels\\labels.csv",
+  "summary": {
+    "n_folds": 3,
+    "mean_accuracy": 0.7659231855889067,
+    "mean_accuracy_std": 0.034337710091356,
+    "mean_precision": 0.6929019812228411,
+    "mean_precision_std": 0.22109255723311183,
+    "mean_recall": 0.6528260940439022,
+    "mean_recall_std": 0.31155292301611653,
+    "mean_f1": 0.6562586919040619,
+    "mean_f1_std": 0.25262292214171356,
+    "selected_epochs": [
+      {
+        "fold": 0,
+        "epoch": 5
+      },
+      {
+        "fold": 1,
+        "epoch": 2
+      },
+      {
+        "fold": 2,
+        "epoch": 3
+      }
+    ]
+  },
+  "per_fold": [
+    {
+      "fold": 0,
+      "epoch": 5,
+      "tp": 77,
+      "fp": 116,
+      "fn": 244,
+      "tn": 1398,
+      "train_loss": 0.1233607490497236,
+      "val_loss": 1.038249490589931,
+      "val_f1": 0.29961089494163423,
+      "val_accuracy": 0.8038147138964578,
+      "precision": 0.39896373056994816,
+      "recall": 0.2398753894080997,
+      "lr": 0.0001,
+      "held_out": "4"
+    },
+    {
+      "fold": 1,
+      "epoch": 2,
+      "tp": 1297,
+      "fp": 438,
+      "fn": 10,
+      "tn": 231,
+      "train_loss": 0.17787221017929297,
+      "val_loss": 0.8524359122910086,
+      "val_f1": 0.8527284681130834,
+      "val_accuracy": 0.7732793522267206,
+      "precision": 0.7475504322766571,
+      "recall": 0.9923488905891354,
+      "lr": 0.0001,
+      "held_out": "5"
+    },
+    {
+      "fold": 2,
+      "epoch": 3,
+      "tp": 1361,
+      "fp": 99,
+      "fn": 513,
+      "tn": 218,
+      "train_loss": 0.24088684264570476,
+      "val_loss": 0.6055534981947014,
+      "val_f1": 0.8164367126574684,
+      "val_accuracy": 0.7206754906435417,
+      "precision": 0.9321917808219178,
+      "recall": 0.7262540021344717,
+      "lr": 0.0001,
+      "held_out": "6"
+    }
+  ]
+}
