@@ -323,6 +323,14 @@ def _staged_slides():
         reason="openslide cannot be imported, so no .svs can be opened; install the "
         "native library (the openslide-bin wheel on Windows and macOS, a system "
         "libopenslide0 on Linux, which openslide-bin has no wheel for)",
+        # **Stated, because the default is a dated debt rather than a neutral.** A native
+        # binding is usually absent with `ModuleNotFoundError`, which `importorskip`
+        # skips on; a wrapper that finds the package and cannot load the DLL raises a
+        # *plain* `ImportError`, and `importorskip` raises a `PytestDeprecationWarning`
+        # for that instead — which under this suite's `filterwarnings = ["error"]` is a
+        # failure, not a skip. Measured on a module whose import raises plain
+        # `ImportError`; the warning says it becomes an error by default in pytest 9.1.
+        exc_type=ImportError,
     )
     slides = sorted(default_config().path("paths.slides").glob("*.svs"))
     if not slides:

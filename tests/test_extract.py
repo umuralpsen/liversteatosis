@@ -60,6 +60,11 @@ def _pil():
     return pytest.importorskip(
         "PIL.Image",
         reason="Pillow cannot be imported, so no region can be built or no PNG written",
+        # A native wheel absent with a plain `ImportError` is a `PytestDeprecationWarning`
+        # rather than a skip, and a deprecation warning is a failure under this suite's
+        # `filterwarnings = ["error"]`. The guard is the one that skips; naming the
+        # exception is what keeps it skipping.
+        exc_type=ImportError,
     )
 
 
@@ -159,6 +164,14 @@ def _staged_slide():
         reason="openslide cannot be imported, so no .svs can be opened; install the "
         "native library (the openslide-bin wheel on Windows and macOS, a system "
         "libopenslide0 on Linux, which openslide-bin has no wheel for)",
+        # **Stated, because the default is a dated debt rather than a neutral.** A native
+        # binding is usually absent with `ModuleNotFoundError`, which `importorskip`
+        # skips on; a wrapper that finds the package and cannot load the DLL raises a
+        # *plain* `ImportError`, and `importorskip` raises a `PytestDeprecationWarning`
+        # for that instead — which under this suite's `filterwarnings = ["error"]` is a
+        # failure, not a skip. Measured on a module whose import raises plain
+        # `ImportError`; the warning says it becomes an error by default in pytest 9.1.
+        exc_type=ImportError,
     )
     slides = sorted(load().path("paths.slides").glob("*.svs"))
     if not slides:
@@ -170,7 +183,10 @@ def _staged_slide():
 
 
 def _install_fake_slide(monkeypatch, slide):
-    pytest.importorskip("openslide")
+    # `exc_type` for the measured reason the other guards carry: a plain `ImportError` from
+    # the binding makes `importorskip` raise a deprecation warning, which this suite's
+    # `filterwarnings = ["error"]` turns into a failure.
+    pytest.importorskip("openslide", exc_type=ImportError)
     monkeypatch.setattr("openslide.OpenSlide", lambda path: slide)
     return slide
 
@@ -645,7 +661,8 @@ def test_read_patch_honours_an_overridden_patch_size(monkeypatch):
 
 def test_read_patch_resizes_with_area_interpolation(monkeypatch):
     cv2 = pytest.importorskip("cv2", reason="opencv cannot be imported, so the read "
-                                "cannot be resized and no patch can be produced")
+                                "cannot be resized and no patch can be produced",
+                                exc_type=ImportError)
     Image = _pil()
     slide = _install_fake_slide(monkeypatch, FakeSlide())
     info = _plan(load())
@@ -861,7 +878,7 @@ def test_out_of_bounds_read_on_a_real_slide_is_rejected():
 
 def test_real_patches_from_the_planned_grid_survive_the_guard():
     _, slides = _staged_slide()
-    openslide = pytest.importorskip("openslide")
+    openslide = pytest.importorskip("openslide", exc_type=ImportError)
     path = next(item for item in slides if item.stem == "2")
     cfg = load()
     info = open_info_from_config(path, "2", cfg)

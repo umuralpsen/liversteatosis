@@ -29,6 +29,11 @@ def _cv2():
         "cv2",
         reason="opencv-python cannot be imported, so no disc can be drawn and no "
         "patch can be thresholded, opened or contoured",
+        # A native wheel absent with a plain `ImportError` is a `PytestDeprecationWarning`
+        # rather than a skip, and a deprecation warning is a failure under this suite's
+        # `filterwarnings = ["error"]`. The guard is the one that skips; naming the
+        # exception is what keeps it skipping.
+        exc_type=ImportError,
     )
 
 

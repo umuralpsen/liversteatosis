@@ -51,6 +51,11 @@ def _pil():
     return pytest.importorskip(
         "PIL.Image",
         reason="Pillow cannot be imported, so no patch can be written or read",
+        # A native wheel absent with a plain `ImportError` is a `PytestDeprecationWarning`
+        # rather than a skip, and a deprecation warning is a failure under this suite's
+        # `filterwarnings = ["error"]`. The guard is the one that skips; naming the
+        # exception is what keeps it skipping.
+        exc_type=ImportError,
     )
 
 
