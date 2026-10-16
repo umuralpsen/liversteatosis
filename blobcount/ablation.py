@@ -860,14 +860,16 @@ def _thresholds(cfg: Config) -> tuple[int, ...]:
     swept: `!!binary 'MzU='` is a `bytes`, which is a `Sequence` and iterated as the two
     thresholds 51 and 53, and a `!!set {3, 5}` iterated in an order YAML did not choose —
     while the same bytes value was refused as an *entry*, which is the inconsistency this
-    check ends. **`load` refuses both of these now** — `ablation.thresholds` is declared
-    `list` in `blobcount.config.KEY_TYPES`, so `!!binary` and `!!set` are refused there with
-    a `ConfigError` naming the key before this function is reached, and
+    check ends. **`load` refuses both of these, and so does `Config.__init__` since
+    2026-10-16** — `ablation.thresholds` is declared `list` in `blobcount.config.KEY_TYPES`,
+    so `!!binary` and `!!set` are refused at load with a `ConfigError` naming the key, and
+    the one route that used to get under that refusal is now closed too, so no `Config`
+    carries the value at all.
     `tests/test_config.py::test_a_thresholds_key_that_is_not_a_list_is_refused` is the test
-    that says so. This check is what remains for a `Config` built in memory, which is public
-    and constructible, and `tests/test_ablation.py` now reaches this function that way
-    because the file route no longer does. `str` and `bytes` are excluded by name because
-    they are
+    that says so, and it is the earlier and better refusal. **This check is what remains for
+    a caller that is not a `Config`** — anything answering `get`, which is all this function
+    needs — and `tests/test_ablation.py` reaches it through a stand-in for exactly that.
+    `str` and `bytes` are excluded by name because they are
     sequences — of characters, and of each other — so a `Sequence` test alone would sweep
     `'35'` the way it sweeps `b"35"`; a `set` and a mapping are not sequences at all and
     are refused by the same test. **This is not a YAML type policy**, which no caller

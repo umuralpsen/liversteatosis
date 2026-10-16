@@ -1079,6 +1079,33 @@ def test_thresholds_accepts_a_count_too_large_to_be_a_float():
     assert swept[huge]["pooled_steatosis_ratio"] == 0.0
 
 
+class _UntypedThresholds:
+    """A stand-in for the one method `_thresholds` reads.
+
+    **This class exists because `Config.__init__` type-checks as of 2026-10-16**, so a
+    `Config` can no longer carry a value of the wrong type for `ablation.thresholds` and
+    there is nothing left to hand `_thresholds` that `load` refuses first. Before that,
+    `Config({"ablation": {"thresholds": b"35"}})` was the way these tests reached the
+    function's own check, and they read that route's history in
+    `tests/test_config.py::test_a_thresholds_key_that_is_not_a_list_is_refused`.
+
+    **What is given up, stated rather than hidden:** these tests no longer prove that a
+    `Config` carrying a mistyped key is caught here, because no such `Config` can exist.
+    What they still prove — and what is the reason the check stays in the function rather
+    than being deleted along with its route — is that `_thresholds` answers the wrong key
+    with a refusal of its own, for a caller that is not a `Config` and so was never inside
+    the constructor's reach.
+    """
+
+    def __init__(self, value):
+        self._value = value
+
+    def get(self, key, default=None):
+        if key != "ablation.thresholds":
+            raise AssertionError(f"_thresholds read an unexpected key: {key!r}")
+        return self._value
+
+
 @pytest.mark.parametrize(
     ("value", "as_repr"),
     [
@@ -1111,27 +1138,17 @@ def test_thresholds_refuses_a_key_that_is_not_a_sequence_of_thresholds(value, as
     # `TypeError` arm to "a key that is not a sequence" — which was, until this round, a
     # statement about an accident and not about a check.
     #
-    # **Built through `Config` directly, and the way it used to be built is why.**
-    # `ablation.thresholds` is declared `list`, so `load` refuses both of these as a
-    # `ConfigError` naming the key before `_thresholds` is reached — the test at the bottom
-    # of this file now pins *that* refusal instead, and it is the earlier and better one.
-    # Writing the value into a YAML file was the only way to deliver it to `_thresholds`
-    # while `load` typed overrides only; that hole is closed, so the check is exercised
-    # through the one route that still reaches it, and a reader wanting to know what a
-    # hand-edit does today reads
-    # `tests/test_config.py::test_a_thresholds_key_that_is_not_a_list_is_refused`.
-    # `_thresholds` keeps its own check because a `Config` is constructible in memory from
-    # any mapping and need not come from a file: `tests/test_config.py:157,164,169,657,663`
-    # build one that way, and the memoryview test two below builds another. Each of those
-    # lines is a `Config({...})` call; the two `paths.*` ones are the `Config({"paths":
-    # {"slides": 7}})` and `Config({"paths": {"slides": "   "}})` that `Config.path`'s two
-    # refusals are about, and `blobcount/config.py` points at them in that docstring.
+    # **Delivered through `_UntypedThresholds`, and why that is the only remaining
+    # route.** `ablation.thresholds` is declared `list`, so `load` refuses both of these
+    # as a `ConfigError` naming the key before `_thresholds` is reached, and since
+    # 2026-10-16 `Config.__init__` refuses them too — so a `Config` cannot carry the
+    # value at all. A reader wanting to know what a hand-edit does today reads
+    # `tests/test_config.py::test_a_thresholds_key_that_is_not_a_list_is_refused`, which
+    # is the earlier and better refusal.
     from blobcount import ablation
-    from blobcount.config import Config
 
-    cfg = Config({"ablation": {"thresholds": value}})
     with pytest.raises(TypeError) as refused:
-        ablation._thresholds(cfg)
+        ablation._thresholds(_UntypedThresholds(value))
     message = str(refused.value)
     # The value as it reads, and its type, because the YAML tag the user wrote is not what
     # they see back and `b'35'` names the shape where `!!binary 'MzU='` does not.
@@ -1147,24 +1164,20 @@ def test_thresholds_refuses_a_buffer_view_the_exclusion_tuple_missed():
     # thresholds 51 and 53. So the tuple named three of the four classes it was standing in
     # for, and a reader of it would conclude the shape was covered.
     #
-    # **Unreachable from a YAML file, and that is stated rather than used as the reason to
-    # skip it.** PyYAML emits `bytes` for `!!binary` and refuses `!!python` tags, and
-    # `yaml.safe_dump` cannot represent a memoryview at all — which is why this row is *not*
-    # in the parametrised test above. That test builds through `Config` for the reason given
-    # there, and this one builds the same way for a different one: a memoryview is the only
-    # value of the set that `safe_dump` cannot even write. It is refused because the exclusion
-    # means what it says rather than because the shape is a live hole.
+    # **Unreachable from a YAML file, and from a `Config` since 2026-10-16; that is stated
+    # rather than used as the reason to skip it.** PyYAML emits `bytes` for `!!binary` and
+    # refuses `!!python` tags, and `yaml.safe_dump` cannot represent a memoryview at all.
+    # The check stays because the predicate means what it says rather than because the
+    # shape is a live hole on one particular route.
     #
-    # The fix is the tuple, not a list of every buffer type in the standard library: the
-    # predicate is a `Sequence` test, and the exclusions are the sequence types that carry
-    # *elements* rather than *thresholds*. `memoryview` and `bytearray` and `bytes` are all
-    # that, and a reader of the tuple can now see the whole set.
+    # The fix is the predicate, not a list of every buffer type in the standard library:
+    # the test is a `Sequence` test, and the exclusions are the sequence types that carry
+    # *elements* rather than *thresholds*. `memoryview`, `bytearray` and `bytes` are all
+    # that, and a reader of `blobcount.sequences` can now see the whole set.
     from blobcount.ablation import _thresholds
-    from blobcount.config import Config
 
-    cfg = Config({"ablation": {"thresholds": memoryview(b"35")}})
     with pytest.raises(TypeError) as refused:
-        _thresholds(cfg)
+        _thresholds(_UntypedThresholds(memoryview(b"35")))
     message = str(refused.value)
     assert "not a sequence of thresholds" in message
     assert "memoryview" in message

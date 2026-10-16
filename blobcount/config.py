@@ -31,6 +31,16 @@ substitutes for the other:
   and requires each declared key to appear there as a `cfg.get("...")` or
   `cfg.path("...")` literal. The source scan stops a declared key that no code
   reads from passing unnoticed.
+- `Config.__init__` applies the first two of those checks to the mapping it is handed,
+  because it was the one route into a `Config` that applied neither: a `Config` built in
+  memory is public and constructible, and `Config({"training": {"pretrained": 1}})`
+  inverted a run in silence. **One consequence, stated rather than left to be found
+  later:** a `Config` can no longer carry a value of the wrong type for its key, so the
+  library-level checks that existed to catch one — `blobcount.ablation._thresholds`'s
+  test on the key itself, `Config.path`'s non-string arm — are no longer reachable
+  through a `Config`. Both are kept, because they remain the right answer for a caller
+  that is not a `Config`, and `tests/test_ablation.py` reaches `_thresholds`'s through a
+  stand-in answering the one method it calls.
 
 Declared interface, in `__all__` order:
 
@@ -364,7 +374,7 @@ def _set_dotted(data: dict[str, Any], key: str, value: Any) -> None:
 
 
 class Config:
-    """Dotted-key view over loaded configuration data.
+    """Dotted-key view over configuration data that passed the schema.
 
     Every `get`, `set`, and `path` call is recorded, so `unknown_keys()` can
     report which declared keys no code has asked for. `load` records nothing
@@ -372,9 +382,35 @@ class Config:
     """
 
     def __init__(self, data: dict[str, Any], *, source: Path | None = None) -> None:
+        """Check `data` against the schema and take it as this configuration's contents.
+
+        **The constructor runs the same two checks `load` runs, and it is the only
+        remaining route that did not.** A `Config` built in memory from a mapping is a
+        public, documented way to make one — `load` needs a file and `set` needs a
+        `Config` to set on — and until this change it type-checked nothing:
+        `Config({"training": {"pretrained": 1}})` was a silent inversion, `int` being
+        truthy, with no error anywhere and no reader that could notice. That is the
+        defect Task 10's round exists to close, and a constructor that validates by name
+        is a weaker rule than one that validates on construction.
+
+        **The checks run before any value is taken, in `load`'s order: the key first and
+        the type second, both against the declared tables.** A mapping that is wrong in
+        both ways is reported for the key it got wrong first, which is the order `load`
+        reports them in, so a mistyped configuration reads the same whichever route
+        delivered it. `self._source` is assigned before the checks rather than after so
+        that every refusal names the file it came from, or `in-memory configuration` when
+        there is none.
+
+        **The values are checked, not copied.** `data` is this configuration's storage,
+        as it was before, and a widening under a declared `float` is written back through
+        `_set_dotted` so that what a later `get` returns is the value that was checked.
+        """
         self._data = data
         self._source = Path(source) if source is not None else None
-        self._read: set[str] = set()
+        self._read = set()
+        for key in _iter_keys(data):
+            _validate_key(key, self._describe())
+            _set_dotted(data, key, _check_value_type(key, _lookup(data, key)[1], self._describe()))
 
     def _keys(self) -> list[str]:
         """Return every dotted key currently declared by the loaded data."""
@@ -427,13 +463,16 @@ class Config:
         interpretation that yields a `Path` able to open, create, or stat.
 
         **The two refusals here are about the value and not about its type, and the
-        non-string arm is no longer reachable from a command line.** `load` types every
-        `paths.*` key as `str`, so a number under one is a `ConfigError` naming the key at
-        load, before any `Config` exists; both CLIs resolve their path keys inside the arm
-        that catches it. The arm stays because a `Config` is constructible in memory from any
-        mapping and need not come from a file — `Config({"paths": {"slides": 7}})` is the
-        shape, and `tests/test_config.py` builds it. The blank-string arm is reachable either
-        way: an empty string is the declared type and `load` makes no claim about values.
+        non-string arm is no longer reachable from any route into a `Config`.** `load`
+        types every `paths.*` key as `str`, `Config.set` types what it writes, and
+        `Config.__init__` types the mapping it is handed — so a number under a `paths.*`
+        key is a `ConfigError` naming the key before any `Config` exists. The arm stays
+        anyway, as the one check in this method that does not depend on the caller having
+        come through a typed route: `Config` is a public class over a dict it stores by
+        reference, and a caller that reaches into `_data` directly is not one this
+        project's schema can be held responsible for. The blank-string arm is reachable
+        every way: an empty string *is* the declared type and no check in this project
+        makes a claim about values.
         """
         raw = self.get(key)
         if not isinstance(raw, str):

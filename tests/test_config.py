@@ -241,6 +241,42 @@ def test_set_refuses_a_value_whose_type_is_not_the_declared_one():
         cfg.set("training.pretrained", 1)
 
 
+def test_the_constructor_typed_the_mapping_it_was_handed():
+    # **The back door `load` and `set` had closed, on the one route they could not.**
+    # `Config` is a public class constructible in memory, and the constructor type-checked
+    # nothing, so `Config({"training": {"pretrained": 1}})` handed `int` — truthy — to
+    # `build_model`'s pretrained path with no error anywhere and no reader that could
+    # notice. The value below is the one the file path was closed for, on the route the
+    # file path's closing could not reach.
+    with pytest.raises(ConfigError) as caught:
+        Config({"training": {"pretrained": 1}})
+    message = str(caught.value)
+    assert "key 'training.pretrained'" in message, message
+    assert "has type int" in message, message
+    assert "reads it as bool" in message, message
+
+
+def test_the_constructor_refuses_an_undeclared_key():
+    # The key half of the same two checks, and the half `load` has always applied. A
+    # constructor that types values but accepts unknown keys would be a weaker rule than
+    # the one `load` enforces, and a caller reaching for the in-memory route would have
+    # found it.
+    with pytest.raises(ConfigError, match="unknown key"):
+        Config({"training": {"never_read_by_code": 1}})
+
+
+def test_the_constructor_accepts_a_mapping_that_passes_the_schema():
+    # The negative space, so the two tests above cannot be satisfied by refusing
+    # everything. `blobs.area_um2_max` is the one widening the check admits, and it is
+    # admitted here too: the constructor runs `_check_value_type`, not `load`'s inline
+    # comparison, so a written-back `125.0` is what a later `get` returns.
+    cfg = Config({"project": {"seed": 42}, "blobs": {"area_um2_max": 125}})
+    assert cfg.get("project.seed") == 42
+    value = cfg.get("blobs.area_um2_max")
+    assert value == 125.0
+    assert type(value) is float
+
+
 def test_a_bool_declared_key_refuses_an_int_through_set():
     # The measured inversion, on the route that has no file. `int` is truthy, so this used
     # to write a value that `build_model` would read as "train from ImageNet weights" and
@@ -704,8 +740,31 @@ def test_path_expands_user_home(monkeypatch, tmp_path):
     assert cfg.path("paths.results") == tmp_path / "out"
 
 
-def test_path_rejects_a_non_string_value():
-    cfg = Config({"paths": {"slides": 7}})
+def test_a_non_string_under_a_path_key_is_refused_where_the_value_is_written():
+    # **This test used to reach `Config.path`'s non-string arm**, by building
+    # `Config({"paths": {"slides": 7}})` and calling `path` on it. It cannot any more, and
+    # the reason is the fix rather than a deletion: `Config.__init__` type-checks the
+    # mapping it is handed, so a number under a `paths.*` key is a `ConfigError` at
+    # construction. The refusal is still a `ConfigError` naming the key and both types;
+    # it simply arrives one step earlier, at the only place the wrong value can be
+    # written. `Config.path` keeps its own arm as the check that does not depend on the
+    # caller having come through a typed route.
+    with pytest.raises(ConfigError) as caught:
+        Config({"paths": {"slides": 7}})
+    message = str(caught.value)
+    assert "key 'paths.slides'" in message, message
+    assert "has type int" in message, message
+    assert "reads it as str" in message, message
+
+
+def test_path_rejects_a_non_string_value_that_reached_a_config_by_another_route():
+    # The arm `Config.path` keeps, exercised directly rather than through a constructor,
+    # because after the change above no `Config` can be built with the value it refuses.
+    # `Config` stores the mapping it is handed **by reference**, so a caller that reaches
+    # into `_data` after construction produces exactly this state and nothing in this
+    # project's schema is entitled to stop it.
+    cfg = Config({"paths": {"slides": "data"}})
+    cfg._data["paths"]["slides"] = 7
     with pytest.raises(ConfigError, match="must hold a path string"):
         cfg.path("paths.slides")
 
