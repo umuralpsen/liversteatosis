@@ -106,15 +106,23 @@ from blobcount.blobs import BlobParams, count_blobs, prepare_patch
 from blobcount.config import Config, resolved
 from blobcount.extract import INDEX_COLUMNS, prepare_output
 
-# The keys this stage reads and that decide what a patch's label is: the cut point, and
-# the seven blob-counter parameters behind it. **These eight and not the whole
-# configuration**, because every table in the README's ablation section is a function of
-# exactly these numbers and an artifact recording the cut point alone cannot be
-# re-examined — a reader who wants to know why specimen 4's mean blob count is 2.63 would
-# have the output of the rule and none of its inputs. Each is read through `resolved`, so
-# it is recorded here exactly as a `cfg.get` literal records it.
+# The keys this stage reads and that decide what a patch's label is: the cut point, the
+# patch size `load_patch` validates every array against, and the seven blob-counter
+# parameters behind the cut point. **These nine and not the whole configuration**, because
+# every table in the README's ablation section is a function of exactly these numbers and
+# an artifact recording the cut point alone cannot be re-examined — a reader who wants to
+# know why specimen 4's mean blob count is 2.63 would have the output of the rule and none
+# of its inputs. Each is read through `resolved`, so it is recorded here exactly as a
+# `cfg.get` literal records it.
+#
+# **`extraction.patch_size` was missing until 2026-10-16** and the block is now pinned by
+# a rule rather than by a list of values:
+# `tests/test_labeling.py::test_the_recorded_config_block_covers_every_key_this_stage_reads`
+# asserts that this tuple holds every key this module reads, so the next key read here and
+# not written here fails a test instead of reaching an artifact.
 _CONFIG_KEYS = (
     "labeling.blob_threshold",
+    "extraction.patch_size",
     "blobs.area_um2_min",
     "blobs.area_um2_max",
     "blobs.circularity_min",

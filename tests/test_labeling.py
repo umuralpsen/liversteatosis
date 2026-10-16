@@ -1,6 +1,7 @@
 import csv
 import importlib.util
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -10,7 +11,13 @@ import yaml
 
 from blobcount.config import DEFAULT_CONFIG_PATH, PROJECT_ROOT, load
 from blobcount.extract import write_index
-from blobcount.labeling import read_index
+from blobcount.labeling import _CONFIG_KEYS, read_index
+
+# A read of a declared key, in the shape `tests/test_config.py` scans for. Recorded
+# because this file has to answer the same question about a single module that file asks
+# about the package, and a second scan written as a second pattern would be a second
+# definition of "a read".
+_KEY_READ = re.compile(r"""\.(?:get|path)\(\s*["']([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+)["']""")
 
 
 def _pil():
@@ -541,10 +548,12 @@ def test_cli_labels_every_row_and_exits_zero(cli, capsys):
 def test_the_stats_record_the_labeling_rule_that_produced_them(cli):
     # **Spec §4 asks every stage for an artifact recording its inputs, resolved parameters
     # and outputs, and this one recorded the threshold and nothing else.** Every number in
-    # the README's ablation section is a function of the eight `blobs.*` keys below and of
-    # `labeling.blob_threshold`, so an artifact holding the last and not the first eight
-    # cannot be re-examined: a reader who wants to know why specimen 4's counts are 2.63
-    # has the answer's output and none of its inputs.
+    # the README's ablation section is a function of the eight `blobs.*` keys below, of
+    # `labeling.blob_threshold` and of the `extraction.patch_size` every patch array is
+    # validated against, so an artifact holding the last and not the first nine cannot be
+    # re-examined: a reader who wants to know why specimen 4's counts are 2.63 has the
+    # answer's output and none of its inputs. The values here are this configuration's; the
+    # rule that keeps the list and the reads in step is the next test.
     #
     # **The keys and not the whole configuration**, for the reason `blobcount.config.
     # resolved` gives, and read through it so each is recorded as a reader the source scan
@@ -554,6 +563,7 @@ def test_the_stats_record_the_labeling_rule_that_produced_them(cli):
     written = json.loads((out / "labeling_stats.json").read_text(encoding="utf-8"))
     assert written["config"] == {
         "labeling.blob_threshold": 5,
+        "extraction.patch_size": 256,
         "blobs.area_um2_min": 3.1,
         "blobs.area_um2_max": 125.0,
         "blobs.circularity_min": 0.6,
@@ -566,6 +576,60 @@ def test_the_stats_record_the_labeling_rule_that_produced_them(cli):
     # And it says what the labels are, which is the one thing a reader of a labels.csv
     # cannot work out for themselves.
     assert "not a pathologist" in written["provenance"]
+
+
+def test_the_recorded_config_block_covers_every_key_this_stage_reads(cli):
+    # **The rule, not the value.** The assertion above pins eight names and eight values,
+    # which is a fact about today's configuration and which cannot notice the ninth key
+    # `label_patches` reads: `extraction.patch_size` at the top of the function, passed to
+    # `load_patch` for every patch, absent from the block, absent from the test above. A
+    # patch array is a `(patch_size, patch_size, 3)` check and that check decides whether a
+    # run labels a patch or refuses it, so a block that cannot say what size was required
+    # cannot be re-examined by the reader the artifact exists for — and the sibling
+    # artifact, written by the same rule at `bin/ablate_threshold.py`, records it.
+    #
+    # **Two halves, and the second is the one that catches the next omission.** The first
+    # says every recorded key has a reader somewhere under `blobcount/`, which is the
+    # property `blobcount.config.resolved` documents and which
+    # `test_every_declared_config_key_is_read_by_package_source` enforces for declared
+    # keys; stated here as well because the two answer different questions and a future
+    # record in another stage would not reach the package-wide test. The second says every
+    # key *this module* reads is recorded, which is the direction nothing else in the suite
+    # checks in either direction for a single stage.
+    module, index, out = cli
+    assert module.main(["--index", str(index)]) == 0
+    recorded = list(_CONFIG_KEYS)
+    assert len(set(recorded)) == len(recorded), (
+        "the recorded block names a key twice: "
+        f"{[key for key in recorded if recorded.count(key) > 1]}"
+    )
+    reads = set(_KEY_READ.findall((PROJECT_ROOT / "blobcount" / "labeling.py").read_text(encoding="utf-8")))
+    package = set(
+        _KEY_READ.findall(
+            "\n".join(
+                path.read_text(encoding="utf-8")
+                for path in sorted((PROJECT_ROOT / "blobcount").rglob("*.py"))
+            )
+        )
+    )
+    # Neither scan is allowed to be empty: a pattern that stopped matching would leave both
+    # assertions below comparing an empty set and pass, which is this project's recurring
+    # defect and not worth repeating here.
+    assert reads, "no cfg.get read was found in blobcount/labeling.py; the scan is broken"
+    assert package, "no cfg.get read was found under blobcount/; the scan is broken"
+
+    unreadable = [key for key in recorded if key not in package]
+    assert not unreadable, (
+        "these keys are recorded in labeling_stats.json but no literal reader under "
+        f"blobcount/ can be found for them: {unreadable}"
+    )
+    unrecorded = [key for key in sorted(reads) if key not in set(recorded)]
+    assert not unrecorded, (
+        "blobcount/labeling.py reads these configuration keys and labeling_stats.json "
+        f"records none of them: {unrecorded}. The block is the inputs of the run, so a "
+        "read key missing from it is a reader of the artifact who cannot tell what the "
+        "run was given."
+    )
 
 
 def test_the_recorded_threshold_follows_a_hand_edited_configuration(cli):
