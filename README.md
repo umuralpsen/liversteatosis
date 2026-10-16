@@ -34,6 +34,8 @@ Two further entry points run after training: `bin/predict.py` (inference over an
 
 ### Reproduction
 
+GNU Make is a prerequisite: it is not bundled and must be on `PATH` (on Windows the install used here is MSYS2's, at `C:\msys64\usr\bin\make.exe`). Without it, run the stages directly — `RUN` in the Makefile is `PYTHONPATH=. python`, e.g. `set PYTHONPATH=. && python bin/extract_patches.py --help`.
+
 `make all` runs the five stages in that order and is the single command that reproduces every number reported in this README. The Makefile reads its paths and the training cohort from `configs/default.yaml` and `data/manifest.yaml` through the project's own code; it names no directory and no specimen itself.
 
 ```bash
@@ -147,7 +149,7 @@ The configured range does **not** bracket the measured count distribution: 3741 
 
 ## Results
 
-**These numbers are a verification that the rebuilt pipeline runs end to end over the cohort the manifest admits; they are not a clinical cohort result.** Three specimens are cleared for training, which gives three leave-one-specimen-out folds, each training on two specimens and validating on the third. A three-fold mean over three specimens describes how this pipeline behaves on this dataset and nothing beyond it. Every figure below cites the committed artifact it was read from, and `make all` regenerates all of them.
+**These numbers are a verification that the rebuilt pipeline runs end to end over the cohort the manifest admits; they are not a clinical cohort result.** Three specimens are cleared for training, which gives three leave-one-specimen-out folds, each training on two specimens and validating on the third. A three-fold mean over three specimens describes how this pipeline behaves on this dataset and nothing beyond it. Every figure below cites the committed artifact it was read from, and `make all` regenerates every number below — the Grad-CAM figure is the exception, drawn by `make gradcam`, which is not part of `all` (`Makefile:43`).
 
 ### Leave-one-specimen-out cross-validation
 
