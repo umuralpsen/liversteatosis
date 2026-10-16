@@ -13,28 +13,38 @@ downstream reads a directory that does not exist. The ids are safe — a specime
 carries no space — and the three paths are not, and they are the ones that carry 19 GB of
 generated data and the tree this repository refuses to commit.
 
-**The fix is a delimiter that is not whitespace and one `$(subst)` per field.** The
-shell prints `|`.join(...), so a path may hold any character except `|` and still be one
-word to `$(word N,...)`; each field then converts its own single separator back to a
-space, which is the one place the substitution has to happen and the one place a space
-inside a path is restored.
+**The fix is a placeholder inside the record, and one `$(subst)` per field.** The shell
+prints every space in the three directories as `@` and the records stay whitespace-
+separated, so a record carries no whitespace and is one word to `$(word N,...)`; each
+field converts its own placeholder back to a space, which is the one place a space inside
+a path is restored. **Not `|`, and this paragraph used to say so.** A `|` between records
+was tried and dropped: make splits on whitespace and on nothing else, so it would not have
+separated two records, it would have glued them into one word — the one thing
+`$(word N,...)` cannot take apart again.
 
-**Two tests, because there are two claims.** The live one runs the real `make` over a
-synthetic layout carrying a space in every field, which is the claim that can fail; it
-skips where `make` is not installed, and the reason is recorded rather than hidden. The
-shape test below it runs everywhere and asserts the transport is not whitespace-separated,
-so the property is not vacuously green on a machine with no `make` on it — the same
-reason `tests/test_optional_imports.py` asserts its own call count.
+**Three tests, because the claim has three ends, and the third was missing until
+2026-10-16.** The shape test runs everywhere and asserts the transport in the source text,
+so the property is not vacuously green on a machine with no `make` on it — the same reason
+`tests/test_optional_imports.py` asserts its own call count. The two live ones run the real
+`make` over a synthetic layout carrying a space in every field; both skip where `make` is
+not installed and record the reason rather than hiding it. The first reads make's
+*variables*, and on that alone it was satisfied while `make label` still handed the shell
+`--index C:/data/my patches/patches/patches.csv`, which `sh` split into three arguments.
+The second runs the real recipes — `PYTHON` pointed at a program that prints its own argv
+— so it sees the word splitting the shell does and the exact `argv` each stage is given.
 
 **The derived variables are recursively assigned (`=`, not `:=`) on purpose.** That is
-what lets the live test include the real Makefile, override `LAYOUT` with a synthetic
-layout, and read the real derivations: with `:=` the value is frozen at parse time and
-the probe would measure make's `:=` rather than this project's expression.
+what lets a live test include the real Makefile, override `LAYOUT` with a synthetic
+layout, and read the real derivations: with `:=` the value is frozen at parse time and the
+probe would measure make's `:=` rather than this project's expression. `INDEX` and
+`HANDOFF` were `:=` until the same date, one line below the fix, and the live test above
+could not see it: they came back holding the *real* configuration's paths.
 """
 
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -180,3 +190,118 @@ def test_a_configured_path_containing_a_space_survives_the_transport(tmp_path):
     assert printed["held_out"] == "4", done.stdout
     assert printed["trained"].split() == ["5", "6"], done.stdout
     assert printed["flags"] == "--train-specimens 5 --train-specimens 6", done.stdout
+
+
+# The six recipes that hand a path to a program, and the argv the shell must build for
+# each. `|` joins because it cannot occur in an argument here and it keeps a value
+# carrying a space as one string in the comparison below.
+#
+# **The ids are in this table and are not quoted, and that is the rule rather than an
+# oversight**: a specimen id carries no space (`Makefile`, on the ids), so `--slide 4`
+# reaches the shell as two arguments and `--train-specimens 5` as four, which is what
+# the program parses. The three directory-derived values are the ones a space can reach,
+# so each of them is one argument here whether or not the configuration it came from
+# happens to hold one.
+_PATH_RECIPES = {
+    "label": (
+        "bin/label_patches.py|--index|C:/data/my patches/patches/patches.csv"
+    ),
+    "ablate": (
+        "bin/ablate_threshold.py|--index|C:/data/my patches/patches/patches.csv"
+    ),
+    "train": "bin/train.py|--labels|C:/data/my labels/labels/labels.csv",
+    "evaluate": (
+        "bin/evaluate.py|--labels|C:/data/my labels/labels/labels.csv"
+        "|--checkpoint|C:/data/my results/results/best_model_fold0.pth"
+        "|--specimens|4|--train-specimens|5|--train-specimens|6"
+        "|--selection-cohort|4"
+    ),
+    "predict": (
+        "bin/predict.py|--dir|C:/data/my labels/labels/steatosis"
+        "|--checkpoint|C:/data/my results/results/best_model_fold0.pth"
+        "|--labels|C:/data/my labels/labels/labels.csv"
+        "|--specimen|4|--train-specimens|5|--train-specimens|6"
+    ),
+    "gradcam": (
+        "bin/gradcam.py|--labels|C:/data/my labels/labels/labels.csv"
+        "|--slide|4|--checkpoint|C:/data/my results/results/best_model_fold0.pth"
+    ),
+}
+
+
+def _argv_stub(path: Path) -> str:
+    """Write a program that prints the arguments it was handed, joined by `|`.
+
+    It stands in for the `bin/*.py` a recipe names, reached through the route a real run
+    reaches it: `RUN` expands to `$(PYTHON)`, so a `PYTHON` of `<interpreter> <this file>`
+    puts the stub where the stage program would be and leaves the recipe line itself — the
+    Makefile's own, unedited — as the thing under test. `sys.executable` rather than the
+    word `python`, because the recipe runs under the MSYS2 shell and whether that shell's
+    `PATH` names this interpreter is a property of the machine rather than of the
+    Makefile. `|` cannot occur in an argument here, so it is a joiner that keeps a value
+    carrying a space as one string in the comparison below.
+    """
+    path.write_text(
+        "import sys\n"
+        "print('|'.join(sys.argv[1:]))\n",
+        encoding="utf-8",
+    )
+    return f'"{Path(sys.executable).as_posix()}" "{path.as_posix()}"'
+
+
+@pytest.mark.parametrize("target", sorted(_PATH_RECIPES))
+@pytest.mark.skipif(_make() is None, reason="no GNU make on PATH or at C:/msys64/usr/bin")
+def test_a_configured_path_containing_a_space_reaches_the_shell_as_one_argument(
+    target, tmp_path
+):
+    # **The half the test above cannot reach.** `test_a_configured_path...` reads make's
+    # variables, so it stops one step before the defect it names: the shell is a separate
+    # program with its own word splitting, and `$(INDEX)` arriving intact in make's memory
+    # says nothing about what `sh` receives. Both halves were open at once on the real
+    # Makefile. `INDEX` and `HANDOFF` were simply-expanded, so they froze when the file was
+    # read — before `override LAYOUT` below is seen — and came back holding the *real*
+    # configuration's paths; and no recipe quoted them, so the shell split
+    # `--index C:/data/my patches/patches/patches.csv` into `--index`, `C:/data/my`,
+    # `patches/patches/patches.csv`. Verified by probe on that file: the variable printed
+    # correctly, the shell received it in two pieces.
+    #
+    # `PYTHON` is overridden in the probe rather than the recipes being copied into it, so
+    # the command line under test is the one in the Makefile. A probe with its own `print:`
+    # target holding a hand-written `--index $(INDEX)` would assert the probe's quoting and
+    # not the Makefile's, which is the shape of check that let the original stand.
+    layouts = {
+        "PATCHES": "C:/data/my patches/patches",
+        "LABELS": "C:/data/my labels/labels",
+        "RESULTS": "C:/data/my results/results",
+    }
+    synthetic = " ".join(
+        value.replace(" ", _SPACE_WRITTEN_AS) for value in layouts.values()
+    ) + " 4 5 6"
+    python = _argv_stub(tmp_path / "argv.py")
+    # Overrides written into the probe rather than given on the command line: a command-line
+    # value carrying spaces has to survive the MSYS2 runtime's own argv parsing before make
+    # ever sees it, and a second parser between the test and the thing under test is one
+    # more thing to be wrong about for no gain.
+    probe = tmp_path / "probe.mk"
+    probe.write_text(
+        "include " + MAKEFILE.as_posix() + "\n"
+        f"override LAYOUT := {synthetic}\n"
+        f"override PYTHON := {python}\n",
+        encoding="utf-8",
+    )
+    done = subprocess.run(
+        [_make(), "-f", str(probe), *_shell_argument(), target],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        check=False,
+    )
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.strip().splitlines()[-1] == _PATH_RECIPES[target], (
+        f"the shell did not receive the arguments `make {target}` intends.\n"
+        f"expected: {_PATH_RECIPES[target]}\n"
+        f"received: {done.stdout.strip().splitlines()[-1]!r}\n"
+        "A value carrying a space arrives as two arguments when the recipe does not "
+        "quote it, and a simply-expanded INDEX or HANDOFF holds the real configuration "
+        "rather than this layout."
+    )
