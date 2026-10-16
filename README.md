@@ -24,7 +24,7 @@ The pipeline is a chain of `bin/` entry points. Each one reads its parameters fr
 
 | Order | Entry point | What it does |
 |-------|-------------|--------------|
-| 1 | `bin/extract_patches.py` | Tiles each specimen into 256 x 256 patches at a fixed 0.5 µm/px — a 128 µm field of view whatever the scanner's native magnification — and drops background tiles with an adaptive tissue filter. Writes the patch tree and `patches.csv`. |
+| 1 | `bin/extract_patches.py` | Tiles each specimen into 256 x 256 patches at a fixed 0.5 µm/px — a 128 µm field of view whatever the scanner's native magnification — and drops a background tile when its mean grayscale is at or above the single global cutoff `extraction.tissue_gray_max` (235). Writes the patch tree, `patches.csv` and `results/extraction_summary.json`. |
 | 2 | `bin/label_patches.py` | Labels every patch by counting morphological blobs in square microns at the patch's own achieved resolution; at least `labeling.blob_threshold` (5) blobs is steatosis. Writes the class tree and `labels.csv`. |
 | 3 | `bin/ablate_threshold.py` | Sweeps `ablation.thresholds` over the same index and reports the class distribution **per specimen** at every threshold. Writes `results/label_analysis/`. |
 | 4 | `bin/train.py` | Trains leave-one-specimen-out over the cohort the manifest admits, selecting each fold's epoch on validation F1. Writes `results/fold_summary.csv`, `results/training_summary.json`, a log and a checkpoint per fold. |
@@ -128,6 +128,8 @@ The ablation sweep exists because a pooled class ratio hides exactly the thing t
 
 Pooled over the three specimens the ratio is **0.583** (3502 of 6002), with a per-specimen spread of **0.680**. No pooled ratio at any swept threshold makes the per-specimen spread close, and the balance the pooled number appears to show at threshold 10 (0.475) is an average over one slide labelling 9% steatotic and another labelling 81% — a spread of 0.717, wider than at the selected 5 — not a property of any slide.
 
+**The spread is not separable from staining intensity, and the artifact says so in one number per slide.** The same file records `per_slide_gray_threshold`: the gray level above which a blob on that slide is not counted. It is **233.3** on specimen 4, **127.8** on 5 and **126.8** on 6 — and specimen 4's is within 1.7 of the 235 above which the extraction stage discards a whole tile. One per-slide number derived from staining intensity therefore drives the three ratios, the 0.680 spread and the count distributions behind them: at the selected threshold specimen 4's mean blob count is **2.63** with a **median of 0**, against means of 11.21 and 47.93 on the other two. A specimen whose windows sit near the filter's own ceiling has its blobs counted under a cutoff two slabs higher than the other two specimens get, so the per-specimen label spread and the per-slide staining intensity are one measurement here, not two that can be varied independently. This has been an open finding on this dataset since 2026-09-29 (E1d/E1e); the rebuilt pipeline reproduces the same numbers from its own artifact rather than inheriting them, which is a change of provenance and not of result. Spec §3.3 sanctions per-slide adaptive gray thresholds, so the rule is left as it is and characterised here.
+
 **The sweep**, one row per threshold (`n_steatosis` counts patches at or above the threshold):
 
 | Threshold | n_steatosis | n_normal | Pooled ratio | Per-specimen spread | Selected |
@@ -164,9 +166,11 @@ One row per fold at the epoch that fold selected on validation F1, from `results
 
 The per-fold spread is the honest description of a three-specimen cohort. The fold that held out specimen 4 — the slide the labeling rule marks 17.5% steatotic, the lowest of the three — selected an epoch with an F1 of 0.300 (77 true positive, 116 false positive, 244 false negative, 1398 true negative); the folds that held out specimens 5 and 6 selected 0.853 and 0.816. Each fold stopped early past its selected epoch (after 8, 5 and 6 epochs respectively, against a configured maximum of 10), and no metric below is a final-epoch number.
 
+**Every figure in this table is the best of up to ten attempts on the very specimens it is reported over, so it is an upper bound and not an estimate of performance on unseen tissue.** With three specimens there is no third split: the held-out specimen *is* the validation set, so the epoch that selected it is chosen by the maximum of the fold's own per-epoch F1s on those same patches. Averaging the epochs each fold ran rather than its best one gives per-fold F1s of **0.249 / 0.836 / 0.573** over the 8, 5 and 6 epochs in `results/training_log_fold0.csv`, `…fold1.csv` and `…fold2.csv` — a three-fold mean of **0.553** against the **0.656** selected-epoch headline. The gap is the optimism the headline carries and this table does not otherwise show. The per-fold epoch count, the epoch selected and both of those averages are in `results/training_summary.json` under `epoch_selection`, so the claim is checkable from an artifact and not only from this sentence; the logs carry the epochs themselves.
+
 ### Held-out evaluation of one fold
 
-`bin/evaluate.py` scores the fold-0 checkpoint — fitted on specimens 5 and 6 — over the specimen that fold held out. From `results/evaluation/medical_metrics.json`, over all 1835 patches of specimen 4:
+`bin/evaluate.py` scores the fold-0 checkpoint — fitted on specimens 5 and 6 — over the specimen that fold held out. **These are not a second result: they are the fold-0 row of the table above, re-derived by the evaluation stage from the same checkpoint over the same patches**, and they are not an independent estimate of anything. From `results/evaluation/medical_metrics.json`, over all 1835 patches of specimen 4:
 
 | Metric | Value |
 |--------|-------|
@@ -178,7 +182,7 @@ The per-fold spread is the honest description of a three-specimen cohort. The fo
 | NPV | 0.851 |
 | AUC (ROC) | 0.716 |
 
-The bootstrap intervals this artifact carries are degenerate — every bound equals the point estimate — because the interval is drawn over specimens at the configured 2000 resamples and 95% level, and this evaluation scores a single specimen. A one-specimen resample cannot move, and the artifact records that rather than hiding it.
+The bootstrap intervals this artifact carries are degenerate — every bound equals the point estimate — because the interval is drawn over **specimens**, at the configured 2000 resamples and 95% level, and this evaluation scores a single specimen. Resampling over specimens rather than patches is the correct unit: patches from one slide are not independent observations (spec §3.4). But a one-specimen resample cannot move, so every bound equals its point estimate and the interval carries no information about sampling variation. **This README states that; the artifact states it in its own `bootstrap` block as `"unit": "specimen"`, `"n_units": 1` and `"degenerate": true`.**
 
 ### Grad-CAM
 
@@ -196,11 +200,14 @@ A figure says where the model attended for one class and nothing about whether t
 - **The ceiling of the reported performance is that counter.** A perfect model of these labels reproduces the counter exactly. Additional data cannot raise the ceiling, because the measured quantity is agreement with a heuristic and not with a grade, and none of these numbers is comparable to a study graded by pathologists.
 - **Three of the six specimens have no recoverable provenance and are excluded from reported results.** Specimens 1–3 were renamed to bare numbers during the graduation project; no case id, licence or ethics approval is recoverable, so `blobcount.registry.usable_for_training` excludes them, the reported pipeline never extracts them, and they remain usable for pipeline smoke tests only.
 - **The cohort is six specimens, three admitted; this is a pilot.** Three leave-one-specimen-out folds cannot support a clinical claim, and the numbers above are labelled a pipeline verification for exactly that reason.
+- **Each reported figure is the maximum over up to ten epochs taken on the specimens it is reported over.** With three specimens the held-out specimen is the validation set, so the selected epoch is the best of the fold's own per-epoch F1s on those same patches. Every per-fold metric above — and the F1 of 0.656 with it — is an upper bound and not an estimate of performance on unseen tissue; the per-fold epoch means (0.249 / 0.836 / 0.573, mean 0.553) are in `results/training_summary.json` under `epoch_selection` and the per-epoch values are in `results/training_log_fold*.csv`.
+- **The per-specimen label spread is not separable from per-slide staining intensity.** One per-slide gray cutoff (`per_slide_gray_threshold`: 233.3 / 127.8 / 126.8) decides which patches each specimen calls steatotic, and specimen 4's sits just under the 235 above which the extraction stage discards a tile. The 0.175 / 0.661 / 0.855 ratios, the 0.680 spread and the mean blob counts of 2.63 (median 0) / 11.21 / 47.93 are therefore one measurement, not three slides differing biologically. Nothing here separates the two, and this has been an open finding on this dataset since 2026-09-29.
+- **The tissue filter has no background rejection, and its sensitivity is unmeasured.** The whole rule is `mean(grayscale) < extraction.tissue_gray_max` — one global constant, nothing per-patch — so it cannot tell a blank field from a flat field of tissue. Re-measured over the 6002 accepted windows of this cohort: **177 of them (2.95%), every one from specimen 4, have a grayscale standard deviation below 5 at a mean of 234.6**, against the filter's own ceiling of 235 — accepted windows that are uniform to within about one grey level. That share is specific to this definition of "flat" and this cohort; no measurement in this repository establishes what value of `tissue_gray_max` separates tissue from background across the grid.
 - **The stain is H&E only.** Every specimen is recorded as H&E in the manifest — a human judgement from the RGB brightfield acquisition, not a metadata value — and no other stain is represented, so nothing here extends to one.
 
 ## Method Details
 
-- **Patches:** 256 x 256 at a fixed 0.5 µm/px, a 128 µm field of view for every slide; an adaptive tissue filter drops background tiles before anything is labelled.
+- **Patches:** 256 x 256 at a fixed 0.5 µm/px, a 128 µm field of view for every slide; a single global mean-intensity cutoff, `extraction.tissue_gray_max` (235), drops a background tile before anything is labelled. It is one number applied to every tile of every slide, not a per-patch decision.
 - **Labels:** morphological blob counting in square microns (area 3.1–125 µm², circularity >= 0.6, per-slide adaptive gray threshold); at least 5 blobs is steatosis.
 - **Architecture:** ResNet18 (ImageNet pretrained), final layer changed from 512 -> 2.
 - **Input:** 224x224x3 RGB.
