@@ -10,7 +10,6 @@
   ],
   "scored_specimen": "4",
   "config": {
-    "project.seed": 42,
     "project.device": "auto",
     "training.architecture": "resnet18",
     "training.num_classes": 2,
