@@ -316,6 +316,25 @@ def test_a_refused_set_leaves_the_configuration_unchanged():
     assert cfg.get("training.pretrained") is before
 
 
+def test_set_marks_the_key_it_writes_which_is_why_no_unknown_keys_assertion_is_set_up_with_one():
+    # **The trap, pinned, because two tests in `tests/test_train.py` walked into it.**
+    # `set` records the key as read, which is right — a caller that wrote the key has
+    # engaged with it. But it means a test that configures a key with `set` and then
+    # asserts `"<key>" not in cfg.unknown_keys()` is asserting that its own setup line
+    # ran: the assertion holds before the function under test is even called, and holds
+    # just as well if that function reads nothing at all. Those two tests read as though
+    # the mechanism were pinned, and taught a reader it was.
+    #
+    # `load(overrides=...)` marks nothing — that is its own documented property — so it is
+    # what an `unknown_keys()` assertion is set up with. This test says why, and the two in
+    # `tests/test_train.py` now each carry the other half: a key the call *did* read is
+    # gone from the ledger and a key it did not is still on it.
+    cfg = load()
+    assert "paths.labels" in cfg.unknown_keys()
+    cfg.set("paths.labels", "/tmp/labels")
+    assert "paths.labels" not in cfg.unknown_keys()
+
+
 def test_set_and_load_refuse_the_same_value_the_same_way(tmp_path):
     # One rule, two routes. `set` calls the same `_check_value_type` the file path does, so a
     # value the file refuses cannot be written by hand into a loaded config, and the two

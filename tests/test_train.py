@@ -506,10 +506,19 @@ def test_the_handoff_reader_is_in_the_package_and_reads_the_configured_label_roo
     # loaded by path: a read of `paths.labels` in there is outside the ledger scan in
     # `tests/test_config.py`, which then reports a declared key nothing under `blobcount/`
     # reads. Task 12 reads the same handoff, so one reader rather than two copies.
+    #
+    # **The configuration is built by an override and not by `cfg.set`, and that is the
+    # difference between an assertion and a tautology.** `Config.set` marks the key it
+    # writes as read, so a test that wrote `paths.labels` with `set` and then asserted
+    # `"paths.labels" not in cfg.unknown_keys()` was asserting that `set` had run — which
+    # it had, on the line above. The assertion passed whether or not `read_labels` read
+    # anything at all, which is what `tests/test_config.py::
+    # test_set_marks_the_key_it_writes_which_is_why_no_unknown_keys_assertion_is_set_up_with_one`
+    # records. `load(overrides=...)` marks nothing, so the ledger below is what the call
+    # under test actually did.
     rows = list(_ROWS)
     index = _write_labels_csv(tmp_path / "handoff", rows)
-    cfg = _cfg()
-    cfg.set("paths.labels", str(tmp_path / "labels"))
+    cfg = _cfg(f"paths.labels={tmp_path / 'labels'}")
 
     paths, labels, specimens = read_labels(index, cfg)
 
@@ -519,14 +528,24 @@ def test_the_handoff_reader_is_in_the_package_and_reads_the_configured_label_roo
     # The key is read and not merely named: `Config` records every value it serves, so a
     # `paths.labels` this call did not use is the one still missing from the ledger.
     assert "paths.labels" not in cfg.unknown_keys()
+    # **And the other half of the same claim**: `paths.results` is a declared key this call
+    # does not read, and it is still on the ledger afterwards. Without this arm the
+    # assertion above is satisfied by any `Config` whose keys have all been read by
+    # something, including this test's own setup.
+    assert "paths.results" in cfg.unknown_keys()
 
 
 def test_a_run_given_no_output_directory_writes_into_the_configured_one(tmp_path, monkeypatch):
     # `out_dir` is an argument so a caller can put a run somewhere else, and its absence
     # is the shipped case: the directory is the configured `paths.results`.
+    #
+    # **An override and not `cfg.set`, for the reason the handoff-reader test above
+    # gives**: `set` marks the key it writes, so setting `paths.results` that way and then
+    # asserting it is no longer unread asserts that the `set` ran. Here the assertion
+    # below is about `run_cross_validation` having read the key, and the arm after it is
+    # about a key it did not, so the two together are a claim with a direction.
     _stand_in(monkeypatch, _StandIn(positive=True))
-    cfg = _cfg()
-    cfg.set("paths.results", str(tmp_path / "results"))
+    cfg = _cfg(f"paths.results={tmp_path / 'results'}")
     paths, labels, specimens = _cohort(
         tmp_path / "patches", [("A", 1), ("A", 1), ("B", 0), ("B", 0)]
     )
@@ -539,6 +558,10 @@ def test_a_run_given_no_output_directory_writes_into_the_configured_one(tmp_path
     assert (out / "training_log_fold1.csv").is_file()
     assert (out / "best_model_fold0.pth").is_file()
     assert "paths.results" not in cfg.unknown_keys()
+    # `paths.labels` is declared and is not read by a cross-validation run that is handed
+    # its own cohort, so it is still on the ledger after this one. Without this the
+    # assertion above would also hold for a run that read nothing but its own setup.
+    assert "paths.labels" in cfg.unknown_keys()
 
 
 def test_the_folds_are_numbered_from_zero_in_sorted_order_of_the_specimen_ids():
