@@ -208,6 +208,7 @@ from blobcount.labeling import (
     load_patch,
     read_index,
 )
+from blobcount.sequences import is_character_or_byte_sequence
 
 __all__ = [
     "AblationStats",
@@ -928,23 +929,31 @@ exactly. The two tests that pin the split are named at the end of `plot`'s docst
     # `bin/ablate_threshold.py` attributes the `TypeError` arm of its catch to exactly
     # this shape.
     #
-    # **`memoryview` is in that tuple, and it was the class the exclusion had left out.**
-    # It is registered as a `Sequence` like `bytearray` is, and `memoryview(b"35")` swept
-    # as `(51, 53)` — the same failure the key check was written to end, one class over.
-    # Naming `bytearray` while leaving its sibling out made the tuple read as coverage it
-    # did not have. It is unreachable from a YAML file, since PyYAML emits `bytes` for
-    # `!!binary` and refuses `!!python` tags, and it is here anyway: the tuple states what
-    # it excludes, and a reader of it is entitled to that statement being true.
+    # **`memoryview` and `array.array` are both covered, and the second was the class the
+    # exclusion had left out.** `memoryview` is registered as a `Sequence` like `bytearray`
+    # is, and `memoryview(b"35")` swept as `(51, 53)` — the same failure the key check was
+    # written to end, one class over. `array.array` was the same failure one class further:
+    # it is a `Sequence` by registration, `array.array('b', b'35')` swept as `(51, 53)`
+    # measured, and adding it as a fifth *name* would have covered one of its ten typecodes
+    # and left the other nine — `array.array('w', 'abc')` sweeps as three one-character
+    # thresholds for exactly the reason `str` does. **Both are in
+    # `blobcount.sequences.is_character_or_byte_sequence`**, which is the one predicate
+    # `blobcount.splits.loso_folds` uses too, so the two can no longer disagree about the
+    # set or about which typecodes it covers.
     #
-    # The four named types are the standard library's sequences **of characters or of
-    # bytes** — `str` the only one of the former, and `bytes`, `bytearray` and `memoryview`
-    # the three byte-buffer types of the latter. That is the dividing line and not "every
-    # sequence type": `range`, `tuple` and `array.array` are `Sequence`s too, and they are
-    # correctly absent, because iterating any of them yields numbers and every number is
-    # then checked as an entry.
-    if not isinstance(configured, Sequence) or isinstance(
-        configured, (str, bytes, bytearray, memoryview)
-    ):
+    # The named types are the standard library's sequences **of characters or of bytes** —
+    # `str` the only one of the former, `bytes`, `bytearray` and `memoryview` the three
+    # byte-buffer types of the latter, and `array.array` a typed buffer that is one or the
+    # other depending on its typecode. **The paragraph above this one used to say that
+    # `array.array` was "correctly absent, because iterating any of them yields numbers and
+    # every number is then checked as an entry", and that was false**: 51 and 53 are whole
+    # numbers at or above zero, so the entry checks accept them, which is how a byte range
+    # was swept and reported as a range like any other. The corrected statement is that a
+    # byte range yields numbers that are *indistinguishable* from a configured list of
+    # whole numbers, which is why the guard is on the container and not on the values —
+    # see `blobcount.sequences` for why no test on the yielded values can make that
+    # distinction without refusing `ablation.thresholds: [51, 53]`.
+    if not isinstance(configured, Sequence) or is_character_or_byte_sequence(configured):
         raise TypeError(
             f"ablation.thresholds holds {configured!r}, a {type(configured).__name__}, "
             f"which is not a sequence of thresholds: the configured range is a list of "

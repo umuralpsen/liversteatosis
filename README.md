@@ -56,6 +56,7 @@ The individual stages are `make extract`, `make label`, `make ablate`, `make tra
 ├── blobcount/                    # the package
 │   ├── __init__.py               # package marker, version
 │   ├── config.py                 # load, validate, override, seed control, device selection
+│   ├── sequences.py              # the one predicate for a Sequence that is a character/byte buffer
 │   ├── registry.py               # load and validate the manifest, gate specimen usability
 │   ├── slides.py                 # slide metadata, resolution planning, patch reading, adaptive tissue threshold
 │   ├── blobs.py                  # blob counting in physical units, adaptive gray threshold, Reinhard stain normalization
@@ -76,7 +77,7 @@ The individual stages are `make extract`, `make label`, `make ablate`, `make tra
 │   ├── evaluate.py
 │   ├── predict.py
 │   └── gradcam.py
-├── results/                      # generated artifacts: metrics, figures and summaries are tracked, *.pth are not
+├── results/                      # generated artifacts: metrics, figures, summaries and provenance sidecars are tracked, *.pth are not
 ├── tests/                        # one test module per package module
 │   ├── conftest.py               # shared fixtures: synthetic patch, temporary output tree
 │   ├── test_config.py            # config tests
@@ -91,7 +92,10 @@ The individual stages are `make extract`, `make label`, `make ablate`, `make tra
 │   ├── test_models.py            # model construction tests
 │   ├── test_train.py             # training summary tests
 │   ├── test_evaluate.py          # metric and guard tests
-│   └── test_interpret.py         # Grad-CAM tests
+│   ├── test_interpret.py         # Grad-CAM tests, and the two entry points
+│   ├── test_sequences.py         # the shared character/byte-sequence predicate
+│   ├── test_makefile.py          # the reproduction harness's own facts
+│   └── test_optional_imports.py  # every importorskip states the exception it skips on
 ├── LICENSE
 └── README.md
 ```

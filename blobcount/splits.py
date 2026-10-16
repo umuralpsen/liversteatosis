@@ -55,31 +55,30 @@ carry an `int` on a dataclass annotated `str`. `str`, `bytes`, `bytearray` and
 sequences a caller already holds without importing anything** — `str` the only sequence
 of characters, the other three the byte-buffer types.
 
-**That set is not closed over the standard library, and the tuple is not widened to close
-it.** `array.array` is a fifth: `array.array("w", "abc")` iterates `'a'`, `'b'`, `'c'`,
-and `array.array("b", b"456")` iterates 52, 53 and 54, both measured
-`isinstance(_, Sequence) is True`, and `loso_folds` accepts both today and returns the same
-three one-row folds. It is parked to be closed together with the identical hole in
-`blobcount.ablation._thresholds`, which refuses these same four names and has the same gap.
-What the four buy is that they cover the shapes a caller reaches without an
-`import array`; naming them is not the same thing as covering every sequence of
-characters, and the difference is recorded here rather than left for a reader to assume
-away.
+**That set is closed over the standard library, and the set itself moved out of this
+module on 2026-10-16.** `array.array` used to be a fifth shape this function accepted:
+`array.array("w", "abc")` iterates `'a'`, `'b'`, `'c'` and `array.array("b", b"456")`
+iterates 52, 53 and 54, both measured `isinstance(_, Sequence) is True`, and `loso_folds`
+accepted both and returned three one-row folds for either. The same hole was live in
+`blobcount.ablation._thresholds`, which refused these same four names and had the same gap.
+Both now call `blobcount.sequences.is_character_or_byte_sequence`, which names all five and
+is the one place the set is written down — so a sixth buffer type cannot be added to one
+module and missed by the other, which is exactly what happened here.
 
 **The exclusion rule is the same one, on the same reasoning, as
 `blobcount.ablation._thresholds` applies to `ablation.thresholds`.** A `Sequence` test
-alone accepts every one of these four names, so on its own it would split `'456'` into
+alone accepts every one of these names, so on its own it would split `'456'` into
 three specimens exactly as it splits `b"456"`, and only naming them catches it. This is
 not a type policy nobody asked for; it is the one shape a reader writes by accident.
 
 **That module applies its `Sequence` test in two forms, and both are named here because
 they differ only in their sign, and the sign is the whole argument.** The *positive* form
-is the `isinstance(x, Sequence)` just described, and this module's use of it is the four
-names. The *negative* form is `not isinstance(x, Sequence) or isinstance(x, <the four
-names>)`, which refuses every non-`Sequence` on top of the four, and **it is not repeated
-here** — this is the one place the two predicates differ. Measured:
-`isinstance(np.array(["a", "b"]), Sequence)` is `False`, and so is a pandas `Series`,
-because neither is registered as a `Sequence` — so the negative form would refuse
+is the `isinstance(x, Sequence)` just described, and both modules now use the shared
+predicate as its second clause. The *negative* form is `not isinstance(x, Sequence) or
+is_character_or_byte_sequence(x)`, which refuses every non-`Sequence` on top of the buffer
+types, and **it is not repeated here** — this is the one place the two predicates differ.
+Measured: `isinstance(np.array(["a", "b"]), Sequence)` is `False`, and so is a pandas
+`Series`, because neither is registered as a `Sequence` — so the negative form would refuse
 `ndarray`, `Series`, `set` and `dict`, none of which is a sequence of characters or of
 bytes, at the price of refusing the two most natural per-row
 id columns a caller holding a DataFrame has. The names to refuse are named here; nothing
@@ -118,31 +117,29 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from blobcount.sequences import is_character_or_byte_sequence
+
 __all__ = ["Fold", "SplitError", "loso_folds"]
 
-# The standard library's sequences **of characters or of bytes** that a caller reaches
-# without an import, and the only shapes refused by name: `str` is the only sequence of
-# characters, and `bytes`, `bytearray` and `memoryview` are the three byte-buffer types,
-# each a sequence of the integers its bytes spell. All four are registered as a
-# `collections.abc.Sequence`, so the *positive* test `isinstance(x, Sequence)` accepts
-# every one of them and would split `'456'` into three specimens as readily as `b"456"`;
-# only naming them catches it.
+# The shapes refused as a whole: a `Sequence` whose elements are the atoms of a character
+# or byte buffer rather than the specimen ids a caller named. **The predicate is
+# `blobcount.sequences.is_character_or_byte_sequence` and not a tuple declared here**, for
+# the reason `blobcount.ablation._thresholds` now uses the same one: each module named the
+# four types separately and both missed `array.array`, which is a `Sequence` by
+# registration and iterates as byte-valued ints for its `b` and `B` typecodes —
+# `array.array("b", b"456")` split into three folds held out 52, 53 and 54, measured, and
+# `array.array("w", "abc")` into three held out `'a'`, `'b'`, `'c'`.
 #
-# `range`, `tuple` and `array.array` are correctly absent, and `array.array` is absent for
-# a reason the others are not: a tuple or an array of specimen ids is a legitimate per-row
-# column and `loso_folds` accepts both, where a `range` is a sequence of numbers and is
-# outside `Sequence[str]`. **The cost of that is that an `array.array` of characters or of
-# bytes arrives with it** — `array.array("w", "abc")` iterates `'a'`, `'b'`, `'c'` and
-# `array.array("b", b"456")` iterates 52, 53 and 54 — so this list is *not* closed over
-# the standard library, and it does not claim to be. Parked to be closed alongside the
-# identical gap in `blobcount.ablation._thresholds`, which refuses these same four names.
+# `range`, `tuple` and a `list` are correctly accepted, and a tuple or a list of specimen
+# ids is a legitimate per-row column. A `range` is a sequence of numbers and is outside
+# `Sequence[str]`, and nothing here objects to it.
 #
-# That module's predicate is `not isinstance(x, Sequence) or isinstance(x, <these four>)`,
-# and the second clause is the one repeated here. The first is not, because
-# `isinstance(np.array(["a", "b"]), Sequence)` is `False` — as it is for a pandas `Series`,
-# neither being registered as a `Sequence` — so it would refuse a per-row column of ids
-# that arrives in exactly that shape.
-_SEQUENCES_OF_CHARACTERS_OR_BYTES = (str, bytes, bytearray, memoryview)
+# **The negative form of `blobcount.ablation`'s predicate is not repeated.** That module
+# tests `not isinstance(x, Sequence) or is_character_or_byte_sequence(x)`, refusing every
+# non-`Sequence` on top of the buffer types; this module refuses only the buffer types,
+# because `isinstance(np.array(["a", "b"]), Sequence)` is `False` — as it is for a pandas
+# `Series`, neither being registered as a `Sequence` — and the negative form would refuse a
+# per-row column of ids arriving in exactly that shape.
 
 
 class SplitError(Exception):
@@ -237,7 +234,7 @@ def loso_folds(specimen_of_row: Sequence[str]) -> list[Fold]:
     distinguish those cases by outcome, and none of them is a state a caller can train
     through by accident.
     """
-    if isinstance(specimen_of_row, _SEQUENCES_OF_CHARACTERS_OR_BYTES):
+    if is_character_or_byte_sequence(specimen_of_row):
         raise SplitError(
             f"loso_folds was given {specimen_of_row!r}, a "
             f"{type(specimen_of_row).__name__}, which is a sequence of characters or of "
