@@ -1,0 +1,37 @@
+{
+  "artifacts": [
+    "training_summary.json",
+    "fold_summary.csv",
+    "training_log_fold0.csv",
+    "training_log_fold1.csv",
+    "training_log_fold2.csv",
+    "best_model_fold0.pth",
+    "best_model_fold1.pth",
+    "best_model_fold2.pth"
+  ],
+  "provenance": "written by bin/train.py by training leave-one-specimen-out over the specimens the handoff holds, so every number in this document is a function of that handoff, of the weights bin/label_patches.py wrote, of the resolved parameters under `config`, and of the seed `config` carries. **Each fold's figure is the epoch with the highest validation F1, and that validation set is the held-out specimen the figure is reported over**: with three specimens there is no third split, so every per-fold metric here is the best of up to `training.epochs` attempts on the very patches it is measured on and is an upper bound rather than an estimate of performance on unseen tissue. `summary.epoch_selection` records how many epochs each fold considered, which it chose and the mean over the ones it did not, and the per-epoch values are in `training_log_fold<n>.csv` beside this file. The labels those figures are measured against are morphological blob counts and not a pathologist's grade, so the ceiling is agreement with a hand-tuned counter",
+  "config": {
+    "project.seed": 42,
+    "project.device": "auto",
+    "training.architecture": "resnet18",
+    "training.pretrained": true,
+    "training.num_classes": 2,
+    "training.input_size": 224,
+    "training.batch_size": 32,
+    "training.epochs": 10,
+    "training.learning_rate": 0.0001,
+    "training.patience_early_stop": 3,
+    "training.patience_lr_scheduler": 3,
+    "training.lr_scheduler_factor": 0.5,
+    "training.use_weighted_sampler": true,
+    "training.num_workers": 4,
+    "augmentation.horizontal_flip": true,
+    "augmentation.vertical_flip": true,
+    "augmentation.rotation_degrees": 15,
+    "augmentation.color_jitter_brightness": 0.15,
+    "augmentation.color_jitter_contrast": 0.15,
+    "augmentation.color_jitter_saturation": 0.1,
+    "augmentation.color_jitter_hue": 0.05,
+    "augmentation.affine_translate": 0.05
+  }
+}

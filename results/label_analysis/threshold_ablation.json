@@ -1,4 +1,5 @@
 {
+  "provenance": "written by bin/ablate_threshold.py by re-counting every patch the index names, so every number in this document is a function of those patches, of the per-slide gray threshold recorded in `per_slide_gray_threshold`, and of the resolved parameters under `config` — which is what this run used and not the shipped file. Each per-slide gray threshold is the configured percentile of that slide's own recorded tissue_gray values, so it is a function of how that slide is stained: the per-specimen ratios and their spread beside them are therefore not separable from per-slide staining intensity, and a difference between two specimens here cannot be read as a difference between two patients without a measurement this project has not made. The counts are morphological blob counts and not a pathologist's grade, so the ceiling of anything computed from this file is agreement with a hand-tuned counter",
   "selected_threshold": 5,
   "n_patches": 6002,
   "n_slides": 3,
@@ -6151,5 +6152,26 @@
       "max_per_patch": 19
     },
     "total_blob_ratio": 5.745358090185676
+  },
+  "config": {
+    "ablation.thresholds": [
+      3,
+      5,
+      7,
+      10,
+      15,
+      20,
+      25,
+      30
+    ],
+    "labeling.blob_threshold": 5,
+    "extraction.patch_size": 256,
+    "blobs.area_um2_min": 3.1,
+    "blobs.area_um2_max": 125.0,
+    "blobs.circularity_min": 0.6,
+    "blobs.gray_percentile": 95,
+    "blobs.morph_kernel_size": 3,
+    "blobs.morph_iterations": 2,
+    "blobs.stain_normalization": false
   }
 }

@@ -1,0 +1,35 @@
+{
+  "provenance": "written by bin/extract_patches.py from the slides the dataset manifest names, so every count and every patch in this document and in patches.csv is a function of those slides, of `config` below, and of nothing else. `patches_written` is the number of windows the filter accepted; `tissue_rejected` is the number it discarded on a single global mean-intensity cutoff (`extraction.tissue_gray_max`), which has no background rejection and whose sensitivity is unmeasured - this document records the cutoff that was applied, not a measurement of how well it separates tissue from background",
+  "n_slides": 3,
+  "patches_written": 6002,
+  "slides": [
+    {
+      "slide_id": "4",
+      "patches_written": 1835,
+      "tissue_rejected": 5185,
+      "read_failures": 0,
+      "skipped_blank": false
+    },
+    {
+      "slide_id": "5",
+      "patches_written": 1976,
+      "tissue_rejected": 3098,
+      "read_failures": 0,
+      "skipped_blank": false
+    },
+    {
+      "slide_id": "6",
+      "patches_written": 2191,
+      "tissue_rejected": 2294,
+      "read_failures": 0,
+      "skipped_blank": false
+    }
+  ],
+  "config": {
+    "extraction.target_mpp": 0.5,
+    "extraction.patch_size": 256,
+    "extraction.step_size": 256,
+    "extraction.tissue_percentile": 5,
+    "extraction.tissue_gray_max": 235
+  }
+}
