@@ -23,7 +23,7 @@ substitutes for the other:
   one character in a git-tracked file. The declared types are **not** read from
   `configs/default.yaml`, because `load()` reads that file by default and would
   therefore measure it against itself and accept every hand-edit to it;
-  `tests/test_config.py` asserts the table and the file agree for all 46 keys in
+  `tests/test_config.py` asserts the table and the file agree for all 45 keys in
   both directions so the two cannot drift.
 - `load` reads no key on the caller's behalf, because a caller asks for keys
   after `load` has already returned, so read tracking can never be complete at
@@ -147,7 +147,6 @@ REQUIRED_KEYS: frozenset[str] = frozenset(
 
 KNOWN_KEYS: frozenset[str] = frozenset(
     {
-        "project.name",
         "project.seed",
         "project.device",
         "paths.slides",
@@ -205,7 +204,7 @@ _SECTIONS: frozenset[str] = frozenset(key.split(".", 1)[0] for key in KNOWN_KEYS
 # hand-edit to it — `training.pretrained: 1` would agree with the `1` it just became and be
 # called correct. The measured defect is exactly that edit, in exactly that file. A table here
 # is refused by it, and `tests/test_config.py` asserts the table and the file hold the same
-# type for every one of the 46 keys in both directions, so the two cannot drift apart and the
+# type for every one of the 45 keys in both directions, so the two cannot drift apart and the
 # shipped file cannot become the yardstick it is measured against.
 #
 # The types are the ones a caller reads the value as, not the ones YAML spells: `true` in the
@@ -225,7 +224,6 @@ _SECTIONS: frozenset[str] = frozenset(key.split(".", 1)[0] for key in KNOWN_KEYS
 # narrowing, and it is the one that keeps `evaluation.confidence_level: 1` mean 100% rather
 # than being refused — which is a value question, and this check makes no value claims.
 KEY_TYPES: dict[str, type] = {
-    "project.name": str,
     "project.seed": int,
     "project.device": str,
     "paths.slides": str,

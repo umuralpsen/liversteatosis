@@ -1,5 +1,4 @@
 project:
-  name: liver-steatosis-detection
   seed: 42
   device: auto
 

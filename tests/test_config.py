@@ -55,15 +55,17 @@ _KEY_READ = re.compile(r"""\.(?:get|path)\(\s*["']([A-Za-z_]\w*(?:\.[A-Za-z_]\w*
 # which holds both by setting `gradcam.alpha=0` (the blend then *is* the image) and by
 # asking for a second map (the two blends then differ).
 #
-# **`project.name` is what is left, and it is unreadable by construction**: it names the
-# study and no module in the pipeline is a function of the study's name. A read written
-# only to clear this entry would be the fake reader this list exists to catch, in the one
-# place the list has a last entry.
-_KEYS_WITHOUT_READER: frozenset[str] = frozenset(
-    {
-        "project.name",
-    }
-)
+# **`project.name` was the last entry and it was deleted on 2026-10-16**, on the ruling
+# that a configuration file declaring unimplemented behaviour is worse than no
+# configuration file: no reader was invented for it, and a read written only to clear the
+# entry would be the fake reader this list exists to catch. **The set is empty and stays
+# a `frozenset`, not `None` and not a deleted name**, because the scan above compares
+# against it and a branch that grows a second unreadable key has to fail here rather than
+# have nothing to compare against. The merge gate the plan spells out as a shell command
+# is spelled out as a test in
+# `test_no_declared_key_is_exempt_from_the_reader_scan` below, because that command's
+# regex cannot match this literal and raises `AttributeError` instead of reporting.
+_KEYS_WITHOUT_READER: frozenset[str] = frozenset()
 
 
 def _default_yaml_keys() -> set[str]:
@@ -107,7 +109,7 @@ def test_dot_notation_get_and_set():
 
 def test_missing_required_key_raises(tmp_path):
     partial = tmp_path / "partial.yaml"
-    partial.write_text("project:\n  name: x\n", encoding="utf-8")
+    partial.write_text("project:\n  seed: 1\n", encoding="utf-8")
     with pytest.raises(ConfigError, match="missing required key"):
         load(partial)
 
@@ -149,6 +151,40 @@ def test_known_keys_match_default_yaml():
     assert declared - set(KNOWN_KEYS) == set()
 
 
+def test_the_study_name_is_not_declared_by_this_project(tmp_path):
+    # **`project.name` was deleted on 2026-10-16**, and this is the test that holds it
+    # deleted. It was the last entry in `_KEYS_WITHOUT_READER`: a declared key that no
+    # module reads, kept in the file because the plan made an empty exempt set a merge
+    # gate. No reader was invented for it — the ruling is that a configuration file
+    # declaring unimplemented behaviour is worse than no configuration file, and that a
+    # test written only to clear a name would be the fake reader the source scan above
+    # exists to catch.
+    #
+    # **Three separate declarations, and all three have to go.** The key in the shipped
+    # file, the key in `KNOWN_KEYS` and the key in `KEY_TYPES` are the same fact written
+    # three times, and a deletion that removed only one of them would leave the file
+    # refusing to load or the table declaring a key nothing holds. Hence the three arms.
+    assert "project.name" not in KNOWN_KEYS
+    assert "project.name" not in KEY_TYPES
+    assert "project.name" not in _default_yaml_keys()
+
+    # And the refusal is the one the gate exists for, reached through a file rather than
+    # through `Config`, because a configuration that declares an undeclared key has to be
+    # a hard error at load and not a key quietly ignored.
+    with pytest.raises(ConfigError, match="unknown key 'project.name'"):
+        load(_config_with_one_value_edited("project.name", "x", tmp_path))
+
+
+def test_no_declared_key_is_exempt_from_the_reader_scan():
+    # The merge gate, as a test rather than as a shell command. The plan's gate is a
+    # `re.search` over this file whose pattern cannot match a set written across lines —
+    # measured, it raises `AttributeError: 'NoneType' object has no attribute 'group'`
+    # on the shipped file today, so it has never reported anything at all. This asserts
+    # the fact it was written to assert: the exempt set is empty, so every declared key
+    # has a reader under `blobcount/` or the branch does not satisfy the gate.
+    assert _KEYS_WITHOUT_READER == frozenset()
+
+
 def test_every_declared_config_key_is_read_by_package_source():
     read = set(_KEY_READ.findall(_package_source()))
     assert read <= KNOWN_KEYS, f"code reads undeclared keys: {sorted(read - KNOWN_KEYS)}"
@@ -167,21 +203,21 @@ def test_load_records_no_reads():
 
 
 def test_unknown_keys_reports_a_key_no_code_read():
-    cfg = Config({"project": {"name": "x", "seed": 42}})
-    assert cfg.unknown_keys() == {"project.name", "project.seed"}
+    cfg = Config({"project": {"seed": 42, "device": "cpu"}})
+    assert cfg.unknown_keys() == {"project.seed", "project.device"}
     assert cfg.get("project.seed") == 42
-    assert cfg.unknown_keys() == {"project.name"}
+    assert cfg.unknown_keys() == {"project.device"}
 
 
 def test_get_with_explicit_none_default_returns_none():
     cfg = Config({"project": {"seed": 42}})
-    assert cfg.get("project.name", None) is None
+    assert cfg.get("project.device", None) is None
 
 
 def test_get_without_default_raises_for_missing_key():
     cfg = Config({"project": {"seed": 42}})
     with pytest.raises(ConfigError, match="unknown key"):
-        cfg.get("project.name")
+        cfg.get("project.device")
 
 
 def test_set_rejects_an_undeclared_key():
@@ -386,8 +422,10 @@ def test_a_bool_declared_key_refuses_an_int_written_in_the_file(tmp_path):
     ("key", "value"),
     [
         # One row per declared type, so a rule that fires for `bool` and not for `list` is
-        # visible here rather than inferred.
-        ("project.name", 7),
+        # visible here rather than inferred. `str` has two rows: one under `paths.*` and
+        # one under `training.*`, because `Config.path` and a plain `get` treat the same
+        # declared type differently.
+        ("paths.manifest", 7),
         ("project.seed", "42"),
         ("paths.results", 7),
         ("extraction.patch_size", "big"),
@@ -537,8 +575,8 @@ def test_a_hand_edited_value_of_the_declared_type_is_accepted(tmp_path):
     # that its types match the table is `test_key_types_agree_with_default_yaml_in_both_
     # directions` above. The stronger claim, that a hand-edit to *that* file is refused, is
     # `test_the_declared_types_are_not_read_from_the_file_being_validated`.
-    cfg = load(_config_with_one_value_edited("project.name", "x", tmp_path))
-    assert cfg.get("project.name") == "x"
+    cfg = load(_config_with_one_value_edited("gradcam.colormap", "x", tmp_path))
+    assert cfg.get("gradcam.colormap") == "x"
 
 
 @pytest.mark.parametrize(
@@ -720,12 +758,12 @@ def test_get_device_falls_back_to_the_default_config():
 
 
 def test_default_config_is_mutated_by_this_test():
-    default_config().set("project.name", "mutated-by-an-earlier-test")
-    assert default_config().get("project.name") == "mutated-by-an-earlier-test"
+    default_config().set("gradcam.colormap", "mutated-by-an-earlier-test")
+    assert default_config().get("gradcam.colormap") == "mutated-by-an-earlier-test"
 
 
 def test_default_config_mutation_does_not_leak_into_the_next_test():
-    assert default_config().get("project.name") == load().get("project.name")
+    assert default_config().get("gradcam.colormap") == load().get("gradcam.colormap")
     assert default_config().get("project.seed") == load().get("project.seed")
 
 
@@ -736,10 +774,10 @@ def test_default_config_mutation_does_not_leak_into_the_next_test():
 
 def test_reset_hook_rebuilds_the_default_config_after_a_mutation():
     mutated = "mutated-by-an-earlier-test"
-    default_config().set("project.name", mutated)
-    assert default_config().get("project.name") == mutated
+    default_config().set("gradcam.colormap", mutated)
+    assert default_config().get("gradcam.colormap") == mutated
 
     _reset_default_config()
 
-    assert default_config().get("project.name") == load().get("project.name")
-    assert default_config().get("project.name") != mutated
+    assert default_config().get("gradcam.colormap") == load().get("gradcam.colormap")
+    assert default_config().get("gradcam.colormap") != mutated
