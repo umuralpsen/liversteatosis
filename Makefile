@@ -16,12 +16,38 @@ RUN = PYTHONPATH=. $(PYTHON)
 # manifest clears for training (blobcount.registry.usable_for_training: a
 # source case id and a licence). as_posix() so the paths survive the POSIX
 # shell a make recipe runs through, whatever platform the config names them on.
-LAYOUT := $(shell PYTHONPATH=. $(PYTHON) -c "from blobcount.config import load; from blobcount.registry import load_registry, usable_for_training; c = load(); print(c.path('paths.patches').as_posix(), c.path('paths.labels').as_posix(), c.path('paths.results').as_posix(), ' '.join(sorted(s.id for s in usable_for_training(load_registry()))))")
+#
+# **The three directories are printed with every space in them written as '@'.**
+# `$(word N,...)` below splits on whitespace and on nothing else, so a path holding a
+# space is two records and `PATCHES` becomes the first half of a directory: a
+# `paths.patches` of `.../my slides/patches` gives `.../my`, and every recipe reads a
+# path that does not exist. Those three values are hand-edited strings in a git-tracked
+# file and they name the 19 GB of generated data outside this checkout, so the failure
+# is neither hypothetical nor cheap.
+#
+# **The records stay space-separated — the substitution is inside the record, not
+# instead of one.** That is the whole of the fix and it is why a second separator
+# character is not wanted: make does not split on anything but whitespace, so a `|`
+# between two records would not separate them at all, it would glue them into one word.
+# A record that carries no whitespace is what `$(word N,...)` needs, and a placeholder
+# is how a path that legitimately carries one is made to comply.
+#
+# The ids need none of this: a specimen id carries no space, so `ADMITTED` below is cut
+# out of the same list untouched. **'@' is the one character this transport cannot
+# carry**, and a configured path containing it would be mangled; it is a legal path
+# character in principle and not one a directory this project names ever uses.
+LAYOUT := $(shell PYTHONPATH=. $(PYTHON) -c "from blobcount.config import load; from blobcount.registry import load_registry, usable_for_training; c = load(); print(' '.join(p.replace(' ', '@') for p in (c.path('paths.patches').as_posix(), c.path('paths.labels').as_posix(), c.path('paths.results').as_posix())) + ' ' + ' '.join(sorted(s.id for s in usable_for_training(load_registry()))))")
 
-PATCHES := $(word 1,$(LAYOUT))
-LABELS   := $(word 2,$(LAYOUT))
-RESULTS  := $(word 3,$(LAYOUT))
-ADMITTED := $(wordlist 4,$(words $(LAYOUT)),$(LAYOUT))
+# One `$(subst)` per field, and it is the only place a space is put back. Recursively
+# assigned (`=`, not `:=`) on purpose, and it is not a style preference: with `:=` each
+# value is frozen when the Makefile is read, so a caller that includes this file and
+# supplies its own LAYOUT gets the real configuration's paths back. That is what
+# `tests/test_makefile.py` does to exercise the real derivations over a layout carrying
+# a space in every field, which is the claim this transport has to hold.
+PATCHES = $(subst @, ,$(word 1,$(LAYOUT)))
+LABELS   = $(subst @, ,$(word 2,$(LAYOUT)))
+RESULTS  = $(subst @, ,$(word 3,$(LAYOUT)))
+ADMITTED = $(wordlist 4,$(words $(LAYOUT)),$(LAYOUT))
 
 # The file names the writers fixed: bin/extract_patches.py writes patches.csv
 # into paths.patches and bin/label_patches.py writes labels.csv into paths.labels.
@@ -33,10 +59,10 @@ HANDOFF := $(LABELS)/labels.csv
 # unprovenanced slides the registry does not clear are never extracted by
 # these targets: they are excluded from every reported result (README.md,
 # Limitations).
-HELD_OUT        := $(word 1,$(ADMITTED))
-TRAINED         := $(wordlist 2,$(words $(ADMITTED)),$(ADMITTED))
-TRAIN_SPECIMENS := $(foreach s,$(TRAINED),--train-specimens $(s))
-CHECKPOINT      := $(RESULTS)/best_model_fold0.pth
+HELD_OUT        = $(subst |, ,$(word 1,$(ADMITTED)))
+TRAINED         = $(subst |, ,$(wordlist 2,$(words $(ADMITTED)),$(ADMITTED)))
+TRAIN_SPECIMENS = $(foreach s,$(TRAINED),--train-specimens $(s))
+CHECKPOINT      = $(RESULTS)/best_model_fold0.pth
 
 .PHONY: all install test extract label ablate train evaluate predict gradcam clean
 
