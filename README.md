@@ -155,7 +155,7 @@ The configured range does **not** bracket the measured count distribution: 3741 
 
 ## Results
 
-**These numbers are a verification that the rebuilt pipeline runs end to end over the cohort the manifest admits; they are not a clinical cohort result.** Three specimens are cleared for training, which gives three leave-one-specimen-out folds, each training on two specimens and validating on the third. A three-fold mean over three specimens describes how this pipeline behaves on this dataset and nothing beyond it. Every figure below cites the committed artifact it was read from, and `make all` regenerates every number below — the Grad-CAM figure is the exception, drawn by `make gradcam`, which is not part of `all` (`Makefile:43`).
+**These numbers are a verification that the rebuilt pipeline runs end to end over the cohort the manifest admits; they are not a clinical cohort result.** Three specimens are cleared for training, which gives three leave-one-specimen-out folds, each training on two specimens and validating on the third. A three-fold mean over three specimens describes how this pipeline behaves on this dataset and nothing beyond it. Every figure below cites the committed artifact it was read from, and `make all` regenerates every number below — the Grad-CAM figure is the exception, drawn by `make gradcam`, which is not part of `all` (`Makefile:69`).
 
 ### Leave-one-specimen-out cross-validation
 
