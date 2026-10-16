@@ -222,7 +222,7 @@ def loso_folds(specimen_of_row: Sequence[str]) -> list[Fold]:
     and their lengths sum to the number of rows supplied.
 
     **An argument that is a sequence of characters or of bytes is refused, before a single
-    row is counted.** All four are a `collections.abc.Sequence` at runtime — measured `True`
+    row is counted.** All five are a `collections.abc.Sequence` at runtime — measured `True`
     for each — and the `Sequence[str]` annotation on this signature states what a caller is
     meant to pass rather than what arrives, so `loso_folds("456")` would split into three
     folds of one row each called `"4"`, `"5"` and `"6"`, and `loso_folds(b"456")` into
@@ -232,9 +232,10 @@ def loso_folds(specimen_of_row: Sequence[str]) -> list[Fold]:
     the rule is about the shape of the argument and not about how long it is: **no length
     check is applied against any expected row count**, because with one argument there is
     nothing to check against, and a guess would refuse a legitimate cohort of six
-    one-patch specimens. The four names are also not the only sequences there are — they
-    are the sequences of characters and of bytes, and an argument that is a sequence of
-    something else is outside `Sequence[str]` and outside this rule.
+    one-patch specimens. The five names are also not the only sequences there are — four
+    of them iterate as characters or as bytes and `array.array` as whatever its typecode
+    holds; an argument that is a sequence of something else is outside `Sequence[str]`
+    and outside this rule.
 
     **Fewer than two distinct ids is refused as a `SplitError`**, counting distinct ids
     and not rows: `[]` and `["only", "only"]` are refused alongside `["only"]`, because
