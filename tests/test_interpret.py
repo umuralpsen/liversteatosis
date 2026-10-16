@@ -25,6 +25,7 @@ separately by `test_the_only_hook_registered_is_a_forward_hook`.
 import csv
 import importlib.util
 import json
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -647,6 +648,62 @@ def test_predict_writes_a_sidecar_and_leaves_the_csv_readable(labelled_predict_c
     assert not text.startswith("#")
     rows = _read_csv(results / "predictions.csv")
     assert list(rows[0])[:3] == ["path", "specimen", "trained_on"]
+
+
+def test_the_prediction_sidecar_records_no_parameter_this_run_did_not_read(
+    labelled_predict_cli,
+):
+    # **`project.seed` was recorded here until 2026-10-16 and nothing read it.** This
+    # program seeds nothing: there is no `set_seed` call in `bin/predict.py` and no
+    # `cfg.get("project.seed")` in it, and inference over a fixed checkpoint and a fixed
+    # set of images is seed-independent — no sampling, no dropout at eval, no shuffled
+    # loader. A reader of the sidecar holding a seed is invited to believe the field
+    # affected the numbers beside it, and it did not; that is worse than an absent field,
+    # because it is a false statement about a run rather than a silence.
+    #
+    # **The shape of this test is the honest limit of what is cheap here.**
+    # `blobcount.config.resolved` documents that a caller may pass a key it did not read
+    # and that nothing checks it, and that check is not cheap to add in general: the four
+    # keys this block still records are read by `get_device`, `build_model` and
+    # `build_transforms` — package functions this program calls — so "the keys this stage
+    # reads" is not a set of literals in this file, and a scan would have to resolve the
+    # call graph to have any force. The equivalent rule *is* enforced where the reads are
+    # literal, in
+    # `tests/test_labeling.py::test_the_recorded_config_block_covers_every_key_this_stage_reads`.
+    # So this one pins the fact and its reason rather than the rule: the seed is out and
+    # the program still seeds nothing, and either of those changing is what would put a
+    # misleading field back.
+    module, steatosis, checkpoint, results, labels = labelled_predict_cli
+    assert module.main([
+        "--dir", str(steatosis), "--checkpoint", str(checkpoint),
+        "--labels", str(labels), "--train-specimens", "5", "--train-specimens", "6",
+    ]) == 0
+    sidecar = json.loads(
+        (results / "predictions.provenance.json").read_text(encoding="utf-8")
+    )
+    assert "project.seed" not in sidecar["config"], sidecar["config"]
+
+    source = (Path(__file__).resolve().parents[1] / "bin" / "predict.py").read_text(
+        encoding="utf-8"
+    )
+    # Comments stripped first, and this is the second version of this assertion rather
+    # than a first: the comment above `resolved` explains that there is no `set_seed`
+    # call in this file, which is a fact worth writing down and is also what a bare
+    # substring scan reads as a violation of. A scan that trips on the sentence
+    # documenting the rule has to be deleted to keep the rule, which is backwards.
+    code = re.sub(r"#[^\n]*", "", source)
+    assert "set_seed" not in code, (
+        "bin/predict.py seeds itself now, so project.seed is an input again and the "
+        "field this test says is out belongs back in the block."
+    )
+    # And the block still holds the four keys that do decide a run: the device the model
+    # was moved to and the three that fix the head and the input it saw.
+    assert list(sidecar["config"]) == [
+        "project.device",
+        "training.architecture",
+        "training.num_classes",
+        "training.input_size",
+    ], sidecar["config"]
 
 
 def test_predict_takes_a_single_image_as_well_as_a_directory(predict_cli):

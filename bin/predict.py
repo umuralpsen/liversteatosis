@@ -664,7 +664,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "config": resolved(
                     cfg,
                     (
-                        "project.seed",
+                        # **No `project.seed`, and that is the rule rather than an omission
+                        # of interest:** this program seeds nothing. There is no `set_seed`
+                        # call in this file, and inference over a fixed checkpoint and a
+                        # fixed set of images is seed-independent — no sampling, no
+                        # augmentation, no shuffled loader. The key was recorded here
+                        # until 2026-10-16, which invited a reader to believe it had a
+                        # bearing on the numbers beside it. Pinned by
+                        # `tests/test_interpret.py::test_the_prediction_sidecar_records_no_
+                        # parameter_this_run_did_not_read`.
                         "project.device",
                         "training.architecture",
                         "training.num_classes",

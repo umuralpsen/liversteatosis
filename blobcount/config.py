@@ -593,6 +593,19 @@ def resolved(cfg: Config, keys: Sequence[str]) -> dict[str, Any]:
     what is checked is that every key named is real, and an undeclared one raises out of
     `_validate_key` through the same `get` that `load` would have refused.
 
+    **That unchecked direction is unchecked because a general check is not cheap, and the
+    two stages that know what they read hold their own rule.**
+    `tests/test_labeling.py::test_the_recorded_config_block_covers_every_key_this_stage_
+    reads` pins it where a stage's reads are literals in its own file, which is what caught
+    `extraction.patch_size` missing from `labeling_stats.json`.
+    `tests/test_interpret.py::test_the_prediction_sidecar_records_no_parameter_this_run_
+    did_not_read` pins the case where the reads are not literals — `project.device` is read
+    by `get_device`, the architecture and the input size by `build_model` and
+    `build_transforms` — and a check covering both shapes would have to resolve the call
+    graph to have any force. Until that is worth building, a caller naming a key it did
+    not read is caught by review and not here, and `project.seed` sat in
+    `bin/predict.py`'s block until 2026-10-16 for exactly that reason.
+
     **Order is the caller's order and the values are the resolved ones**, so an `int`
     widened under a declared `float` is written as the number the run actually used rather
     than as the integer the file spelled. This is a read and a value: it records, it does
