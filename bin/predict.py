@@ -64,6 +64,14 @@ configuration or the input rather than about this program:
   not a file, a `--dir` naming something that is not a directory, and a `--dir` holding no
   file this program reads. Which argument the caller used decides which kind of path is
   right, so the two are refused rather than read as the other.
+- **The specimen filter**, as two more refusals of this program's own: a `--specimen` with
+  no `--labels`, where there is nothing to match against and a filter that matched nothing
+  would write a header and no rows; and a `--specimen` the handoff records no patch under,
+  which is the same shape of nothing reported as a prediction. Both are about the argument,
+  and both arrive before a checkpoint is loaded. **A handoff that cannot be read is a
+  fourth**, and it is not one of this program's own: it is the `ConfigError`, `OSError`,
+  `csv.Error` or `ValueError` out of `blobcount.train.read_labels`, grouped exactly as
+  `bin/evaluate.py` groups the same reader's.
 
 **An image that cannot be opened is not one of the four, and is deliberate.** `PIL`
 raises an `OSError` — measured, `PIL.UnidentifiedImageError` subclasses `OSError` — and it
@@ -101,6 +109,31 @@ rather than written out a second time in this file. The probability columns are 
 `p_<index>` from the width of the logits rather than from a count of classes written here,
 so a head of a different width produces a CSV whose columns describe it.
 
+**Every row carries the specimen it came from and whether the checkpoint was fitted on
+it, and this is the second thing to change about this program's output.** The measured
+defect it fixes: `make predict` pointed `--dir` at the steatosis directory of all three
+admitted specimens while the fold-0 checkpoint was fitted on two of them, so 3079 of the
+3502 committed rows were specimens the model had already seen — resubstitution, written
+into a tracked artifact, and the CSV named no checkpoint, no specimen and nothing else.
+`--specimen` filters the run to the specimen the fold held out, `--train-specimens` says
+which cohort the checkpoint saw, and the two columns make the file self-describing for
+anyone who joins it back to `labels.csv` whether or not either was given.
+
+**`labels.csv` is the authority on which specimen a patch came from, and the directory
+layout says nothing.** The labelling stage writes `normal/<patch_id>.png` and
+`steatosis/<patch_id>.png` and names no specimen in any directory name, so `--specimen` is
+a join against the handoff and not a walk of the tree — which is why it requires `--labels`
+and refuses without it rather than matching nothing. The handoff is read through
+`blobcount.train.read_labels`, the package's one reader, for the reason the module
+docstring of `bin/evaluate.py` gives about not copying the CSV contract into `bin/`; the
+cost is that every row resolves against the configured `paths.labels`, so a handoff written
+with `--out somewhere` resolves against the wrong root and is refused.
+
+**A row the handoff does not describe carries an empty `specimen` and `trained_on` false.**
+This program is inference over an image or a directory and a caller's own picture belongs
+to no specimen; the empty cell says exactly that, where a specimen guessed from a file name
+would be an invention.
+
 **One table is printed — one row per image — and a closing sentence that says what the
 numbers are and where they were written.** The table is rendered out of the same rows the
 CSV is written from, so the printed report and the artifact cannot disagree.
@@ -135,11 +168,12 @@ from pathlib import Path
 
 import torch
 
-from blobcount.config import PROJECT_ROOT, ConfigError, get_device, load
+from blobcount.config import PROJECT_ROOT, Config, ConfigError, get_device, load
 from blobcount.data import build_transforms
 from blobcount.extract import is_owned_path
 from blobcount.labeling import CLASS_NAMES
 from blobcount.models import build_model
+from blobcount.train import read_labels
 
 EXIT_OK = 0
 EXIT_REFUSED = 2
@@ -148,10 +182,25 @@ EXIT_REFUSED = 2
 # writer and the tests that read it back name the same file.
 _PREDICTIONS_NAME = "predictions.csv"
 
-# The columns every row carries before the probabilities. The probabilities are named
-# `p_<class index>` and appended after them, so the header describes the head the
-# checkpoint actually has.
-_COLUMNS = ("path", "class_index", "predicted_class", "confidence")
+# The columns every row carries before the probabilities. `specimen` and `trained_on` are
+# new and they are the point of the column list: **a prediction file that does not say
+# which specimen a row came from, or whether the checkpoint was fitted on it, is a file
+# whose rows can be read as a measurement of anything.** Resampling over specimens is the
+# correct unit for this project — patches from one slide are not independent observations
+# — and the same reasoning applies here: a row scored on a specimen the model was trained
+# on is a resubstitution number and not a result, and the file has to be able to say so
+# without the reader re-running the pipeline to find out.
+#
+# The probabilities are named `p_<class index>` and appended after them, so the header
+# describes the head the checkpoint actually has.
+_COLUMNS = (
+    "path",
+    "specimen",
+    "trained_on",
+    "class_index",
+    "predicted_class",
+    "confidence",
+)
 
 # What a `--dir` is scanned for, as lower-case suffixes compared case-insensitively with
 # `Path.suffix.lower()`, so a `.PNG` is found beside a `.png`: a directory scan needs a
@@ -189,6 +238,32 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         metavar="PATH",
         help="the weights written by bin/train.py, one results/best_model_fold<n>.pth",
+    )
+    parser.add_argument(
+        "--labels",
+        type=Path,
+        metavar="PATH",
+        help="the labels.csv written by bin/label_patches.py, which is the authority on "
+        "which specimen each patch came from; required by --specimen and optional "
+        "otherwise, since a caller's own image belongs to no specimen",
+    )
+    parser.add_argument(
+        "--specimen",
+        metavar="ID",
+        help="score only the patches this handoff records under this specimen id. The "
+        "label tree names no specimen in any directory - the layout is normal/ and "
+        "steatosis/ and nothing else - so this filter is a join against labels.csv "
+        "rather than a walk of the tree, which is why it needs --labels.",
+    )
+    parser.add_argument(
+        "--train-specimens",
+        action="append",
+        default=None,
+        metavar="ID",
+        help="a specimen this checkpoint was fitted on; repeatable. Recorded in the "
+        "trained_on column of every row, and stated rather than inferred for the same "
+        "reason bin/evaluate.py requires it: a row scored over a trained specimen is "
+        "resubstitution, and this program cannot know the cohort from a state dict.",
     )
     return parser
 
@@ -331,6 +406,29 @@ def _images(named: Path, is_directory: bool) -> list[Path]:
     return [named]
 
 
+def _specimens_of(index: Path, cfg: Config) -> dict[str, str]:
+    """Return `{patch file name: specimen id}` for every row of a handoff.
+
+    **`labels.csv` is the authority and the directory layout is not.** The labelling stage
+    writes `normal/<patch_id>.png` and `steatosis/<patch_id>.png` and names no specimen in
+    any directory, so there is nothing in a tree walk to read a specimen from; the
+    `slide_id` column is the only place the mapping exists. The key is the file name,
+    which is the `patch_id` verbatim — the labelling stage writes patches under their own
+    id — so a join on the name is exact and needs no directory to agree about anything.
+
+    **The handoff is read by `blobcount.train.read_labels`, not here.** `bin/` is a
+    directory of scripts loaded by path rather than a package, so a copy of the CSV
+    contract in this file would be a second set of answers to it, and a read of
+    `paths.labels` in `bin/` would be outside the source scan in `tests/test_config.py`,
+    which would then keep reporting a declared key nothing under `blobcount/` reads. The
+    cost of that is the one `bin/evaluate.py` names: rows resolve against the configured
+    `paths.labels`, so a handoff written with `--out somewhere` resolves against the wrong
+    root and every patch of it is reported missing.
+    """
+    paths, _labels, specimen_ids = read_labels(index, cfg)
+    return {path.name: specimen for path, specimen in zip(paths, specimen_ids, strict=True)}
+
+
 def _load_image(path: Path):
     """Return the `PIL.Image` at `path`, as RGB.
 
@@ -352,7 +450,14 @@ def _load_image(path: Path):
         return image.convert("RGB")
 
 
-def _predict(model, transform, images: Sequence[Path], device: torch.device) -> list[dict]:
+def _predict(
+    model,
+    transform,
+    images: Sequence[Path],
+    device: torch.device,
+    specimen_of: dict[str, str],
+    trained_on: Sequence[str],
+) -> list[dict]:
     """Return one row per image, each holding the class and the whole probability vector.
 
     **One pass with `torch.no_grad()`**, because there is nothing here to differentiate:
@@ -362,9 +467,19 @@ def _predict(model, transform, images: Sequence[Path], device: torch.device) -> 
     **The model is put into `eval()`**, so the rows are a function of the weights rather
     than of a dropout sample, for the reason `blobcount.evaluate._infer` gives.
 
+    **Two columns are filled from what the run knows and not from what the file looks
+    like.** `specimen` is the handoff's `slide_id` for a patch the handoff holds and the
+    empty string for one it does not — this program is inference over an image or a
+    directory, and a caller's own picture belongs to no specimen, so an empty cell is the
+    true answer and a specimen guessed from a file name would not be. `trained_on` is
+    `True` only where a specimen is both known and among the ones the caller stated the
+    checkpoint was fitted on, so an unknown specimen is `False` rather than an accidental
+    claim.
+
     The probability columns are named from the width of the logits this run produced, so
     the row describes the head the checkpoint has rather than a head this file assumes.
     """
+    trained = set(trained_on)
     rows: list[dict] = []
     model.eval()
     with torch.no_grad():
@@ -373,9 +488,12 @@ def _predict(model, transform, images: Sequence[Path], device: torch.device) -> 
             tensor = transform(image).unsqueeze(0).to(device)
             probabilities = torch.softmax(model(tensor), dim=1)[0]
             predicted = int(probabilities.argmax())
+            specimen = specimen_of.get(path.name, "")
             rows.append(
                 {
                     "path": str(path),
+                    "specimen": specimen,
+                    "trained_on": bool(specimen) and specimen in trained,
                     "class_index": predicted,
                     "predicted_class": CLASS_NAMES[predicted],
                     "confidence": f"{float(probabilities[predicted]):.6f}",
@@ -427,6 +545,49 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"predict: {error}", file=sys.stderr)
         return EXIT_REFUSED
 
+    # **The handoff is read before the checkpoint is loaded and before an image is opened,
+    # and it is read at all only when it is needed**: `--specimen` filters by a fact only
+    # the handoff carries, and without `--labels` there is nothing to filter on. A
+    # `--specimen` without it is refused here rather than matched against nothing, because
+    # a filter that finds no rows writes a header and no rows and calls that a prediction.
+    specimen_of: dict[str, str] = {}
+    if args.labels is not None or args.specimen is not None:
+        if args.labels is None:
+            print(
+                f"predict: --specimen was given {args.specimen!r} and no --labels, and "
+                "the specimen a patch came from is recorded only in labels.csv: the "
+                "label tree names no specimen in any directory, so there is nothing for a "
+                "filter to match against. Fix: pass --labels the handoff "
+                "bin/label_patches.py wrote, or drop --specimen",
+                file=sys.stderr,
+            )
+            return EXIT_REFUSED
+        try:
+            specimen_of = _specimens_of(args.labels, cfg)
+        except (ConfigError, OSError, csv.Error, ValueError) as error:
+            # The same four types `bin/evaluate.py` catches around its own call into the
+            # same reader, for the same reasons: a handoff that is not there, cannot be
+            # opened, carries a cell `csv.field_size_limit` refuses, or is not the header
+            # this reader expects; and `ConfigError` arrives out of it because
+            # `read_labels` resolves every row against `paths.labels`. The catch is around
+            # this one call and nothing else.
+            print(f"predict: {error}", file=sys.stderr)
+            return EXIT_REFUSED
+
+    if args.specimen is not None:
+        wanted = args.specimen
+        if wanted not in set(specimen_of.values()):
+            print(
+                f"predict: --specimen was given {wanted!r} and {args.labels} records no "
+                f"patch under it; the handoff holds {sorted(set(specimen_of.values()))}. "
+                "A filter that matched nothing would write a CSV with a header and no rows, "
+                "which is a report of nothing rather than a prediction. Fix: name a "
+                "specimen this handoff holds, or drop --specimen",
+                file=sys.stderr,
+            )
+            return EXIT_REFUSED
+        images = [path for path in images if specimen_of.get(path.name) == wanted]
+
     try:
         model = build_model(
             cfg.get("training.architecture"),
@@ -449,7 +610,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     # full resolved path, which is the whole fact a caller needs.
     _train_transform, transform = build_transforms(cfg)
     model = model.to(device)
-    rows = _predict(model, transform, images, device)
+    rows = _predict(
+        model, transform, images, device, specimen_of, args.train_specimens or ()
+    )
 
     # **The directory is created here and not before the images are read**, so a `--dir`
     # that cannot be listed leaves no empty `results/` behind. It is created with
@@ -470,12 +633,27 @@ def main(argv: Sequence[str] | None = None) -> int:
     for row in rows:
         counted[row["predicted_class"]] = counted.get(row["predicted_class"], 0) + 1
     tally = ", ".join(f"{count} {name}" for name, count in sorted(counted.items()))
+    resubstituted = sum(1 for row in rows if row["trained_on"])
+    known = sum(1 for row in rows if row["specimen"])
+    cohort = (
+        f", {resubstituted} of them over a specimen this checkpoint was fitted on"
+        if resubstituted
+        else ""
+    )
+    unknown = (
+        f"; {len(rows) - known} row(s) are not in the handoff and carry no specimen"
+        if known != len(rows)
+        else ""
+    )
     print(
-        f"\n{len(rows)} image(s) predicted with {args.checkpoint}: {tally}. The rows are "
-        f"in {results_dir / _PREDICTIONS_NAME}, one per image in the order above, and the "
-        f"probabilities are the softmax of the head this checkpoint carries. Every row is a "
-        f"function of that checkpoint and of the images this run was pointed at, and "
-        f"nothing here says which specimen, if any, the checkpoint was fitted on"
+        f"\n{len(rows)} image(s) predicted with {args.checkpoint}: {tally}{cohort}{unknown}. "
+        f"The rows are in {results_dir / _PREDICTIONS_NAME}, one per image in the order "
+        f"above, and the probabilities are the softmax of the head this checkpoint carries. "
+        f"Every row is a function of that checkpoint and of the images this run was pointed "
+        f"at; the `specimen` column is what labels.csv records for the patch and is empty "
+        f"for an image the handoff does not describe, and `trained_on` marks a row whose "
+        f"specimen the checkpoint was fitted on, which is resubstitution and not a "
+        f"measurement"
     )
     return EXIT_OK
 

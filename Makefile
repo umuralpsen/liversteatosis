@@ -102,8 +102,17 @@ evaluate:
 
 # Inference over the patches the labeling rule marked steatotic, with the same
 # fold-0 checkpoint; writes $(RESULTS)/predictions.csv.
+#
+# **--specimen $(HELD_OUT) and --train-specimens are the two halves of the same
+# correction.** The steatosis directory holds every admitted specimen's steatotic
+# patches, and the fold-0 checkpoint was fitted on two of the three, so a run
+# without the filter wrote 3079 of 3502 rows over specimens the model had already
+# seen - resubstitution, into a tracked artifact, with no checkpoint named, no
+# specimen column and no flag. The filter points the run at the specimen fold 0
+# held out; --train-specimens marks every row as trained-on or not whatever the
+# filter did, so the CSV stays readable by anyone who joins it to labels.csv.
 predict:
-	$(RUN) bin/predict.py --dir $(LABELS)/steatosis --checkpoint $(CHECKPOINT)
+	$(RUN) bin/predict.py --dir $(LABELS)/steatosis --checkpoint $(CHECKPOINT) --labels $(HANDOFF) --specimen $(HELD_OUT) $(TRAIN_SPECIMENS)
 
 # One figure per sampled patch of the held-out specimen plus a summary grid,
 # from the same fold-0 checkpoint; writes $(RESULTS)/gradcam/.

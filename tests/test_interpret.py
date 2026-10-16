@@ -24,6 +24,7 @@ separately by `test_the_only_hook_registered_is_a_forward_hook`.
 
 import csv
 import importlib.util
+import shutil
 import sys
 from pathlib import Path
 
@@ -460,6 +461,132 @@ def predict_cli(tmp_path, project_scratch, monkeypatch):
     return module, images, checkpoint, results
 
 
+@pytest.fixture
+def labelled_predict_cli(predict_cli, tmp_path, project_scratch, monkeypatch):
+    """`predict_cli` plus the handoff the labelling stage would have written.
+
+    **`labels.csv` is the authority on which specimen a patch came from**, and this
+    fixture stages it the way `bin/label_patches.py` writes it: one row per patch with
+    `slide_id` naming the specimen and `path` relative to the label root. The directory
+    tree beside it holds the same files under `normal/` and `steatosis/` and **names no
+    specimen in any directory name**, which is the fact `--specimen` has to be built on
+    rather than on the layout.
+
+    Five patches over three specimens: 4 holds one steatotic and one normal, 5 one
+    steatotic, 6 one steatotic and one normal. `--dir` is pointed at a directory holding
+    the three steatotic ones, which is the shape `make predict` uses, so the fixture
+    reproduces the finding: two of the three rows are specimens the fold-0 checkpoint
+    was fitted on.
+    """
+    module, images, checkpoint, results = predict_cli
+    label_root = tmp_path / "labels"
+    rows = []
+    for index, (specimen, label, name) in enumerate((
+        ("4", 1, "4_100_100.png"),
+        ("4", 0, "4_200_200.png"),
+        ("5", 1, "5_300_300.png"),
+        ("6", 1, "6_400_400.png"),
+        ("6", 0, "6_500_500.png"),
+    )):
+        relative = f"{'steatosis' if label else 'normal'}/{name}"
+        (label_root / relative).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(images / f"patch_{index % 3}.png", label_root / relative)
+        rows.append([name, specimen, label, 7, "0.5", relative])
+    handoff = tmp_path / "handoff"
+    handoff.mkdir(exist_ok=True)
+    with (handoff / "labels.csv").open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(LABEL_COLUMNS)
+        writer.writerows(rows)
+    steatosis = label_root / "steatosis"
+    return module, steatosis, checkpoint, results, handoff / "labels.csv"
+
+
+def test_predict_filters_to_the_specimen_the_caller_names(labelled_predict_cli):
+    # **The finding.** `make predict` pointed `--dir` at the steatosis tree of every
+    # specimen while the fold-0 checkpoint was fitted on two of the three, so 3079 of 3502
+    # committed rows were resubstitution over specimens the model had memorised, written
+    # into a tracked artifact with no checkpoint, no specimen column and no flag.
+    module, steatosis, checkpoint, results, labels = labelled_predict_cli
+    assert module.main([
+        "--dir", str(steatosis), "--checkpoint", str(checkpoint),
+        "--labels", str(labels), "--specimen", "4",
+    ]) == 0
+    written = _read_csv(results / "predictions.csv")
+    assert [Path(row["path"]).name for row in written] == ["4_100_100.png"]
+
+
+def test_every_prediction_row_says_which_specimen_it_is_and_whether_it_was_trained_on(
+    labelled_predict_cli
+):
+    # **The columns are written whether or not `--specimen` was given.** A run that
+    # filters still produces a file somebody will join to `labels.csv`, and the file that
+    # tells them which rows are resubstitution without a second command is the one this
+    # project was rebuilt to produce. `trained_on` is `false` for specimen 4 because fold 0
+    # trains on 5 and 6, and `true` for the other two — the distinction the old file did
+    # not carry at all.
+    module, steatosis, checkpoint, results, labels = labelled_predict_cli
+    assert module.main([
+        "--dir", str(steatosis), "--checkpoint", str(checkpoint),
+        "--labels", str(labels), "--train-specimens", "5", "--train-specimens", "6",
+    ]) == 0
+    written = _read_csv(results / "predictions.csv")
+    assert len(written) == 3
+    for row in written:
+        assert row["specimen"] in {"4", "5", "6"}
+        assert row["trained_on"] in {"True", "False"}
+    by_specimen = {row["specimen"]: row for row in written}
+    assert by_specimen["4"]["trained_on"] == "False"
+    assert by_specimen["5"]["trained_on"] == "True"
+    assert by_specimen["6"]["trained_on"] == "True"
+    # **The columns come first and are named, not appended after the probabilities**, so a
+    # reader opening the file sees what a row is about before it sees how confident the
+    # model was.
+    assert list(written[0])[:6] == [
+        "path", "specimen", "trained_on", "class_index", "predicted_class", "confidence",
+    ]
+
+
+def test_a_row_the_handoff_does_not_describe_says_so_rather_than_guessing(predict_cli):
+    # **`--labels` is optional, and an image outside the handoff is the ordinary case for
+    # this program**: it is inference over an image or a directory, and a caller handing
+    # it a picture from somewhere else is using it as designed. The specimen column is
+    # then empty and `trained_on` is `False` — the empty cell is "not in the handoff",
+    # which is a fact, and inventing a specimen from the file name would not be.
+    module, images, checkpoint, results = predict_cli
+    assert module.main([
+        "--dir", str(images), "--checkpoint", str(checkpoint),
+        "--train-specimens", "Z",
+    ]) == 0
+    written = _read_csv(results / "predictions.csv")
+    assert len(written) == 3
+    for row in written:
+        assert row["specimen"] == ""
+        assert row["trained_on"] == "False"
+
+
+def test_naming_a_specimen_without_a_handoff_is_refused(predict_cli, capsys):
+    # `--specimen` filters by a fact only the handoff carries, so asking for it without
+    # one is a refusal rather than a filter that silently matches nothing.
+    module, images, checkpoint, _results = predict_cli
+    argv = ["--dir", str(images), "--checkpoint", str(checkpoint), "--specimen", "4"]
+    assert module.main(argv) == 2
+    assert "--labels" in capsys.readouterr().err
+
+
+def test_naming_a_specimen_the_handoff_holds_no_patch_of_is_refused(labelled_predict_cli, capsys):
+    # The same reason `--specimens` is checked in `bin/evaluate.py`: a filter that
+    # matches nothing would write a header and no rows, which is a report of nothing a
+    # reader cannot tell apart from a model that predicted nothing.
+    module, steatosis, checkpoint, _results, labels = labelled_predict_cli
+    argv = [
+        "--dir", str(steatosis), "--checkpoint", str(checkpoint),
+        "--labels", str(labels), "--specimen", "Z",
+    ]
+    assert module.main(argv) == 2
+    assert "Z" in capsys.readouterr().err
+
+
 def test_predict_writes_a_row_per_image_and_creates_the_results_directory(
     predict_cli, capsys
 ):
@@ -470,7 +597,9 @@ def test_predict_writes_a_row_per_image_and_creates_the_results_directory(
     assert results.is_dir()
     written = _read_csv(results / "predictions.csv")
     assert len(written) == 3
-    assert list(written[0])[:4] == ["path", "class_index", "predicted_class", "confidence"]
+    assert list(written[0])[:6] == [
+        "path", "specimen", "trained_on", "class_index", "predicted_class", "confidence",
+    ]
 
     # `sorted()`, so the row order means the same thing on the next run of the pipeline.
     assert [Path(row["path"]).name for row in written] == [
