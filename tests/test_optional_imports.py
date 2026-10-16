@@ -18,10 +18,10 @@ import raises plain `ImportError`:
     behavior and silence this warning by passing exc_type=ImportError explicitly.
 
 Under `filterwarnings = ["error"]` — which is how this suite runs — that warning is a
-**failure, not a skip**, so a machine without the OpenSlide binary library fails
-collection-time behaviour of the test instead of skipping the tests that need it: the
-exact outcome the guard exists to prevent, reached through the guard. And from pytest
-9.1 it is an error regardless of the filter, so this is a dated debt rather than a
+**failure, not a skip**, so a machine without the OpenSlide binary library fails at
+collection time on the module whose import raised, instead of skipping the tests that need
+it: the exact outcome the guard exists to prevent, reached through the guard. And from
+pytest 9.1 it is an error regardless of the filter, so this is a dated debt rather than a
 stylistic one.
 
 **The fix is one keyword on each call and the assertion is a scan, because the defect

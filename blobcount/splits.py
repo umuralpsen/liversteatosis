@@ -50,10 +50,11 @@ So `loso_folds("456")` splits one argument into three specimens called
 `"4"`, `"5"` and `"6"` — three folds of one row each, which is the patch-level split
 above wearing a specimen-level name, returned as a valid result. `bytes` is worse rather
 than different: iterating `b"456"` yields the integers 52, 53 and 54, so `held_out` would
-carry an `int` on a dataclass annotated `str`. `str`, `bytes`, `bytearray` and
-`memoryview` are excluded by name, and those four are **the character and byte-buffer
-sequences a caller already holds without importing anything** — `str` the only sequence
-of characters, the other three the byte-buffer types.
+carry an `int` on a dataclass annotated `str`. `str`, `bytes`, `bytearray`,
+`memoryview` and `array.array` are excluded by name, and those five are **every
+sequence a caller already holds**: `str` the only sequence of characters, the other
+four the byte buffers, three of them builtins and `array.array` one `import array`
+away. The set was four until the paragraph below made it five.
 
 **That set is closed over the standard library, and the set itself moved out of this
 module on 2026-10-16.** `array.array` used to be a fifth shape this function accepted:
@@ -64,6 +65,13 @@ accepted both and returned three one-row folds for either. The same hole was liv
 Both now call `blobcount.sequences.is_character_or_byte_sequence`, which names all five and
 is the one place the set is written down — so a sixth buffer type cannot be added to one
 module and missed by the other, which is exactly what happened here.
+
+**Moving the list out of this module did not move the prose about it, and the paragraph
+above is the proof.** It went on naming four excluded types for a week after the tuple
+that had four names became a call to a predicate that names five, so the two paragraphs
+of one docstring contradicted each other about the same set. A deletion that moves a
+list out of a module has to be read as moving everything written about the list too;
+grep for the old count, not only for the old names.
 
 **The exclusion rule is the same one, on the same reasoning, as
 `blobcount.ablation._thresholds` applies to `ablation.thresholds`.** A `Sequence` test
