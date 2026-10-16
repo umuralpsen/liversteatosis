@@ -538,6 +538,47 @@ def test_cli_labels_every_row_and_exits_zero(cli, capsys):
     assert "2 patches labelled" in printed
 
 
+def test_the_stats_record_the_labeling_rule_that_produced_them(cli):
+    # **Spec §4 asks every stage for an artifact recording its inputs, resolved parameters
+    # and outputs, and this one recorded the threshold and nothing else.** Every number in
+    # the README's ablation section is a function of the eight `blobs.*` keys below and of
+    # `labeling.blob_threshold`, so an artifact holding the last and not the first eight
+    # cannot be re-examined: a reader who wants to know why specimen 4's counts are 2.63
+    # has the answer's output and none of its inputs.
+    #
+    # **The keys and not the whole configuration**, for the reason `blobcount.config.
+    # resolved` gives, and read through it so each is recorded as a reader the source scan
+    # in `tests/test_config.py` can see.
+    module, index, out = cli
+    assert module.main(["--index", str(index)]) == 0
+    written = json.loads((out / "labeling_stats.json").read_text(encoding="utf-8"))
+    assert written["config"] == {
+        "labeling.blob_threshold": 5,
+        "blobs.area_um2_min": 3.1,
+        "blobs.area_um2_max": 125.0,
+        "blobs.circularity_min": 0.6,
+        "blobs.gray_percentile": 95,
+        "blobs.morph_kernel_size": 3,
+        "blobs.morph_iterations": 2,
+        "blobs.stain_normalization": False,
+    }
+    assert written["provenance"].startswith("written by blobcount.labeling.label_patches")
+    # And it says what the labels are, which is the one thing a reader of a labels.csv
+    # cannot work out for themselves.
+    assert "not a pathologist" in written["provenance"]
+
+
+def test_the_recorded_threshold_follows_a_hand_edited_configuration(cli):
+    # The point of recording resolved values rather than the key names: the number in the
+    # block is the number the run used. `--threshold 2` moves `labeling.blob_threshold`,
+    # and the block moves with it rather than recording the shipped five.
+    module, index, out = cli
+    assert module.main(["--index", str(index), "--threshold", "2"]) == 0
+    written = json.loads((out / "labeling_stats.json").read_text(encoding="utf-8"))
+    assert written["config"]["labeling.blob_threshold"] == 2
+    assert written["blob_threshold"] == 2
+
+
 def test_cli_threshold_reaches_the_labels_and_the_stats(cli):
     module, index, out = cli
     assert module.main(["--index", str(index), "--threshold", "2"]) == 0

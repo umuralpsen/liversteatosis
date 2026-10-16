@@ -16,6 +16,7 @@ from blobcount.config import (
     default_config,
     get_device,
     load,
+    resolved,
     set_seed,
 )
 
@@ -195,6 +196,45 @@ def test_every_declared_config_key_is_read_by_package_source():
         f"stale entries to delete from _KEYS_WITHOUT_READER: "
         f"{sorted(_KEYS_WITHOUT_READER - unread)}"
     )
+
+
+def test_resolved_reports_the_keys_a_stage_used_and_records_them_as_read():
+    # **The function every artifact's config block is written through**, and its two
+    # properties are load-bearing. It reads through `cfg.get` so a key named here is
+    # marked read exactly as a `cfg.get("...")` literal marks it — otherwise writing the
+    # key into an artifact would make the source scan report it as read by nobody.
+    # And it reports the *resolved* value, which for a key declared `float` and written as
+    # an integer is the float the run actually used.
+    cfg = load()
+    assert resolved(cfg, ["project.seed", "project.device"]) == {
+        "project.seed": 42,
+        "project.device": "auto",
+    }
+    assert "project.seed" not in cfg.unknown_keys()
+    assert "project.device" not in cfg.unknown_keys()
+
+    widened = load()
+    assert resolved(widened, ["blobs.area_um2_max"]) == {"blobs.area_um2_max": 125.0}
+    assert type(resolved(widened, ["blobs.area_um2_max"])["blobs.area_um2_max"]) is float
+
+
+def test_resolved_keeps_the_callers_order_so_an_artifact_reads_top_down():
+    # The order is the caller's because the block is written straight into a JSON document
+    # and a reader of that document reads it top down. Python dicts keep insertion order,
+    # so nothing here is a sorting convention.
+    cfg = load()
+    assert list(resolved(cfg, ["project.device", "project.seed"])) == [
+        "project.device",
+        "project.seed",
+    ]
+
+
+def test_resolved_refuses_a_key_this_project_does_not_declare():
+    # Not a check of the caller's list — a consequence of reading through `get`, which
+    # refuses an undeclared key. An artifact cannot be given a key nothing reads, which is
+    # the same failure `get` gives a caller reading one by name.
+    with pytest.raises(ConfigError, match="unknown key"):
+        resolved(load(), ["training.never_read_by_code"])
 
 
 def test_load_records_no_reads():

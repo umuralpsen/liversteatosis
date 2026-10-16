@@ -150,7 +150,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from blobcount.config import PROJECT_ROOT, ConfigError, load
+from blobcount.config import PROJECT_ROOT, ConfigError, load, resolved
 from blobcount.extract import is_owned_path
 from blobcount.splits import SplitError
 from blobcount.train import read_labels, run_cross_validation
@@ -161,6 +161,17 @@ EXIT_REFUSED = 2
 # Where the artifacts go and what they are called, under `out_dir`. One place, so the
 # writer and the tests that read them back name the same file.
 _SUMMARY_NAME = "training_summary.json"
+
+# The sidecar carrying the provenance and the resolved parameters for the artifacts this
+# stage writes that cannot carry them inline. **A file beside them, not a column in them
+# and not a `#` line above them**: `fold_summary.csv` is read by `csv.DictReader` below
+# and by every downstream reader, a new column shifts every row a reader indexes by
+# position, and a leading `#` becomes the *header* — `DictReader` reads the first line as
+# the header whatever it holds, so a comment line demotes the real header to a row and
+# every lookup by name returns nothing. The sidecar names the artifacts it covers,
+# because the per-fold logs and checkpoints sit beside it in the same directory and carry
+# the same rule.
+_PROVENANCE_SIDECAR = "fold_summary.provenance.json"
 
 _FOLD_COLUMNS = ("fold", "specimen", "epoch", "accuracy", "precision", "recall", "f1", "lr")
 _SUMMARY_COLUMNS = ("metric", "mean", "population std")
@@ -265,7 +276,7 @@ def _refuse_output_target(target: Path) -> str | None:
     return None
 
 
-def _document(summary: dict, per_fold: Sequence[dict], labels: Path) -> dict:
+def _document(summary: dict, per_fold: Sequence[dict], labels: Path, cfg) -> dict:
     """Return the JSON document this run writes.
 
     UTF-8 with `ensure_ascii=False` and specimen names as values, for the reasons
@@ -277,12 +288,82 @@ def _document(summary: dict, per_fold: Sequence[dict], labels: Path) -> dict:
     in one artifact and cannot be read as though the two came from different epochs. The
     handoff the run trained from is named beside them: a summary whose mean is a number
     without the cohort it is a mean over cannot be compared with anything.
+
+    **`provenance`, `config` and `epoch_selection` are the three keys this document did not
+    have.** `config` is the resolved values of the keys this stage read, so the means are a
+    function of a stated rule rather than of whatever the file said on the day.
+    `epoch_selection`, from `blobcount.train`, is the disclosure the headline needs: with
+    three specimens the held-out specimen *is* the validation set, so every figure here is
+    the best of up to `training.epochs` attempts on the very patches it is reported over,
+    and the count of attempts and the mean over them are what make that checkable instead
+    of merely statable. `provenance` says what the numbers are in words.
     """
     return {
+        "provenance": _PROVENANCE,
         "labels": str(labels),
         "summary": summary,
         "per_fold": list(per_fold),
+        "config": _config(cfg),
     }
+
+
+# The sentence this stage's artifacts carry about what their numbers are, in the artifact
+# rather than only in this file's docstring where a reader of the file alone would not see
+# it. **It says what the selection is, not only what it produced**: the model selection
+# rule is on validation F1 over the specimen the fold held out, which is the specimen the
+# reported figure is measured over, so every per-fold metric here is a maximum over epochs
+# and an upper bound rather than an estimate of performance on unseen tissue. `README.md`
+# says it in a paragraph; this is the same sentence in the place a reader of the artifact
+# alone reaches.
+_PROVENANCE = (
+    "written by bin/train.py by training leave-one-specimen-out over the specimens the "
+    "handoff holds, so every number in this document is a function of that handoff, of the "
+    "weights bin/label_patches.py wrote, of the resolved parameters under `config`, and of "
+    "the seed `config` carries. **Each fold's figure is the epoch with the highest "
+    "validation F1, and that validation set is the held-out specimen the figure is reported "
+    "over**: with three specimens there is no third split, so every per-fold metric here is "
+    "the best of up to `training.epochs` attempts on the very patches it is measured on and "
+    "is an upper bound rather than an estimate of performance on unseen tissue. "
+    "`summary.epoch_selection` records how many epochs each fold considered, which it chose "
+    "and the mean over the ones it did not, and the per-epoch values are in "
+    "`training_log_fold<n>.csv` beside this file. The labels those figures are measured "
+    "against are morphological blob counts and not a pathologist's grade, so the ceiling is "
+    "agreement with a hand-tuned counter"
+)
+
+# The keys this stage reads, and not the whole configuration: every `training.*` and
+# `augmentation.*` key is one of them, because between them they decide what a model is
+# and how it was fitted, and a summary over three specimens is too small a number to be
+# compared with anything without them. Read through `blobcount.config.resolved` so each is
+# recorded as a reader the source scan in `tests/test_config.py` can see.
+def _config(cfg) -> dict:
+    return resolved(
+        cfg,
+        (
+            "project.seed",
+            "project.device",
+            "training.architecture",
+            "training.pretrained",
+            "training.num_classes",
+            "training.input_size",
+            "training.batch_size",
+            "training.epochs",
+            "training.learning_rate",
+            "training.patience_early_stop",
+            "training.patience_lr_scheduler",
+            "training.lr_scheduler_factor",
+            "training.use_weighted_sampler",
+            "training.num_workers",
+            "augmentation.horizontal_flip",
+            "augmentation.vertical_flip",
+            "augmentation.rotation_degrees",
+            "augmentation.color_jitter_brightness",
+            "augmentation.color_jitter_contrast",
+            "augmentation.color_jitter_saturation",
+            "augmentation.color_jitter_hue",
+            "augmentation.affine_translate",
+        ),
+    )
 
 
 def _read_csv(path: Path) -> list[dict]:
@@ -398,7 +479,32 @@ def main(argv: Sequence[str] | None = None) -> int:
     ])
     (out_dir / _SUMMARY_NAME).write_text(
         json.dumps(
-            _document(summary, _records(rows), args.labels),
+            _document(summary, _records(rows), args.labels, cfg),
+            indent=2,
+            ensure_ascii=False,
+        ) + "\n",
+        encoding="utf-8",
+    )
+    # **The CSVs carry the label in a sidecar and not in a column and not in a `#` line.**
+    # `fold_summary.csv` is read by `_read_csv` above and by `csv.DictReader` downstream,
+    # and a new column would change every row a reader has to index by position while a
+    # leading `#` would become the header — `csv.DictReader` reads the first line as the
+    # header whatever it is, so a comment line turns the real header into a row and every
+    # lookup by name returns nothing. `tests/test_train.py` reads the file back after this
+    # write and asserts the rows are unchanged, which is the only way that claim is worth
+    # anything.
+    (out_dir / _PROVENANCE_SIDECAR).write_text(
+        json.dumps(
+            {
+                "artifacts": [
+                    _SUMMARY_NAME,
+                    "fold_summary.csv",
+                    *(f"training_log_fold{number}.csv" for number in range(summary["n_folds"])),
+                    *(f"best_model_fold{number}.pth" for number in range(summary["n_folds"])),
+                ],
+                "provenance": _PROVENANCE,
+                "config": _config(cfg),
+            },
             indent=2,
             ensure_ascii=False,
         ) + "\n",

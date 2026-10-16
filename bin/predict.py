@@ -160,6 +160,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import logging
 import pickle
 import sys
@@ -168,7 +169,7 @@ from pathlib import Path
 
 import torch
 
-from blobcount.config import PROJECT_ROOT, Config, ConfigError, get_device, load
+from blobcount.config import PROJECT_ROOT, Config, ConfigError, get_device, load, resolved
 from blobcount.data import build_transforms
 from blobcount.extract import is_owned_path
 from blobcount.labeling import CLASS_NAMES
@@ -181,6 +182,29 @@ EXIT_REFUSED = 2
 # Where the artifact goes and what it is called, under `paths.results`. One place, so the
 # writer and the tests that read it back name the same file.
 _PREDICTIONS_NAME = "predictions.csv"
+
+# The sidecar carrying the provenance and the resolved parameters for the CSV, which
+# cannot carry them inline: a new column shifts every row a reader indexes by position,
+# and a leading `#` line becomes the *header* — `csv.DictReader` reads the first line as
+# the header whatever it holds, so a comment line would demote the real header to a row
+# and every lookup by name would return nothing.
+_PROVENANCE_SIDECAR = "predictions.provenance.json"
+
+# The sentence the artifacts carry about what their numbers are. **It names the two
+# columns that decide how a row is read**, because a prediction file is the easiest of
+# this project's artifacts to over-read: a row is the model's opinion about one patch,
+# and whether that patch came from a specimen the model was fitted on is the difference
+# between a measurement and a memorisation.
+_PROVENANCE = (
+    "written by bin/predict.py from the images this run was pointed at and the weights "
+    "named by `checkpoint`, so every row is a function of those two inputs and of the "
+    "resolved parameters under `config`. `specimen` is what the `labels` handoff records "
+    "for the patch and is empty for an image the handoff does not describe; `trained_on` "
+    "marks a row whose specimen the caller stated the checkpoint was fitted on, and such a "
+    "row is resubstitution over a specimen the model has already seen and not a measurement "
+    "of one it has not. The probabilities are the softmax of the head this checkpoint "
+    "carries, and they are the model's confidence and not a measurement of anything"
+)
 
 # The columns every row carries before the probabilities. `specimen` and `trained_on` are
 # new and they are the point of the column list: **a prediction file that does not say
@@ -624,6 +648,35 @@ def main(argv: Sequence[str] | None = None) -> int:
         writer = csv.DictWriter(handle, fieldnames=columns)
         writer.writeheader()
         writer.writerows(rows)
+    # The sidecar, for the reason `_PROVENANCE_SIDECAR` gives. It names the CSV it covers
+    # so a reader holding one file knows what the other is about, and it carries the
+    # training cohort the caller stated — which is the fact a reader needs most and the
+    # one `trained_on` alone does not give, because the column says which rows are
+    # affected and not which specimens are.
+    (results_dir / _PROVENANCE_SIDECAR).write_text(
+        json.dumps(
+            {
+                "artifacts": [_PREDICTIONS_NAME],
+                "provenance": _PROVENANCE,
+                "checkpoint": str(args.checkpoint),
+                "train_specimens": list(args.train_specimens or ()),
+                "scored_specimen": args.specimen,
+                "config": resolved(
+                    cfg,
+                    (
+                        "project.seed",
+                        "project.device",
+                        "training.architecture",
+                        "training.num_classes",
+                        "training.input_size",
+                    ),
+                ),
+            },
+            indent=2,
+            ensure_ascii=False,
+        ) + "\n",
+        encoding="utf-8",
+    )
 
     _print_table(
         columns,

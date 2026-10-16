@@ -797,6 +797,98 @@ def test_the_printed_mean_table_carries_the_summary_numbers(cli, capsys, monkeyp
     assert [cells[2] for cells in printed] == ["0.250", "0.250", "0.500", "0.333"]
 
 
+def test_the_summary_records_the_parameters_and_what_its_selection_costs(
+    cli, monkeypatch
+):
+    # **Three keys the document did not have, and the first of them is the finding.**
+    # `training_summary.json` recorded no `training.*` and no `augmentation.*` value, so
+    # every mean in it was a function of a rule nobody could see; and it recorded nothing
+    # about the selection, so a reader of the artifact alone saw a chosen epoch and no
+    # statement of what it was chosen against. The provenance says the latter in the file
+    # rather than only in the README, and `config` says the former in numbers.
+    _stand_in(monkeypatch, _StandIn(positive=True))
+    module, index, _label_root, results = cli
+    assert module.main(["--labels", str(index), "--out", str(results)]) == 0
+
+    document = json.loads((results / "training_summary.json").read_text(encoding="utf-8"))
+    assert document["provenance"].startswith("written by bin/train.py")
+    assert "upper bound rather than an estimate" in document["provenance"]
+    assert document["config"] == {
+        "project.seed": 42,
+        "project.device": "auto",
+        "training.architecture": "resnet18",
+        "training.pretrained": False,
+        "training.num_classes": 2,
+        "training.input_size": 32,
+        "training.batch_size": 2,
+        "training.epochs": 2,
+        "training.learning_rate": 0.0001,
+        "training.patience_early_stop": 3,
+        "training.patience_lr_scheduler": 3,
+        "training.lr_scheduler_factor": 0.5,
+        "training.use_weighted_sampler": True,
+        "training.num_workers": 0,
+        "augmentation.horizontal_flip": True,
+        "augmentation.vertical_flip": True,
+        "augmentation.rotation_degrees": 15,
+        "augmentation.color_jitter_brightness": 0.15,
+        "augmentation.color_jitter_contrast": 0.15,
+        "augmentation.color_jitter_saturation": 0.1,
+        "augmentation.color_jitter_hue": 0.05,
+        "augmentation.affine_translate": 0.05,
+    }
+    # And the disclosure the headline needs is in the document, not only in the README.
+    selection = document["summary"]["epoch_selection"]
+    assert len(selection) == 2
+    assert document["summary"]["mean_epoch_val_f1"] <= document["summary"]["mean_f1"]
+
+
+def test_the_sidecar_does_not_change_the_csv_any_reader_sees(cli, monkeypatch, capsys):
+    # **The plan's Review Focus requires the pipeline-verification label in every
+    # artifact, and `fold_summary.csv` cannot carry one inline.** A new column shifts
+    # every row a reader indexes by position, and a leading `#` line becomes the header:
+    # `csv.DictReader` reads the first line as the header whatever it holds, so the real
+    # header would demote to a row and every lookup by name would return nothing.
+    #
+    # So the label goes in a sidecar — and **the test that matters is the reader**, not
+    # the sidecar. `bin/train.py` reads this very file back through `csv.DictReader` to
+    # render the table it prints, so the run below proves the round trip by rendering
+    # numbers out of the file rather than out of the summary dict, and the header and the
+    # per-fold rows are asserted exactly.
+    _stand_in(monkeypatch, _StandIn(positive=True))
+    module, index, _label_root, results = cli
+    assert module.main(["--labels", str(index), "--out", str(results)]) == 0
+
+    sidecar = json.loads(
+        (results / "fold_summary.provenance.json").read_text(encoding="utf-8")
+    )
+    assert sidecar["provenance"] == _document_provenance(results)
+    assert "fold_summary.csv" in sidecar["artifacts"]
+    assert "training_summary.json" in sidecar["artifacts"]
+    assert "training_log_fold0.csv" in sidecar["artifacts"]
+
+    # The reader. Header first, unchanged, and a `DictReader` over the file still finds
+    # every column by name — which a `#` line above the header would break.
+    with (results / "fold_summary.csv").open(encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    assert len(rows) == 2
+    assert set(rows[0]) >= {"fold", "held_out", "epoch", "val_f1", "precision", "recall"}
+    assert not (results / "fold_summary.csv").read_text(encoding="utf-8").startswith("#")
+    # And the printed table is rendered out of that file, so a broken header would show up
+    # as a traceback here rather than as a silently wrong row.
+    header, printed = _printed_tables(capsys.readouterr().out)[0]
+    assert tuple(header) == ("fold", "specimen", "epoch", "accuracy", "precision",
+                             "recall", "f1", "lr")
+    assert [cells[0] for cells in printed] == [row["fold"] for row in rows]
+
+
+def _document_provenance(results: Path) -> str:
+    """Return the provenance the summary JSON carries, for the sidecar to match."""
+    return json.loads(
+        (results / "training_summary.json").read_text(encoding="utf-8")
+    )["provenance"]
+
+
 def test_the_command_line_writes_the_logs_the_summary_and_the_json(cli, capsys):
     module, index, _label_root, results = cli
     assert module.main(["--labels", str(index), "--out", str(results)]) == 0

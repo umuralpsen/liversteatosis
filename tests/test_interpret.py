@@ -24,6 +24,7 @@ separately by `test_the_only_hook_registered_is_a_forward_hook`.
 
 import csv
 import importlib.util
+import json
 import shutil
 import sys
 from pathlib import Path
@@ -617,6 +618,35 @@ def test_predict_writes_a_row_per_image_and_creates_the_results_directory(
 
     printed = capsys.readouterr().out
     assert "patch_0.png" in printed and "predictions.csv" in printed
+
+
+def test_predict_writes_a_sidecar_and_leaves_the_csv_readable(labelled_predict_cli):
+    # **The CSV cannot carry the provenance inline** — a new column shifts every row a
+    # reader indexes by position and a `#` line above the header becomes the header — so
+    # it goes in a sidecar, and the test that matters is the reader: a `DictReader` over
+    # the file afterwards still finds every column by name and the first line is still the
+    # header.
+    module, steatosis, checkpoint, results, labels = labelled_predict_cli
+    assert module.main([
+        "--dir", str(steatosis), "--checkpoint", str(checkpoint),
+        "--labels", str(labels), "--train-specimens", "5", "--train-specimens", "6",
+    ]) == 0
+
+    sidecar = json.loads(
+        (results / "predictions.provenance.json").read_text(encoding="utf-8")
+    )
+    assert sidecar["artifacts"] == ["predictions.csv"]
+    assert sidecar["provenance"].startswith("written by bin/predict.py")
+    assert "resubstitution" in sidecar["provenance"]
+    # The cohort the caller stated and the specimen it filtered to: the two facts a reader
+    # needs and neither of which is in the CSV.
+    assert sidecar["train_specimens"] == ["5", "6"]
+    assert sidecar["config"]["training.architecture"] == "resnet18"
+
+    text = (results / "predictions.csv").read_text(encoding="utf-8")
+    assert not text.startswith("#")
+    rows = _read_csv(results / "predictions.csv")
+    assert list(rows[0])[:3] == ["path", "specimen", "trained_on"]
 
 
 def test_predict_takes_a_single_image_as_well_as_a_directory(predict_cli):

@@ -1328,6 +1328,40 @@ def test_cli_writes_the_json_the_png_and_the_per_slide_table(cli, capsys):
     ]
 
 
+def test_the_json_records_the_counting_rule_and_the_parameters(cli):
+    # **The artifact recorded what every number in it was and nothing about the rule that
+    # made them.** `blobs.area_um2_min`, `area_um2_max`, `circularity_min`,
+    # `gray_percentile`, `morph_kernel_size`, `morph_iterations` and `stain_normalization`
+    # decide every ratio and every count in this file, and the file recorded none of them,
+    # so a reader could not re-derive one number from a rule they could not see.
+    #
+    # **`provenance` carries the mechanism as well as the sentence.** The per-specimen
+    # spread is the thing this study has been asked about since 2026-09-29, and the file
+    # holding it said nothing about why the three slides disagree — while carrying
+    # `per_slide_gray_threshold`, the one number per slide that decides which patches each
+    # slide calls steatotic. The provenance says so in the artifact rather than only in the
+    # README, so the claim travels with the numbers.
+    module, index, results = cli
+    assert module.main(["--index", str(index)]) == 0
+    written = json.loads(
+        (results / "label_analysis" / "threshold_ablation.json").read_text(encoding="utf-8")
+    )
+    assert written["config"] == {
+        "ablation.thresholds": [2, 3, 5],
+        "labeling.blob_threshold": 3,
+        "extraction.patch_size": 256,
+        "blobs.area_um2_min": 3.1,
+        "blobs.area_um2_max": 125.0,
+        "blobs.circularity_min": 0.6,
+        "blobs.gray_percentile": 95,
+        "blobs.morph_kernel_size": 3,
+        "blobs.morph_iterations": 2,
+        "blobs.stain_normalization": False,
+    }
+    assert written["provenance"].startswith("written by bin/ablate_threshold.py")
+    assert "not separable from per-slide staining intensity" in written["provenance"]
+
+
 def test_cli_writes_and_prints_the_range_coverage(cli, capsys):
     # **Red before the fix**: the JSON carried `blob_count_summary` and `per_threshold`
     # and nothing comparing them, and nothing on stdout did either. A reader of the two

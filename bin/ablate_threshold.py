@@ -210,7 +210,7 @@ from blobcount.ablation import (
     ablate,
     plot,
 )
-from blobcount.config import PROJECT_ROOT, ConfigError, load
+from blobcount.config import PROJECT_ROOT, ConfigError, load, resolved
 from blobcount.extract import is_owned_path
 from blobcount.labeling import LabelingInputError
 
@@ -225,6 +225,29 @@ _FIGURE_NAME = "threshold_ablation.png"
 
 _SWEEP_COLUMNS = ("threshold", "n_steatosis", "n_normal", "pooled_ratio", "spread", "selected")
 _SLIDE_COLUMNS = ("slide_id", "n", "steatosis", "ratio", "gray_threshold", "mpp")
+
+# The sentence the artifact carries about what its numbers are, in the artifact rather
+# than only in this file's docstring where a reader of the file alone would not see it.
+# **It names the mechanism behind the per-specimen spread**, because that is the one fact
+# about these numbers a reader cannot work out from the file: `per_slide_gray_threshold`
+# holds one number per slide, derived from that slide's staining intensity, and it is
+# what decides which patches each slide calls steatotic — so a spread of 0.175 / 0.661 /
+# 0.855 across three specimens is one measurement and not three slides differing
+# biologically. The file has carried this number since it began carrying one and said
+# nothing about it.
+_PROVENANCE = (
+    "written by bin/ablate_threshold.py by re-counting every patch the index names, so "
+    "every number in this document is a function of those patches, of the per-slide gray "
+    "threshold recorded in `per_slide_gray_threshold`, and of the resolved parameters under "
+    "`config` — which is what this run used and not the shipped file. Each per-slide gray "
+    "threshold is the configured percentile of that slide's own recorded tissue_gray values, "
+    "so it is a function of how that slide is stained: the per-specimen ratios and their "
+    "spread beside them are therefore not separable from per-slide staining intensity, and a "
+    "difference between two specimens here cannot be read as a difference between two "
+    "patients without a measurement this project has not made. The counts are morphological "
+    "blob counts and not a pathologist's grade, so the ceiling of anything computed from "
+    "this file is agreement with a hand-tuned counter"
+)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -335,7 +358,7 @@ def _n_slides(stats: AblationStats) -> int:
     return len(set(stats.slide_of.values()))
 
 
-def _document(stats: AblationStats) -> dict:
+def _document(stats: AblationStats, cfg) -> dict:
     """Return the JSON document this run writes.
 
     UTF-8 with `ensure_ascii=False` and slide ids as keys and as values, for the reasons
@@ -352,6 +375,14 @@ def _document(stats: AblationStats) -> dict:
     a reader of a file from any run of this pipeline knows which rule produced the counts
     in it.
 
+    **`provenance` and `config` are the two keys this document did not have**, and the
+    absence is what the finding named: the file recorded what every number in it was and
+    nothing about the rule that made them. `provenance` says what the counts are — blob
+    counts at a per-slide gray threshold, which is one number per slide derived from
+    staining intensity, so the per-specimen spread beside them is not separable from how
+    each slide is stained. `config` carries the resolved values of the keys this stage
+    read, so the file can be re-examined rather than only re-read.
+
     **`threshold_range_coverage` is beside `blob_count_summary` and not below the file,
     because those two are read together.** A reader who has the distribution and the
     sweep and not the comparison between them concludes the sweep covered the
@@ -366,6 +397,7 @@ def _document(stats: AblationStats) -> dict:
     reason `_n_slides` gives.
     """
     return {
+        "provenance": _PROVENANCE,
         "selected_threshold": stats.selected,
         "n_patches": stats.count_summary()["count"],
         "n_slides": _n_slides(stats),
@@ -379,7 +411,41 @@ def _document(stats: AblationStats) -> dict:
             for threshold, record in sorted(stats.per_threshold.items())
         },
         "counting_rule_comparison": RULE_COMPARISON,
+        "config": _config(cfg),
     }
+
+
+def _config(cfg) -> dict:
+    """Return the resolved values of the keys this stage read, and nothing else.
+
+    **Every table in the README's ablation section is a function of exactly these keys**,
+    which is why the artifact recorded none of them: the area limits, the circularity,
+    the percentile the per-slide gray threshold comes from, the two morphology parameters
+    and the normalization flag decide every number in the file, and the file recorded the
+    numbers alone. A reader could not re-derive one ratio from a rule they could not see.
+
+    `ablation.thresholds` is here as the **converted** list this run swept, which is what
+    `blobcount.ablation._thresholds` returned and not what the file spelled; that is the
+    point of recording it rather than leaving the per-threshold keys to stand in for it.
+
+    Read through `blobcount.config.resolved` so each key is recorded as a reader the
+    source scan in `tests/test_config.py` can see.
+    """
+    return resolved(
+        cfg,
+        (
+            "ablation.thresholds",
+            "labeling.blob_threshold",
+            "extraction.patch_size",
+            "blobs.area_um2_min",
+            "blobs.area_um2_max",
+            "blobs.circularity_min",
+            "blobs.gray_percentile",
+            "blobs.morph_kernel_size",
+            "blobs.morph_iterations",
+            "blobs.stain_normalization",
+        ),
+    )
 
 
 def _refuse_output_target(results_dir: Path, target: Path) -> str | None:
@@ -539,7 +605,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     # `bin/label_patches.py` reads its index before it clears its tree.
     target.mkdir(parents=True, exist_ok=True)
     (target / _JSON_NAME).write_text(
-        json.dumps(_document(stats), indent=2, ensure_ascii=False) + "\n",
+        json.dumps(_document(stats, cfg), indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
     try:

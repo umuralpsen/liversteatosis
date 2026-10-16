@@ -992,6 +992,45 @@ def _document(results: Path) -> dict:
     )
 
 
+def test_the_evaluation_records_its_parameters_and_its_sidecar_leaves_the_csv_readable(cli):
+    # **Spec §4 asks every stage for an artifact recording its inputs, resolved parameters
+    # and outputs; this one recorded the cohorts and neither `evaluation.*` key**, so a
+    # reader checking a bound against its level had to find the shipped file to learn that
+    # it was drawn at 2000 resamples and a 0.95 level.
+    #
+    # The CSV cannot carry the label inline, and the sidecar is the alternative that does
+    # not break a reader: `csv.DictReader` treats the first line as the header whatever it
+    # holds, so a `#` line above it would demote the real header to a row. The test reads
+    # the file back through a `DictReader` afterwards and asserts every column is still
+    # there by name, which is the only version of that claim worth anything.
+    module, index, results, checkpoint = cli
+    assert module.main(_argv(index, checkpoint)) == 0
+
+    document = _document(results)
+    assert document["config"] == {
+        "project.seed": 42,
+        "training.architecture": "resnet18",
+        "training.num_classes": 2,
+        "evaluation.bootstrap_samples": 300,
+        "evaluation.confidence_level": 0.95,
+    }
+
+    sidecar = json.loads(
+        (results / "evaluation" / "per_specimen_metrics.provenance.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert sidecar["provenance"] == document["provenance"]
+    assert sidecar["config"] == document["config"]
+    assert sidecar["artifacts"] == ["medical_metrics.json", "per_specimen_metrics.csv"]
+
+    text = (results / "evaluation" / "per_specimen_metrics.csv").read_text(encoding="utf-8")
+    assert not text.startswith("#")
+    rows = _read_csv(results / "evaluation" / "per_specimen_metrics.csv")
+    assert [row["specimen"] for row in rows] == ["A", "B"]
+    assert "accuracy" in rows[0] and "f1" in rows[0]
+
+
 def test_the_command_line_writes_both_artifacts_under_the_configured_results(cli):
     module, index, results, checkpoint = cli
     assert module.main(_argv(index, checkpoint)) == 0

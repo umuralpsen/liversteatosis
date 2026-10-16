@@ -23,29 +23,47 @@ already extracted is written before it returns. Otherwise the tree would hold
 thousands of patches that no `patches.csv` describes, and the refusal on a re-run
 would then need `--force`, which deletes what the run just produced.
 
+**The run writes `results/extraction_summary.json`, and that is the only record it makes
+of itself.** Its per-slide counts used to go to stdout and nowhere else, so the
+accepted-patch count had no denominator in any artifact and a reader comparing the next
+stage's `patches.csv` against it had nothing to compare it to. The summary carries the
+per-slide counts, their sum, and the resolved values of the five `extraction.*` keys this
+stage read — not the whole configuration, because those five are the ones that decide what
+a patch is and the other forty would bury them.
+
 **Three outcomes, three codes.** A run that completed is `EXIT_OK = 0`. A selected
 specimen that yielded no accepted patch is `EXIT_BLANK_SLIDE = 1`. A refusal is
 `EXIT_REFUSED = 2`, and a refusal is always an answer about the configuration or the
-dataset, never about this program. **Eight** refusals reach it — one per arm of `main` that
-can refuse, plus this program's own empty-tree check, and with the opening `ConfigError`
-arm counted twice because it carries two of them. They are: `load` refusing the file and a
-`paths.patches` `Config.path` refuses, on that one arm; the `ConfigError` around
-`load_registry`; the `RegistryError` beside it; the `LookupError` around `_select`; the
-check that an unforced patch tree is empty; the `OutputPathError` around `prepare_output`;
-and the `SlideError` around `extract_slide`. In four groups by the exception that carries
-them, and nothing this program does does. It was nine before round 6, and the one that
-left is `paths.slides` refused from inside the guard, which now arrives on the
-`OutputPathError` arm below rather than on an arm of its own:
+dataset, never about this program. **Nine** refusals reach it — one per arm of `main` that
+can refuse, plus this program's own empty-tree check and its own results-target guard, and
+with the opening `ConfigError` arm counted twice because it carries two of them. They are:
+`load` refusing the file and a `paths.patches` or `paths.results` `Config.path` refuses, on
+that one arm; the `ConfigError` around `load_registry`; the `RegistryError` beside it; the
+`LookupError` around `_select`; the check that an unforced patch tree is empty; the
+`OutputPathError` around `prepare_output`; the `SlideError` around `extract_slide`; and the
+`paths.results` guard. In four groups by the exception that carries them, and nothing this
+program does does. It was nine before round 6, and the one that left is `paths.slides`
+refused from inside the guard, which now arrives on the `OutputPathError` arm below rather
+than on an arm of its own:
 
 - **A configuration**, as a `ConfigError`. `load` refusing the file: it is not there, its
   top level is not a mapping, it declares a key this project does not, it omits one the
   project requires, or a value for a declared key has a type this project does not read it
   as — `extraction.patch_size: big` is the shape, and the message names the key, the type
   found and the type read. And a `paths.*` whose *value* `Config.path` refused because it
-  is empty: `paths.patches` for this program's own output target, and `paths.manifest`
-  inside `load_registry`. The last paragraph of this docstring is about the four exceptions
-  that are still tracebacks. Every one of the eight is refused before a patch is written or
-  a file is removed.
+  is empty: `paths.patches` and `paths.results` for this program's own output targets, and
+  `paths.manifest` inside `load_registry`. The last paragraph of this docstring is about the
+  four exceptions that are still tracebacks. Every one of the nine is refused before a patch
+  is written or a file is removed.
+- **The summary's output target, as this program's own check on `paths.results` alone**, for
+  the reason every sibling entry point checks the directory it writes into:
+  `paths.results` is a hand-edited string in `configs/default.yaml` and this stage writes
+  `extraction_summary.json` into it, so a `paths.results: /` is how a study's extraction
+  record ends up somewhere this repository is not responsible for. **A run is refused for it
+  rather than extracted and not summarised**, which is a deliberate choice and the
+  alternative: every other stage in this pipeline would refuse the same configuration on the
+  same run, and a pipeline whose first stage succeeds and whose second does not is worse
+  than one that stops and says why.
 - **The dataset manifest**, as a `RegistryError`. A manifest that is not there, cannot be
   read, is not a mapping, holds a `specimens` that is not a list, holds an entry that is
   not a mapping or carries a key this project does not declare, is missing a required
@@ -134,15 +152,18 @@ and a line. `main`'s *return value* is the contract, and an exception never retu
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 
-from blobcount.config import ConfigError, load
+from blobcount.config import PROJECT_ROOT, ConfigError, load, resolved
 from blobcount.extract import (
     ExtractionStats,
     OutputPathError,
     extract_slide,
+    is_owned_path,
     patches_dir,
     prepare_output,
     write_index,
@@ -159,6 +180,70 @@ EXIT_BLANK_SLIDE = 1
 EXIT_REFUSED = 2
 
 _COLUMNS = ("slide_id", "patches_written", "tissue_rejected", "read_failures", "skipped_blank")
+
+# `results/extraction_summary.json`, named here so the writer and the tests that read it
+# back name the same file.
+_SUMMARY_NAME = "extraction_summary.json"
+
+# The keys this stage reads and that decide what a patch is: the resolution it plans for,
+# the window it reads and writes, and the two numbers the tissue filter is. **These five
+# and not the whole configuration**, because a reader of the artifact needs to know what
+# the accepted patches look like and thirty unrelated numbers would hide that. Each is
+# read through `resolved`, so it is recorded here exactly as a `cfg.get` literal records
+# it and the source scan in `tests/test_config.py` still sees a reader for every one.
+_CONFIG_KEYS = (
+    "extraction.target_mpp",
+    "extraction.patch_size",
+    "extraction.step_size",
+    "extraction.tissue_percentile",
+    "extraction.tissue_gray_max",
+)
+
+# The sentence the artifact carries about what it is, in the artifact rather than in this
+# file's docstring where a reader of the file alone would not see it. **It says what the
+# tissue filter is and is not**, because the filter is the one thing about an extracted
+# patch a reader is most likely to over-read: it is a single global mean-intensity cutoff
+# whose sensitivity is unmeasured, and an artifact that recorded `tissue_gray_max` beside a
+# per-slide accepted count invites the reader to assume the number separates tissue from
+# background.
+_PROVENANCE = (
+    "written by bin/extract_patches.py from the slides the dataset manifest names, so "
+    "every count and every patch in this document and in patches.csv is a function of "
+    "those slides, of `config` below, and of nothing else. `patches_written` is the number "
+    "of windows the filter accepted; `tissue_rejected` is the number it discarded on a "
+    "single global mean-intensity cutoff (`extraction.tissue_gray_max`), which has no "
+    "background rejection and whose sensitivity is unmeasured - this document records the "
+    "cutoff that was applied, not a measurement of how well it separates tissue from "
+    "background"
+)
+
+
+def _document(stats: Sequence[ExtractionStats], cfg, patches: int) -> dict:
+    """Return the JSON document this run writes beside `paths.results`.
+
+    **`slides` is the per-slide record and `patches_written` is its sum**, because the
+    sum is what the next stage's `patches.csv` has to agree with and a reader comparing
+    them should not have to add four numbers up. `n_slides` is the count of records, not
+    the count of rows in `patches.csv`, for the reason `bin/ablate_threshold.py::_n_slides`
+    gives: a slide that produced nothing has a record here and no row there, and a slide
+    with rows but no counted patches is the reverse.
+    """
+    return {
+        "provenance": _PROVENANCE,
+        "n_slides": len(stats),
+        "patches_written": patches,
+        "slides": [
+            {
+                "slide_id": item.slide_id,
+                "patches_written": item.patches_written,
+                "tissue_rejected": item.tissue_rejected,
+                "read_failures": item.read_failures,
+                "skipped_blank": item.skipped_blank,
+            }
+            for item in stats
+        ],
+        "config": resolved(cfg, _CONFIG_KEYS),
+    }
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -217,6 +302,37 @@ def _print_table(stats: Sequence[ExtractionStats]) -> None:
         print("  ".join(str(getattr(item, name)).ljust(widths[name]) for name in _COLUMNS))
 
 
+def _refuse_results_target(results_dir: Path) -> str | None:
+    """Return why this program will not write its summary under `results_dir`, or None.
+
+    **The same predicate every sibling entry point uses, and for the same reason.** This
+    stage wrote nothing outside `paths.patches` until it started writing
+    `extraction_summary.json`, and a new output is a new thing a hand-edited
+    `paths.results` can put somewhere this repository is not responsible for. The test is
+    `blobcount.extract.is_owned_path` rather than a string comparison here, so "is this
+    ours" has one implementation in this project rather than one per guard, and it follows
+    the configuration rather than the checkout alone — which is what lets a run write to a
+    `paths.*` the data move put outside the repository.
+
+    **Only the results directory is tested, and not the file.** `bin/train.py` writes
+    files directly into `paths.results` and tests that one path, because there is no second
+    directory to test; this one writes one file into it too, so the shape is `bin/train.py`'s
+    rather than `bin/evaluate.py`'s.
+    """
+    if results_dir.exists() and not results_dir.is_dir():
+        return (
+            f"refusing to write {results_dir}: it exists and is a file rather than a "
+            f"directory, so it is a typo in paths.results and not a previous run"
+        )
+    if not is_owned_path(results_dir):
+        return (
+            f"refusing to write {results_dir}: it is not strictly below the project root "
+            f"{PROJECT_ROOT} or the parent of a configured paths.* value, so it is not a "
+            f"directory this project owns"
+        )
+    return None
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Run extraction over the selected specimens and return the process exit code."""
     args = _parser().parse_args(argv)
@@ -225,6 +341,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         cfg = load()
         out_dir = patches_dir(cfg)
+        # Resolved inside the arm, for the reason the two lines above are: `load` types
+        # the key as the declared `str` and an empty value is a question `load` makes no
+        # claim about, so `Config.path` is what refuses it.
+        results_dir: Path = cfg.path("paths.results")
     except ConfigError as error:
         # Two refusals, one exception. `load` refusing the file — it is not there, its top
         # level is not a mapping, it declares a key this project does not, it omits one the
@@ -238,6 +358,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         # reported to any caller reading the exit code as "no tissue was found in any
         # specimen".
         print(f"extract_patches: {error}", file=sys.stderr)
+        return EXIT_REFUSED
+
+    refused = _refuse_results_target(results_dir)
+    if refused is not None:
+        # Before a slide is opened and before `--force` clears anything: a mistyped
+        # `paths.results` costs a message rather than a twenty-minute extraction. The
+        # extraction itself is left alone on purpose — refusing this program for a path it
+        # can write to but for one it cannot would be a different refusal than the one the
+        # guard is making.
+        print(f"extract_patches: {refused}", file=sys.stderr)
         return EXIT_REFUSED
 
     try:
@@ -314,6 +444,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             write_index(rows, out_dir / "patches.csv")
         return EXIT_REFUSED
     write_index(rows, out_dir / "patches.csv")
+
+    # **The summary is written after the index and not before it.** The index is the run's
+    # record of what exists on disk; a summary written first would report a run whose
+    # patches had not been written yet, and a run that raised between the two would leave
+    # a summary describing a patch tree no index describes. Both artifacts are written on
+    # the path that succeeded, so neither exists without the other.
+    results_dir.mkdir(parents=True, exist_ok=True)
+    (results_dir / _SUMMARY_NAME).write_text(
+        json.dumps(_document(stats, cfg, len(rows)), indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
 
     _print_table(stats)
     print(f"\n{len(rows)} patches written to {out_dir}")

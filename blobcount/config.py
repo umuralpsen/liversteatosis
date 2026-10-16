@@ -59,6 +59,7 @@ Declared interface, in `__all__` order:
     default_config() -> Config
     get_device(cfg: Config | None = None) -> str
     load(path: Path | None = None, overrides: Sequence[str] = ()) -> Config
+    resolved(cfg: Config, keys: Sequence[str]) -> dict[str, Any]
     set_seed(seed: int | None = None, cfg: Config | None = None) -> None
 """
 
@@ -83,6 +84,7 @@ __all__ = [
     "default_config",
     "get_device",
     "load",
+    "resolved",
     "set_seed",
 ]
 
@@ -568,6 +570,35 @@ def load(path: Path | None = None, overrides: Sequence[str] = ()) -> Config:
 
 
 _DEFAULT_CONFIG: Config | None = None
+
+
+def resolved(cfg: Config, keys: Sequence[str]) -> dict[str, Any]:
+    """Return `{key: value}` for `keys`, read through `cfg` so each is recorded as read.
+
+    **This is what lets an artifact say what it was computed from, and it is here rather
+    than in each `bin/` entry point for the reason the handoff reader is.** Spec §4 asks
+    every stage to write an artifact recording its inputs, resolved parameters and
+    outputs, and a stage cannot record the parameters it used without naming them; the
+    naming is a list of dotted keys, and a list is not a reader the source scan in
+    `tests/test_config.py` can see. Reading them through `cfg.get` here means each one is
+    marked read exactly as a literal `cfg.get("...")` would mark it, so an artifact that
+    records a key cannot make it look unreadable to the scan.
+
+    **The keys are the ones the stage used and not the whole configuration.** A stage
+    that reads four `extraction.*` keys has its results determined by those four; writing
+    all forty-five into every artifact would make a reader hunt through thirty irrelevant
+    numbers to find the one that changed the answer, and would go stale in a way that is
+    invisible — a key that is no longer read would still be reported as if it were. The
+    caller passing a key it did not read is therefore possible and is not checked here;
+    what is checked is that every key named is real, and an undeclared one raises out of
+    `_validate_key` through the same `get` that `load` would have refused.
+
+    **Order is the caller's order and the values are the resolved ones**, so an `int`
+    widened under a declared `float` is written as the number the run actually used rather
+    than as the integer the file spelled. This is a read and a value: it records, it does
+    not validate, and the caller states the list.
+    """
+    return {key: cfg.get(key) for key in keys}
 
 
 def default_config() -> Config:

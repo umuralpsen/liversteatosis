@@ -103,8 +103,43 @@ from typing import NamedTuple
 import numpy as np
 
 from blobcount.blobs import BlobParams, count_blobs, prepare_patch
-from blobcount.config import Config
+from blobcount.config import Config, resolved
 from blobcount.extract import INDEX_COLUMNS, prepare_output
+
+# The keys this stage reads and that decide what a patch's label is: the cut point, and
+# the seven blob-counter parameters behind it. **These eight and not the whole
+# configuration**, because every table in the README's ablation section is a function of
+# exactly these numbers and an artifact recording the cut point alone cannot be
+# re-examined — a reader who wants to know why specimen 4's mean blob count is 2.63 would
+# have the output of the rule and none of its inputs. Each is read through `resolved`, so
+# it is recorded here exactly as a `cfg.get` literal records it.
+_CONFIG_KEYS = (
+    "labeling.blob_threshold",
+    "blobs.area_um2_min",
+    "blobs.area_um2_max",
+    "blobs.circularity_min",
+    "blobs.gray_percentile",
+    "blobs.morph_kernel_size",
+    "blobs.morph_iterations",
+    "blobs.stain_normalization",
+)
+
+# The sentence the artifact carries about what its numbers are, in the artifact rather
+# than only in this module's docstring where a reader of the file alone would not see it.
+# **It names what the labels are and are not**, because that is the one fact about a
+# labels.csv a reader cannot work out for themselves and the one everything downstream
+# rests on: every label is a morphological blob count made at the configured threshold
+# under `config` below, and not a pathologist's grade, so the ceiling of every number
+# computed from this file is agreement with that counter.
+_PROVENANCE = (
+    "written by blobcount.labeling.label_patches from the patches named by the index it "
+    "read, so every label in labels.csv and every count in this document is a function of "
+    "those patches, of the per-slide gray threshold derived from their recorded "
+    "tissue_gray values, and of the resolved parameters under `config` — which is what the "
+    "run actually used and not the shipped file. Every label is a morphological blob count "
+    "made at that threshold and not a pathologist's grade, so the ceiling of anything "
+    "computed from this file is agreement with a hand-tuned counter"
+)
 
 __all__ = [
     "LabelingInputError",
@@ -597,11 +632,13 @@ def label_patches(index_path: Path, out_dir: Path, cfg: Config) -> LabelingStats
     (out / "labeling_stats.json").write_text(
         json.dumps(
             {
+                "provenance": _PROVENANCE,
                 "blob_threshold": stats.blob_threshold,
                 "per_slide": stats.per_slide,
                 "per_slide_mpp": stats.per_slide_mpp,
                 "per_slide_gray_threshold": stats.per_slide_gray_threshold,
                 "duplicates_removed": stats.duplicates_removed,
+                "config": resolved(cfg, _CONFIG_KEYS),
             },
             indent=2,
             ensure_ascii=False,

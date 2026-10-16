@@ -170,7 +170,7 @@ from pathlib import Path
 
 import torch
 
-from blobcount.config import PROJECT_ROOT, Config, ConfigError, load
+from blobcount.config import PROJECT_ROOT, Config, ConfigError, load, resolved
 from blobcount.evaluate import (
     EvaluationIntegrityError,
     Intervals,
@@ -190,6 +190,14 @@ EXIT_REFUSED = 2
 _EVALUATION_DIR = "evaluation"
 _METRICS_NAME = "medical_metrics.json"
 _PER_SPECIMEN_NAME = "per_specimen_metrics.csv"
+
+# The sidecar carrying the provenance and the resolved parameters for the CSV this stage
+# writes, which cannot carry them inline: a new column shifts every row a reader indexes by
+# position, and a leading `#` line becomes the *header* — `csv.DictReader` reads the first
+# line as the header whatever it holds, so a comment line would demote the real header to a
+# row and every lookup by name would return nothing. The JSON beside it carries both
+# inline and the sidecar names the file it covers.
+_PROVENANCE_SIDECAR = "per_specimen_metrics.provenance.json"
 
 # The rows of the printed table, in order. The AUC is last because it is the one that may be
 # `None`, and a reader who has read six rates before meeting a missing one is not surprised by
@@ -376,6 +384,30 @@ def _per_specimen(
     ]
 
 
+def _config(cfg: Config) -> dict:
+    """Return the resolved values of the keys this stage read, and nothing else.
+
+    `evaluation.*` is the pair a reader most needs, because the intervals in the document
+    are drawn at them and a reader checking a bound against its level otherwise has to
+    find the shipped file. `training.architecture` and `training.num_classes` describe the
+    backbone the checkpoint was loaded into and `project.seed` makes the resampling
+    reproducible. `gradcam.*` is not here: this program draws no figure.
+
+    Read through `blobcount.config.resolved` so each key is recorded as a reader the
+    source scan in `tests/test_config.py` can see.
+    """
+    return resolved(
+        cfg,
+        (
+            "project.seed",
+            "training.architecture",
+            "training.num_classes",
+            "evaluation.bootstrap_samples",
+            "evaluation.confidence_level",
+        ),
+    )
+
+
 def _document(
     metrics: Metrics,
     per_specimen: Sequence[tuple[str, Metrics]],
@@ -387,6 +419,7 @@ def _document(
     selection_cohort: str,
     checkpoint: Path,
     labels: Path,
+    cfg: Config,
 ) -> dict:
     """Return the JSON document this run writes.
 
@@ -455,6 +488,7 @@ def _document(
         "per_specimen": [
             {"specimen": specimen, **asdict(record)} for specimen, record in per_specimen
         ],
+        "config": _config(cfg),
     }
 
 
@@ -629,12 +663,26 @@ def main(argv: Sequence[str] | None = None) -> int:
     target.mkdir(parents=True, exist_ok=True)
     document = _document(
         pooled, per_specimen, intervals, requested, evaluated, absent,
-        trained, args.selection_cohort, args.checkpoint, args.labels,
+        trained, args.selection_cohort, args.checkpoint, args.labels, cfg,
     )
     (target / _METRICS_NAME).write_text(
         json.dumps(document, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
     _write_per_specimen(target / _PER_SPECIMEN_NAME, per_specimen)
+    # The sidecar, for the reason `_PROVENANCE_SIDECAR` gives, and it names the CSV it
+    # covers so a reader holding one file knows what the other is about.
+    (target / _PROVENANCE_SIDECAR).write_text(
+        json.dumps(
+            {
+                "artifacts": [_METRICS_NAME, _PER_SPECIMEN_NAME],
+                "provenance": _PROVENANCE,
+                "config": _config(cfg),
+            },
+            indent=2,
+            ensure_ascii=False,
+        ) + "\n",
+        encoding="utf-8",
+    )
 
     metrics = document["metrics"]
     _print_table(

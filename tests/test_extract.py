@@ -1,6 +1,7 @@
 import csv
 import dataclasses
 import importlib.util
+import json
 import shutil
 import sys
 from pathlib import Path
@@ -972,9 +973,16 @@ def _load_cli(monkeypatch):
     return module
 
 
-def _config_pointing_patches_at(target):
+def _config_pointing_patches_at(target, results=None):
     data = yaml.safe_load(DEFAULT_CONFIG_PATH.read_text(encoding="utf-8"))
     data["paths"]["patches"] = str(target)
+    if results is not None:
+        # `paths.results` defaults to `results` inside the checkout, and this suite runs
+        # the real command line. A stage that writes a summary beside `paths.results`
+        # would put it in the repository, so a test that runs that stage states a scratch
+        # results root the way the guard allows and the way a run outside the checkout
+        # would be configured.
+        data["paths"]["results"] = str(results)
     path = target.parent / "config.yaml"
     path.write_text(yaml.safe_dump(data), encoding="utf-8")
     return path
@@ -1001,11 +1009,73 @@ def _config_with(project_scratch, name, patches, edits=None):
 def cli(project_scratch, monkeypatch):
     module = _load_cli(monkeypatch)
     out = project_scratch / "patches"
-    monkeypatch.setattr("blobcount.config.DEFAULT_CONFIG_PATH", _config_pointing_patches_at(out))
+    monkeypatch.setattr(
+        "blobcount.config.DEFAULT_CONFIG_PATH",
+        _config_pointing_patches_at(out, results=project_scratch / "results"),
+    )
     monkeypatch.setattr(module, "load_registry", lambda *a, **k: [
         _specimen("2", "data/2.svs"), _specimen("3", "data/3.svs"),
     ])
     return module, out
+
+
+def test_cli_writes_an_extraction_summary_with_the_counts_and_the_parameters(
+    cli, project_scratch, monkeypatch
+):
+    # **This stage persisted nothing at all.** Its per-slide counts went to stdout and
+    # nowhere else, so the accepted-patch count had no denominator in any artifact: the
+    # next stage read `patches.csv` and a reader had nothing to compare its 6002 rows
+    # against except the terminal scrollback of a run somebody else did.
+    #
+    # The summary carries what was extracted, what each slide cost, and **the resolved
+    # values of the keys this stage read** — not the whole configuration, because the keys
+    # that decide what a patch looks like are five of the forty-five and a reader hunting
+    # through thirty irrelevant numbers finds neither the one that mattered nor the fact
+    # that it is the only one that did.
+    module, out = cli
+    _install_fake_slide(monkeypatch, FakeSlide())
+    assert module.main([]) == 0
+
+    document = json.loads(
+        (project_scratch / "results" / "extraction_summary.json").read_text(encoding="utf-8")
+    )
+    assert document["provenance"].startswith("written by bin/extract_patches.py")
+    # One record per slide the run extracted, with the four counts the stage itself keeps.
+    assert [record["slide_id"] for record in document["slides"]] == ["2", "3"]
+    for record in document["slides"]:
+        assert set(record) == {
+            "slide_id", "patches_written", "tissue_rejected", "read_failures", "skipped_blank",
+        }
+        assert record["patches_written"] == 9
+        assert record["skipped_blank"] is False
+    # The totals, so the accepted-patch count has a denominator beside it.
+    assert document["patches_written"] == 18
+    assert document["n_slides"] == 2
+    # And the parameters, named and resolved.
+    assert document["config"] == {
+        "extraction.target_mpp": 0.5,
+        "extraction.patch_size": 256,
+        "extraction.step_size": 256,
+        "extraction.tissue_percentile": 5,
+        "extraction.tissue_gray_max": 235,
+    }
+    # The tissue filter's sensitivity is unmeasured and this artifact does not pretend
+    # otherwise: the ceiling it applied is recorded, and nothing claims it separates
+    # tissue from background.
+    assert "not a measurement of" in document["provenance"] or "unmeasured" in (
+        document["provenance"]
+    )
+
+
+def test_cli_the_summary_is_written_next_to_the_results_it_describes(cli, project_scratch,
+                                                                     monkeypatch):
+    # It goes under `paths.results`, not beside `patches.csv`: it describes a run, and the
+    # patch tree is generated data outside the checkout that a fresh clone does not have.
+    module, _out = cli
+    _install_fake_slide(monkeypatch, FakeSlide())
+    assert module.main([]) == 0
+    assert not (module.patches_dir(load()) / "extraction_summary.json").exists()
+    assert (project_scratch / "results" / "extraction_summary.json").is_file()
 
 
 def test_cli_extracts_only_the_slides_it_is_asked_for(cli, monkeypatch, capsys):
