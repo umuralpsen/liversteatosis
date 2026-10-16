@@ -18,14 +18,22 @@ them and validates on the third, and a run that scores all three is the easiest 
 make with a command that takes one list and not two. So the training cohort is not inferred
 from the checkpoint's file name nor from the specimens left over in the handoff — a caller
 states it, and `blobcount.evaluate.assert_disjoint` refuses the run when the two lists share a
-name. **`--specimens` is not required, and its default is every specimen the handoff holds**,
-which is the cohort a study run means; the guard applies to the default exactly as it does to
-a named list. **A specimen the caller names and the handoff holds no row of is dropped from
-the run and named in the report**: `medical_metrics.json`'s `evaluated_specimens` is the cohort
-that was actually scored, its `requested_specimens` is what was asked for, and its
-`not_evaluated` names the difference, and the closing sentence says it too. The provenance
-record of a leave-one-specimen-out study has to be the cohort the numbers are about and not
-the one a command line hoped for.
+name. **`--selection-cohort` is required for the same class of reason and is a separate
+question from both**: it names the specimen whose validation F1 chose the epoch this
+checkpoint holds, it is written into `medical_metrics.json` as `checkpoint_selection_cohort`
+beside `train_specimens`, and **it is never inferred**. This program loads a `state_dict`; a
+checkpoint carries no specimen id, and the value is not recoverable from anything else it is
+given. The tempting inference — the checkpoint is `best_model_fold0.pth`, so fold 0 held out
+the first specimen — is a filename convention, and it is exactly the case (fold 0's own
+held-out specimen, which is also the cohort this program scores) where a reader would not
+notice it being wrong. **`--specimens` is not required, and its default is every specimen the
+handoff holds**, which is the cohort a study run means; the guard applies to the default
+exactly as it does to a named list. **A specimen the caller names and the handoff holds no row
+of is dropped from the run and named in the report**: `medical_metrics.json`'s
+`evaluated_specimens` is the cohort that was actually scored, its `requested_specimens` is what
+was asked for, and its `not_evaluated` names the difference, and the closing sentence says it
+too. The provenance record of a leave-one-specimen-out study has to be the cohort the numbers
+are about and not the one a command line hoped for.
 
 **The handoff is read by `blobcount.train.read_labels`, not here.** `bin/` is a directory of
 scripts loaded by path rather than a package, so a copy of the CSV contract in this file would
@@ -255,6 +263,16 @@ def _parser() -> argparse.ArgumentParser:
         "computed over a trained specimen is not a measurement and the caller states the "
         "training cohort rather than have it inferred.",
     )
+    parser.add_argument(
+        "--selection-cohort",
+        required=True,
+        metavar="ID",
+        help="the specimen whose validation F1 chose the epoch this checkpoint holds; "
+        "required and not inferred, because the program loads a state dict and cannot "
+        "know which specimen was held out when it was written. Recorded in "
+        "medical_metrics.json beside train_specimens, because the two answer different "
+        "questions and a reader needs both.",
+    )
     return parser
 
 
@@ -366,6 +384,7 @@ def _document(
     evaluated: Sequence[str],
     absent: Sequence[str],
     trained: Sequence[str],
+    selection_cohort: str,
     checkpoint: Path,
     labels: Path,
 ) -> dict:
@@ -385,12 +404,34 @@ def _document(
     by accident. `provenance` is the module's own sentence, so a reader of the file alone learns
     where its numbers came from without having read this module.
 
+    **`checkpoint_selection_cohort` is a fourth field and not an entry in any of the three**,
+    because it answers a different question: not what this run scored and not what the
+    model learned from, but *which specimen's validation F1 chose the epoch the checkpoint
+    holds*. In leave-one-specimen-out that is one specimen, and for fold 0 it is also the
+    cohort this program scores — so an artifact recording only `evaluated_specimens` reads
+    as though the epoch had never been chosen at all, which is the more optimistic of the
+    two readings. **It is written exactly as the caller stated it and is never derived**:
+    the program loads a `state_dict`, a checkpoint carries no specimen id, and the value
+    would have to be guessed. The guess would be right whenever the caller scored fold 0's
+    own held-out specimen, which is precisely the case where a reader would not notice.
+
     **The interval conditions come out of the `Intervals` record rather than off the
     configuration**, and that is the whole reason that record exists: reading either
     `evaluation.*` key here would be a second reader of it in a place the ledger scan cannot
     see, and the number in this block would then be a value nobody checked against the
     intervals printed beside it.
+
+    **`unit`, `n_units` and `degenerate` are here for the same reason the cohorts are.** The
+    block already said `n_samples: 2000` and `confidence_level: 0.95`, which read as a
+    95% interval and is not one whenever the cohort holds a single specimen: resampling one
+    unit returns that unit, so every bound equals the point estimate and the two numbers
+    beside it are decoration. The unit is `specimen` and stays `specimen` — patches from
+    one slide are not independent observations, and a patch-level interval on this cohort
+    would be a narrower and a wrong one. What was missing was not the unit but the
+    arithmetic of how many of them there are, and `degenerate` is that arithmetic written
+    down so a reader of the file learns it without the README.
     """
+    n_units = len(per_specimen)
     return {
         "provenance": _PROVENANCE,
         "labels": str(labels),
@@ -399,7 +440,11 @@ def _document(
         "evaluated_specimens": list(evaluated),
         "not_evaluated": list(absent),
         "train_specimens": list(trained),
+        "checkpoint_selection_cohort": selection_cohort,
         "bootstrap": {
+            "unit": "specimen",
+            "n_units": n_units,
+            "degenerate": n_units < 2,
             "n_samples": intervals.n_samples,
             "confidence_level": intervals.level,
             "intervals": {
@@ -584,7 +629,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     target.mkdir(parents=True, exist_ok=True)
     document = _document(
         pooled, per_specimen, intervals, requested, evaluated, absent,
-        trained, args.checkpoint, args.labels,
+        trained, args.selection_cohort, args.checkpoint, args.labels,
     )
     (target / _METRICS_NAME).write_text(
         json.dumps(document, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
@@ -622,9 +667,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"{intervals.n_samples} bootstrap resamples of the per-specimen values at the "
         f"configured level of {intervals.level:.0%}, so it is about the specimens rather "
         f"than about the patches. The specimens this model was trained on were "
-        f"{', '.join(trained)} and none of them is among the ones above. Where these "
-        f"numbers came from is the first key of {target / _METRICS_NAME}; per-specimen "
-        f"counts are beside it"
+        f"{', '.join(trained)} and none of them is among the ones above, and the epoch "
+        f"in this checkpoint was chosen on the validation F1 of specimen "
+        f"{args.selection_cohort}. Where these numbers came from is the first key of "
+        f"{target / _METRICS_NAME}; per-specimen counts are beside it"
     )
     return EXIT_OK
 

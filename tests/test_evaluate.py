@@ -976,12 +976,13 @@ def cli(project_scratch, tmp_path, monkeypatch):
     return module, index, results, checkpoint
 
 
-def _argv(index, checkpoint, specimens=("A", "B"), train=("Z",)):
+def _argv(index, checkpoint, specimens=("A", "B"), train=("Z",), selection="A"):
     argv = ["--labels", str(index), "--checkpoint", str(checkpoint)]
     for specimen in specimens:
         argv += ["--specimens", specimen]
     for specimen in train:
         argv += ["--train-specimens", specimen]
+    argv += ["--selection-cohort", selection]
     return argv
 
 
@@ -1095,12 +1096,93 @@ def test_the_specimens_named_on_the_command_line_are_the_ones_scored(cli):
     assert document["evaluated_specimens"] == ["B"]
 
 
+def test_the_document_names_the_specimen_whose_validation_f1_chose_the_epoch(cli):
+    # **`checkpoint_selection_cohort`, beside `train_specimens` and not folded into it.**
+    # The two answer different questions and a reader needs both: *what the model saw*
+    # (`train_specimens`) and *what chose the epoch it is being scored at*
+    # (`checkpoint_selection_cohort`). In leave-one-specimen-out the second is a single
+    # specimen — the one the fold held out — and for fold 0 that is also the cohort this
+    # evaluation scores, which is exactly why an artifact that records only one of the
+    # two reads as though the checkpoint had never been selected at all.
+    module, index, results, checkpoint = cli
+    assert module.main(_argv(index, checkpoint, selection="A")) == 0
+    document = _document(results)
+    assert document["checkpoint_selection_cohort"] == "A"
+    assert document["train_specimens"] == ["Z"]
+
+
+def test_the_selection_cohort_is_what_the_caller_stated_and_not_what_the_program_guessed(cli):
+    # **Stated, never inferred.** This program loads a checkpoint; it has no record of
+    # which specimen's validation F1 chose its epoch, and the two facts are not
+    # recoverable from anything it is given — a checkpoint is a state dict and a specimen
+    # id is not in it. So the argument is the only source, and this row is the proof that
+    # it is used as the source: the caller states `B`, which is a different specimen from
+    # the one the fixture's default states, and the artifact records `B` verbatim rather
+    # than deriving anything from `--specimens`.
+    module, index, results, checkpoint = cli
+    assert module.main(_argv(index, checkpoint, specimens=("A",), selection="B")) == 0
+    document = _document(results)
+    assert document["evaluated_specimens"] == ["A"]
+    assert document["checkpoint_selection_cohort"] == "B"
+
+
+def test_the_selection_cohort_may_not_be_omitted(cli):
+    # Required, for the reason `--train-specimens` is: an artifact that does not record
+    # which specimen chose the epoch is an artifact whose headline figure cannot be read
+    # for what it is, and the cheapest way to guarantee it is not omitted is to make the
+    # parser refuse a run that leaves it out.
+    module, index, results, checkpoint = cli
+    full = _argv(index, checkpoint)
+    cut = full.index("--selection-cohort")
+    argv = full[:cut] + full[cut + 2:]
+    with pytest.raises(SystemExit) as refused:
+        module.main(argv)
+    assert refused.value.code == 2
+    assert not (results / "evaluation" / "medical_metrics.json").exists()
+
+
+def test_the_bootstrap_block_says_what_it_resamples_and_whether_it_can_move(cli):
+    # **The artifact said `confidence_level: 0.95` and `n_samples: 2000` while every bound
+    # equalled its point estimate, and said nothing about why.** A reader of the file
+    # alone had a 95% interval that carried no information. The unit and the count are
+    # what make the degeneracy visible: the resampling is over *specimens*, which is the
+    # correct unit — patches from one slide are not independent observations (spec §3.4)
+    # — and two specimens is enough for a resample to move, one is not.
+    module, index, results, checkpoint = cli
+    assert module.main(_argv(index, checkpoint)) == 0
+    bootstrap = _document(results)["bootstrap"]
+    assert bootstrap["unit"] == "specimen"
+    assert bootstrap["n_units"] == 2
+    assert bootstrap["degenerate"] is False
+    # And it is the *scored* specimens, not the trained ones, because those are what the
+    # resampling is over.
+    assert bootstrap["n_units"] == len(_document(results)["per_specimen"])
+
+
+def test_the_bootstrap_block_says_so_when_there_is_only_one_specimen_to_resample(cli):
+    # The shipped case, and the one the README's paragraph is about. One specimen means
+    # every bootstrap resample returns that specimen and every bound equals the point
+    # estimate; the flag is what lets a reader of the artifact find that out without
+    # reading the README.
+    module, index, results, checkpoint = cli
+    assert module.main(_argv(index, checkpoint, specimens=("A",))) == 0
+    bootstrap = _document(results)["bootstrap"]
+    assert bootstrap["unit"] == "specimen"
+    assert bootstrap["n_units"] == 1
+    assert bootstrap["degenerate"] is True
+    # And the degeneracy is a fact about the data, not a rounding artefact: with one unit
+    # every interval collapses onto the point estimate exactly.
+    for name, bounds in bootstrap["intervals"].items():
+        assert bounds[0] == bounds[1], name
+
+
 def test_a_run_that_names_no_specimen_scores_every_specimen_in_the_handoff(cli):
     # `--specimens` is the cohort to score and is not required: the default is every specimen
     # the handoff holds, which is the cohort a study run means. The integrity guard applies to
     # it either way, so the default cannot score a trained specimen.
     module, index, results, checkpoint = cli
-    argv = ["--labels", str(index), "--checkpoint", str(checkpoint), "--train-specimens", "Z"]
+    argv = ["--labels", str(index), "--checkpoint", str(checkpoint),
+            "--train-specimens", "Z", "--selection-cohort", "A"]
     assert module.main(argv) == 0
     document = _document(results)
     assert document["evaluated_specimens"] == ["A", "B"]

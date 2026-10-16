@@ -445,6 +445,56 @@ def test_a_run_writes_nothing_under_the_torch_home(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+def test_a_run_records_how_many_epochs_each_fold_considered_and_which_it_selected(tmp_path):
+    # **The disclosure the headline number needs, as an artifact rather than as prose.**
+    # With three specimens the held-out specimen IS the validation set, so a fold's
+    # reported figure is the best of up to `training.epochs` attempts on the very patches
+    # it is reported over. That is the plan's own "selected epoch" constraint — with no
+    # third split there is nothing better available — but its consequence has to be
+    # checkable, and a paragraph of prose is not checkable.
+    #
+    # So the run records, per fold: how many epochs it considered, which one it selected,
+    # what the selected epoch's F1 was, and what the mean over the epochs it considered
+    # was. **The last two together are the claim** — `selected_val_f1 >= mean_val_f1` is
+    # the optimism, measured rather than asserted, and a reader can recompute both from
+    # `training_log_fold<n>.csv`.
+    cfg = _cfg()
+    paths, labels, specimens = _cohort(
+        tmp_path / "patches", [("A", 1), ("A", 1), ("B", 0), ("B", 0)]
+    )
+    out = tmp_path / "out"
+    summary = run_cross_validation(paths, labels, specimens, cfg, out)
+
+    selection = summary["epoch_selection"]
+    assert [entry["fold"] for entry in selection] == [0, 1]
+    for entry in selection:
+        log = _read_csv(out / f"training_log_fold{entry['fold']}.csv")
+        considered = [float(row["val_f1"]) for row in log]
+        # Considered is the log, verbatim: every epoch the fold ran, and no other.
+        assert entry["epochs_considered"] == len(considered)
+        assert entry["held_out"] in specimens
+        assert entry["selected_epoch"] == int(
+            next(row["epoch"] for row in log if float(row["val_f1"]) == max(considered))
+        )
+        assert entry["selected_val_f1"] == pytest.approx(max(considered))
+        assert entry["mean_val_f1"] == pytest.approx(float(np.mean(considered)))
+        # The optimism, as an inequality rather than as a claim about a number.
+        assert entry["selected_val_f1"] >= entry["mean_val_f1"]
+        # What the selection is, stated in the artifact beside the numbers it chose.
+        assert entry["selected_on"] == (
+            "validation F1 on the held-out specimen, which is also the specimen the "
+            "figure is reported over"
+        )
+    # And the two figures beside each other, because the README quotes both.
+    assert summary["mean_f1"] == pytest.approx(
+        float(np.mean([entry["selected_val_f1"] for entry in selection]))
+    )
+    assert summary["mean_epoch_val_f1"] == pytest.approx(
+        float(np.mean([entry["mean_val_f1"] for entry in selection]))
+    )
+    assert summary["mean_epoch_val_f1"] <= summary["mean_f1"]
+
+
 def test_a_run_writes_every_epoch_to_the_log_and_only_the_selected_to_the_summary(tmp_path):
     cfg = _cfg()
     paths, labels, specimens = _cohort(tmp_path / "patches", [("A", 1), ("A", 1), ("B", 0), ("B", 0)])

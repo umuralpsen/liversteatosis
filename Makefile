@@ -92,9 +92,13 @@ train:
 
 # Scores the fold-0 checkpoint over the specimen that fold held out.
 # --train-specimens states the cohort the checkpoint was fitted on, because a
-# number computed over a trained specimen is not a measurement.
+# number computed over a trained specimen is not a measurement, and
+# --selection-cohort states the specimen whose validation F1 chose the epoch
+# this checkpoint holds, because the program loads a state dict and cannot know.
+# For fold 0 those are the same specimen, and the program is told so rather than
+# left to work it out from the file name.
 evaluate:
-	$(RUN) bin/evaluate.py --labels $(HANDOFF) --checkpoint $(CHECKPOINT) --specimens $(HELD_OUT) $(TRAIN_SPECIMENS)
+	$(RUN) bin/evaluate.py --labels $(HANDOFF) --checkpoint $(CHECKPOINT) --specimens $(HELD_OUT) $(TRAIN_SPECIMENS) --selection-cohort $(HELD_OUT)
 
 # Inference over the patches the labeling rule marked steatotic, with the same
 # fold-0 checkpoint; writes $(RESULTS)/predictions.csv.

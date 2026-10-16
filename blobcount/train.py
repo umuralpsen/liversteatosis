@@ -156,6 +156,11 @@ Declared interface, in `__all__` order:
         cfg: Config,
         out_dir: Path,
     ) -> tuple[EpochRecord, list[EpochRecord]]
+
+`epoch_selection` is spelled out after the interface block rather than inside it because
+it is the one function here whose output is not a measurement but a *description of how a
+measurement was arrived at*, and that is the thing `results/training_summary.json` was
+missing.
 """
 
 from __future__ import annotations
@@ -259,6 +264,64 @@ class EpochRecord:
     fn: int
     tn: int
     lr: float
+
+
+# What a fold's selection is *of*, in words, written into the artifact beside the numbers
+# it chose. **The sentence is here and not only in `README.md` because the sentence is the
+# finding**: with three specimens the held-out specimen is the validation set, so the
+# reported figure is the best of up to `training.epochs` attempts on the very patches it
+# is reported over. `select_epoch` is right and this is the plan's own "selected epoch"
+# constraint — there is no third split to select on — but a reader of
+# `training_summary.json` alone would otherwise see a chosen epoch and no statement of
+# what it was chosen against.
+_SELECTED_ON = (
+    "validation F1 on the held-out specimen, which is also the specimen the figure is "
+    "reported over"
+)
+
+
+def epoch_selection(fold: Fold, records: Sequence[EpochRecord]) -> dict:
+    """Return what one fold chose and what it chose it out of, as a JSON-ready dict.
+
+    **This is the disclosure that makes the headline number checkable rather than
+    merely stated.** `select_epoch` returns the winning record and the caller reports it;
+    what it does not carry is how many records were rejected to find it, and without that
+    a reader cannot tell a fold that got lucky at epoch 5 from one that got lucky at
+    epoch 1. Five keys:
+
+    - `fold` and `held_out`, so the entry means the same specimen the log and the fold
+      summary do, and `sortable` ordering is the same as `selected_epochs` beside it.
+    - `epochs_considered`, the number of epochs the fold ran — the size of the maximum the
+      reported figure is taken over. **It is the count and not `training.epochs`**, because
+      early stopping is what makes them differ, and the number a reader needs is the one
+      the maximum was actually taken over.
+    - `selected_epoch`, the epoch that won, by `select_epoch`'s rule.
+    - `selected_val_f1` and `mean_val_f1`, the maximum and the mean over the epochs
+      considered. **Their difference is the optimism, measured**: `select_epoch` takes a
+      maximum by construction, so `selected_val_f1 >= mean_val_f1` always, and a reader who
+      has only the mean has the number the headline would take if the epoch were chosen
+      before the data rather than after it.
+
+    A sequence with no record in it is refused for the reason `select_epoch` gives: there
+    is no selection to describe, and a dict of `None`s is a record of nothing.
+    """
+    if not records:
+        raise ValueError(
+            "epoch_selection was given a sequence with no epoch in it: there is no "
+            "selection to describe over nothing. A fold that ran no epoch wrote no "
+            "checkpoint and has no selected record, which select_epoch refuses and this "
+            "refuses for the same reason"
+        )
+    selected = select_epoch(records)
+    return {
+        "fold": fold.fold,
+        "held_out": fold.held_out,
+        "epochs_considered": len(records),
+        "selected_epoch": selected.epoch,
+        "selected_val_f1": float(selected.val_f1),
+        "mean_val_f1": float(np.mean([float(record.val_f1) for record in records])),
+        "selected_on": _SELECTED_ON,
+    }
 
 
 def select_epoch(records: Sequence[EpochRecord]) -> EpochRecord:
@@ -704,6 +767,16 @@ def run_cross_validation(
     a reader can find the row the summary reported and see the epochs it was chosen over.
     `n` is `Fold.fold` and starts at zero.
 
+    **The returned dict carries three keys beyond `summarise_folds`'s means, and they are
+    the disclosure of what "the selected epoch" costs.** `summarise_folds` describes the
+    records it was handed; it cannot say how many records each of those was chosen out of,
+    because it is handed the winners. So this function adds `epoch_selection` — one entry
+    per fold, from `epoch_selection()` — beside `mean_f1` and `mean_epoch_val_f1` and
+    `mean_epoch_val_f1_std`, which is the cohort mean of the per-fold epoch means. A reader
+    comparing those two means against each other has the size of the optimism in the
+    headline, measured rather than asserted, and can recompute both from the logs beside
+    them.
+
     **Each fold's log is written as that fold finishes and the summary last**, so a run
     that raises half way leaves the log of every fold it completed rather than none of them
     — the same order `bin/ablate_threshold.py` creates its directory after the counts it
@@ -722,9 +795,11 @@ def run_cross_validation(
     out_dir = Path(cfg.path("paths.results")) if out_dir is None else Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     selected: list[EpochRecord] = []
+    selections: list[dict] = []
     for fold in folds:
         best, records = train_fold(fold, paths, labels, cfg, out_dir)
         selected.append(best)
+        selections.append(epoch_selection(fold, records))
         _write_rows(
             out_dir / f"training_log_fold{fold.fold}.csv",
             [_csv_row(fold, record) for record in records],
@@ -733,4 +808,17 @@ def run_cross_validation(
         out_dir / "fold_summary.csv",
         [_csv_row(fold, record) for fold, record in zip(folds, selected, strict=True)],
     )
-    return summarise_folds(selected)
+    summary = summarise_folds(selected)
+    # **Two keys beyond the means, and they are the same disclosure at two levels.** The
+    # per-fold list says what each fold chose out of how many attempts; `mean_epoch_val_f1`
+    # says what the cohort's headline would be if the epoch were chosen before the data
+    # rather than after it, which is the number a reader comparing this against another
+    # study needs and the one no means table carries.
+    summary["epoch_selection"] = selections
+    summary["mean_epoch_val_f1"] = float(
+        np.mean([entry["mean_val_f1"] for entry in selections])
+    )
+    summary["mean_epoch_val_f1_std"] = float(
+        np.std([entry["mean_val_f1"] for entry in selections])
+    )
+    return summary
