@@ -52,9 +52,11 @@ above wearing a specimen-level name, returned as a valid result. `bytes` is wors
 than different: iterating `b"456"` yields the integers 52, 53 and 54, so `held_out` would
 carry an `int` on a dataclass annotated `str`. `str`, `bytes`, `bytearray`,
 `memoryview` and `array.array` are excluded by name, and those five are **every
-sequence a caller already holds**: `str` the only sequence of characters, the other
-four the byte buffers, three of them builtins and `array.array` one `import array`
-away. The set was four until the paragraph below made it five.
+sequence a caller already holds**: `str` the only sequence of characters; `bytes`,
+    bytearray` and `memoryview` the three byte buffers, each a sequence of the integers
+    its bytes spell, and all three builtins; and `array.array` a typed buffer, which is a
+    sequence of one or of the other depending on its typecode and of both never — one
+    `import array` away. The set was four until the paragraph below made it five.
 
 **That set is closed over the standard library, and the set itself moved out of this
 module on 2026-10-16.** `array.array` used to be a fifth shape this function accepted:
@@ -154,10 +156,10 @@ class SplitError(Exception):
     """Raised when specimen ids cannot be split into leave-one-specimen-out folds.
 
     Two shapes reach it: an argument that is not a column of specimen ids at all — a
-    `str`, `bytes`, `bytearray` or `memoryview`, which is a sequence of characters or of
-    bytes and splits into one fold per element — and a column carrying fewer than two
-    distinct specimens, where holding out the only specimen present would train on
-    nothing.
+    `str`, `bytes`, `bytearray`, `memoryview` or `array.array`, whose elements are a
+    buffer's atoms and which splits into one fold per element — and a column carrying
+    fewer than two distinct specimens, where holding out the only specimen present would
+    train on nothing.
     """
 
 
@@ -221,7 +223,7 @@ def loso_folds(specimen_of_row: Sequence[str]) -> list[Fold]:
     same numbers. Both index arrays are `np.ndarray` of `int64`, ascending, and disjoint,
     and their lengths sum to the number of rows supplied.
 
-    **An argument that is a sequence of characters or of bytes is refused, before a single
+    **An argument whose elements are a buffer's atoms is refused, before a single
     row is counted.** All five are a `collections.abc.Sequence` at runtime — measured `True`
     for each — and the `Sequence[str]` annotation on this signature states what a caller is
     meant to pass rather than what arrives, so `loso_folds("456")` would split into three
